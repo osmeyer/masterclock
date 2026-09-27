@@ -1,0 +1,57 @@
+# Every hook runs over the whole project on every commit, whichever files
+# changed. Apart from the lock check, which runs "uv lock --check" itself, every
+# hook runs its tool through "uv run --frozen", so tool versions come from
+# uv.lock and nothing else. Every hook is verbose, so each tool's own report of
+# what it examined appears even when the hook passes.
+repos:
+  - repo: local
+    hooks:
+      - id: uv-lock-check
+        name: uv.lock matches pyproject.toml
+        entry: uv lock --check
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --frozen ruff format
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --frozen ruff check --fix
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: mypy
+        name: mypy (strict)
+        entry: uv run --frozen mypy
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: bandit
+        name: bandit, high severity
+        entry: uv run --frozen bandit -r -lll src
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: radon
+        name: complexity of every block (listing for xenon)
+        entry: uv run --frozen radon cc --no-assert --total-average src
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: xenon
+        name: xenon, block B, module A, average A
+        entry: uv run --frozen xenon --no-assert --max-absolute B --max-modules A --max-average A src
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true

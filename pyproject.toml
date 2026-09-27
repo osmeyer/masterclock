@@ -71,3 +71,8 @@ source = ["src", "scripts", "tests"]
 
 [tool.coverage.report]
 show_missing = true
+
+[tool.mutmut]
+source_paths = ["src"]
+also_copy = ["scripts/"]
+pytest_add_cli_args = ["--no-cov"]

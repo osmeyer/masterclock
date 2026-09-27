@@ -49,3 +49,6 @@ data/
 .idea/
 .vscode/
 *.swp
+
+# A scratch directory at the project root. Nothing in it is committed.
+/tmp/

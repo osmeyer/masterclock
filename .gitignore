@@ -1,0 +1,50 @@
+# Anything Python generates from the source, rather than the source itself.
+__pycache__/
+*.py[cod]
+
+# The environment is built from the lock file on each machine, never copied.
+# uv.lock and .python-version are committed deliberately: they are what make
+# two machines produce the same environment.
+.venv/
+
+# Tool caches. Every one of these can be deleted without losing anything.
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# The mutation run's copy of the source, rewritten with every mutant in it,
+# and its results. Remade from the source by the next run.
+mutants/
+
+# Build output. Deployment is the source tree, so nothing here is ever needed.
+build/
+dist/
+*.egg-info/
+
+# Operational configuration describes one deployment and stays out of the
+# repository. Only the .example files, which carry invented values, are kept.
+# etc is the project's configuration directory - the one place configuration
+# lives - so this covers all of it rather than being the first of a list.
+etc/*
+!etc/*.example
+
+# Documents are read as Markdown. A PDF is generated on demand and thrown
+# away, so no rendered copy can drift from the document it came from.
+*.pdf
+
+# Logs are written to a directory at the project root. They are a record of
+# one machine's runs, not part of the project.
+/logs/
+*.log
+
+# Measurement data belongs outside the repository, whatever path it is
+# reached by. This pattern is a guard, not a location.
+data/
+
+# Editor state belongs to whoever is editing, not to the project.
+.idea/
+.vscode/
+*.swp

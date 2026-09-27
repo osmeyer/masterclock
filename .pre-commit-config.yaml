@@ -100,3 +100,10 @@ repos:
         pass_filenames: false
         always_run: true
         verbose: true
+      - id: check-test-modules-alone
+        name: every test module passes on its own
+        entry: uv run --frozen python scripts/check_test_modules_alone.py tests
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true

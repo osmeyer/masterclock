@@ -9,8 +9,9 @@ import sys
 from pathlib import Path
 from typing import Final
 
-import check_docstrings
 import pytest
+
+import check_docstrings
 
 COMPLETE: Final = '''"""A module."""
 

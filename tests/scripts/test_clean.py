@@ -10,8 +10,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Final
 
-import clean
 import pytest
+
+import clean
 
 GENERATED: Final = (
     "src/pkg/__pycache__/m.cpython-314.pyc",

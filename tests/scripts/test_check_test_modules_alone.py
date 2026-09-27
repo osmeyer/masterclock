@@ -8,8 +8,9 @@ import sys
 from pathlib import Path
 from typing import Final
 
-import check_test_modules_alone
 import pytest
+
+import check_test_modules_alone
 
 PASSING: Final = '"""Passes."""\n\n\ndef test_passes() -> None:\n    """Pass."""\n'
 SETS: Final = (

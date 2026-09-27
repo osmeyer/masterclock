@@ -36,21 +36,66 @@ repos:
         verbose: true
       - id: bandit
         name: bandit, high severity
-        entry: uv run --frozen bandit -r -lll src
+        entry: uv run --frozen bandit -r -lll scripts src
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: bandit-tests
+        name: bandit, high severity, tests (assert allowed)
+        entry: uv run --frozen bandit -r -lll -s B101 tests
         language: system
         pass_filenames: false
         always_run: true
         verbose: true
       - id: radon
         name: complexity of every block (listing for xenon)
-        entry: uv run --frozen radon cc --no-assert --total-average src
+        entry: uv run --frozen radon cc --no-assert --total-average scripts src
         language: system
         pass_filenames: false
         always_run: true
         verbose: true
       - id: xenon
         name: xenon, block B, module A, average A
-        entry: uv run --frozen xenon --no-assert --max-absolute B --max-modules A --max-average A src
+        entry: uv run --frozen xenon --no-assert --max-absolute B --max-modules A --max-average A scripts src
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: check-docstrings
+        name: docstrings on every definition
+        entry: uv run --frozen python scripts/check_docstrings.py scripts src tests
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: pytest
+        name: pytest with doctests and coverage
+        entry: uv run --frozen pytest
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      # The three coverage hooks report on the data the pytest hook above has
+      # just written, so they must come after it. Run on their own, they report
+      # on whatever pytest run came last.
+      - id: coverage-src
+        name: coverage of src (100%)
+        entry: uv run --frozen coverage report --include=src/* --fail-under=100
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: coverage-scripts
+        name: coverage of scripts (100%)
+        entry: uv run --frozen coverage report --include=scripts/* --fail-under=100
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true
+      - id: coverage-tests
+        name: coverage of tests (100%)
+        entry: uv run --frozen coverage report --include=tests/* --fail-under=100
         language: system
         pass_filenames: false
         always_run: true

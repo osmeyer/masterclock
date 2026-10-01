@@ -5,6 +5,7 @@ the options that accept it and is refused like any other text on those that
 do not; an MJD is a finite number above zero; a count is a whole number
 above zero; a path is absolute; the level names match the levels the log
 knows, most to least verbose; an option left out is told apart from None;
+an option is accepted only under its full name and only once in a command;
 and a command-line error prints the full help and the error on standard
 error and exits with status 2.
 """
@@ -148,6 +149,22 @@ def test_a_path_that_is_not_absolute_is_refused(text: str) -> None:
     assert refusal(cli.optional_path, text) == f"path must be absolute: {text!r}"
 
 
+@pytest.mark.parametrize("text", ["/", "/data/run.log", "/None"])
+def test_an_absolute_path_is_read_as_its_path_where_none_is_not_accepted(
+    text: str,
+) -> None:
+    """Read an absolute path as itself."""
+    assert cli.absolute_path(text) == Path(text)
+
+
+@pytest.mark.parametrize("text", ["", ".", "None", "run.log", "../x", "~/x"])
+def test_a_relative_path_or_none_is_refused_where_none_is_not_accepted(
+    text: str,
+) -> None:
+    """Refuse a relative path, the literal None included."""
+    assert refusal(cli.absolute_path, text) == f"path must be absolute: {text!r}"
+
+
 def test_none_is_no_path() -> None:
     """Read None as no path."""
     assert cli.optional_path("None") is None
@@ -209,6 +226,15 @@ def test_options_are_read_as_given_none_or_left_out() -> None:
             "argument --log-file: path must be absolute: 'run.log'",
         ),
         (["--colour"], "unrecognized arguments: --colour"),
+        (["--sta", "60000.5"], "unrecognized arguments: --sta 60000.5"),
+        (
+            ["--count", "2", "--count", "2"],
+            "argument --count: given more than once",
+        ),
+        (
+            ["--log-file", "None", "--log-file", "None"],
+            "argument --log-file: given more than once",
+        ),
     ],
 )
 @pytest.mark.usefixtures("uncoloured")
@@ -246,3 +272,40 @@ def test_a_subcommand_parser_prints_its_own_full_help(
         f"{run.format_help()}\nprog run: error: argument --count:"
         " value must be a positive integer: '0'\n"
     )
+
+
+def test_abbreviations_stay_refused_when_asked_for() -> None:
+    """Refuse an abbreviation even when the parser is made to allow them."""
+    made = cli.HelpfulArgumentParser(prog="prog", allow_abbrev=True)
+    made.add_argument("--count", type=cli.positive_int)
+    with pytest.raises(SystemExit):
+        made.parse_args(["--cou", "2"])
+
+
+def test_each_parse_may_give_an_option_once() -> None:
+    """Let a second parse with the same parser give the option again."""
+    made = parser()
+    # The first result is kept, so a parser that remembered the option for
+    # as long as that result lives would refuse the second parse.
+    first = made.parse_args(["--count", "2"])
+    second = made.parse_args(["--count", "3"])
+    assert (first.count, second.count) == (2, 3)
+
+
+def test_an_option_naming_its_own_action_may_be_repeated() -> None:
+    """Leave an option that names another action, such as append, to it."""
+    made = cli.HelpfulArgumentParser(prog="prog")
+    made.add_argument("--tag", action="append")
+    made.add_argument("--quiet", action="store_true")
+    parsed = made.parse_args(["--tag", "a", "--tag", "b", "--quiet"])
+    assert parsed.tag == ["a", "b"]
+    assert parsed.quiet is True
+
+
+def test_a_subcommand_option_is_also_given_once() -> None:
+    """Refuse a repeated option in a subcommand too."""
+    made = cli.HelpfulArgumentParser(prog="prog")
+    run = made.add_subparsers(dest="command").add_parser("run")
+    run.add_argument("--count", type=cli.positive_int)
+    with pytest.raises(SystemExit):
+        made.parse_args(["run", "--count", "2", "--count", "2"])

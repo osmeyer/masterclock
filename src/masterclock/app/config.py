@@ -164,6 +164,10 @@ def _absolute(path: Path) -> Path:
     return path
 
 
+type AbsolutePath = Annotated[Path, AfterValidator(_absolute)]
+"""A path a model refuses unless it is absolute, as the command line does."""
+
+
 class LoggingConfig(BaseModel):
     """Validated logging settings.
 
@@ -183,7 +187,7 @@ class LoggingConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    log_file: Annotated[Path, AfterValidator(_absolute)] | None
+    log_file: AbsolutePath | None
     log_level: LogLevelName | None
     backup_count: Annotated[PositiveInt | None, as_on_command_line(positive_int)]
 

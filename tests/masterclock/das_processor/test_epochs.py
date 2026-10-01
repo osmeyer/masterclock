@@ -1,7 +1,8 @@
 """Tests for src/masterclock/das_processor/epochs.py.
 
-The rules covered: ten-minute rounding lands on a mark in UTC, down or
-strictly up, whatever the zone of the datetime or the local time; a mark is
+The rules covered: an epoch lasts ten minutes; ten-minute rounding lands on
+a mark in UTC, down or strictly up, whatever the zone of the datetime or the
+local time; a mark is
 rendered in UTC as fixed text, with its MJD rounded and padded; and every
 function is cached.
 """
@@ -150,6 +151,13 @@ def test_ceil_gives_the_first_mark_strictly_after(moment: datetime) -> None:
     assert is_mark(mark)
     assert moment < mark <= moment + timedelta(minutes=10)
     assert mark == epochs.floor_to_ten_minutes(moment) + timedelta(minutes=10)
+
+
+def test_an_epoch_lasts_from_one_mark_to_the_next() -> None:
+    """Make EPOCH_LENGTH the step between two ten-minute marks."""
+    mark = datetime(2031, 4, 9, 17, 10, tzinfo=UTC)
+    assert timedelta(minutes=10) == epochs.EPOCH_LENGTH
+    assert epochs.ceil_to_ten_minutes(mark) == mark + epochs.EPOCH_LENGTH
 
 
 def test_ceil_past_the_last_datetime_is_refused() -> None:

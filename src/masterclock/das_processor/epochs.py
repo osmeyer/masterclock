@@ -18,6 +18,9 @@ if TYPE_CHECKING:
 
     from masterclock.app.timeutil import DatetimeLike
 
+EPOCH_LENGTH: Final[timedelta] = timedelta(minutes=10)
+"""How long one epoch lasts: from one ten-minute mark to the next."""
+
 _CACHE_SIZE: Final[int] = 1024
 """Bound of each function's LRU cache, in distinct arguments remembered."""
 
@@ -95,7 +98,7 @@ def ceil_to_ten_minutes(value: DatetimeLike) -> datetime:
     >>> ceil_to_ten_minutes(datetime(2026, 7, 12, 4, 40, tzinfo=UTC))
     datetime.datetime(2026, 7, 12, 4, 50, tzinfo=datetime.timezone.utc)
     """
-    return floor_to_ten_minutes(value) + timedelta(minutes=10)
+    return floor_to_ten_minutes(value) + EPOCH_LENGTH
 
 
 @lru_cache(maxsize=_CACHE_SIZE)

@@ -8,6 +8,9 @@ cannot be read, a line that does not parse, a value in another form than
 plain decimals or not finite, an MJD outside the data days, a line earlier
 than the one before it, and a last line with no newline each raise
 DataFileError.
+
+An event lies from the first data day's start to the last day's end, and a
+refusal is word for word and logged as raised.
 """
 
 from datetime import UTC, datetime
@@ -129,3 +132,33 @@ def test_a_name_that_is_not_a_reference_s_is_refused(tmp_path: Path) -> None:
     """Raise DataFileError for the steering of a clock that is no reference."""
     with pytest.raises(DataFileError, match="nav23"):
         read_steering(tmp_path, "nav23", AFTER, THROUGH)
+
+
+@pytest.mark.parametrize(
+    ("mjd", "taken"),
+    [("50000.000000", True), ("100000.000000", False), ("99999.500000", True)],
+)
+def test_an_event_lies_on_a_data_day(tmp_path: Path, mjd: str, taken: bool) -> None:
+    """Take an event from the first data day's start to the last day's end."""
+    directory = steering_dir(tmp_path, f"{mjd} 1.5 0.0\n")
+    after = datetime(1990, 1, 1, tzinfo=UTC)
+    through = datetime(2300, 1, 1, tzinfo=UTC)
+    if taken:
+        (event,) = read_steering(directory, "mc2", after, through)
+        assert event.dx == 1.5
+    else:
+        with pytest.raises(DataFileError) as raised:
+            read_steering(directory, "mc2", after, through)
+        path = directory / STEERING_FILE_TEMPLATE.format(mc="mc2")
+        assert str(raised.value) == (
+            f"steering file {path}: line 1: {mjd!r} is not an MJD on a data day"
+        )
+
+
+def test_a_refusal_is_logged_as_raised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log each DataFileError at ERROR in the words it is raised with."""
+    with pytest.raises(DataFileError) as raised:
+        read_steering(steering_dir(tmp_path, "\n"), "mc2", AFTER, THROUGH)
+    assert [r.getMessage() for r in caplog.records] == [str(raised.value)]

@@ -12,6 +12,8 @@ named from processed_path and the channel; and check_paths refuses a data
 or steering directory that is not one or cannot be listed, a clock
 configuration file that is not a regular file it can read, and a processed
 directory that is something else or cannot be written into.
+
+The processed-directory refusals are word for word.
 """
 
 import os
@@ -516,3 +518,26 @@ def test_a_processed_directory_that_cannot_be_written_is_refused(
     with pytest.raises(ConfigError, match="cannot write into"):
         config.check_paths(configured(tmp_path, tmp_path, processed))
     assert asked == [(processed, os.W_OK | os.X_OK)]
+
+
+def test_a_processed_directory_refusal_is_word_for_word(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Say why the processed directory cannot be used, in the program's words."""
+    processed = tmp_path / "processed"
+    processed.write_text("")
+    with pytest.raises(ConfigError) as raised:
+        config.check_paths(configured(tmp_path, tmp_path, processed))
+    assert str(raised.value).endswith(
+        f"[PROCESSED] processed_path: {processed} is not a directory to write"
+        " processed files into"
+    )
+    processed.unlink()
+    processed.mkdir()
+    monkeypatch.setattr(os, "access", lambda _path, _mode: False)
+    with pytest.raises(ConfigError) as raised:
+        config.check_paths(configured(tmp_path, tmp_path, processed))
+    assert str(raised.value).endswith(
+        f"[PROCESSED] processed_path: {processed} is a directory this process"
+        " cannot write into"
+    )

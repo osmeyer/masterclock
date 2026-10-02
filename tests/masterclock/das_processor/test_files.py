@@ -25,10 +25,18 @@ changes nothing; files are written one at a time, measurement files first;
 with a journal, the earliest buffered epoch is flushed to it before any data
 file opens and it is deleted after the last flush, a journal already there
 is refused, and one not whole is read as no write stopped.
+
+A row that parses but breaks a record's rules is a damaged line; every
+refusal, device fault, roll-back and redo message is word for word, and each
+error is logged as raised; free space is counted per device, just enough
+being enough; a missing archive is made beside one already there; and a
+measurement time on a whole second keeps its microseconds.
 """
 
+import logging
 import os
 import shutil
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
@@ -639,6 +647,25 @@ def test_a_row_of_the_wrong_length_inside_a_file_ends_what_is_good(
     lines[2] = lines[2][:100] + lines[2][101:]
     path = meas_file(tmp_path, "".join(lines))
     assert files.good_through(path, "meas", KEY) == E + STEP
+
+
+def predicted_as_accepted(line: str) -> str:
+    """Give a predicted row with its flag P made A: a row with no measurement."""
+    fields = line.split(", ")
+    (at,) = [i for i, field in enumerate(fields) if field.strip() == "P"]
+    fields[at] = fields[at].replace("P", "A")
+    return ", ".join(fields)
+
+
+def test_a_row_that_breaks_a_record_rule_is_damaged(tmp_path: Path) -> None:
+    """End what is good at a row that parses but breaks a record's rules (U26)."""
+    lines = series_rows(4)
+    lines[3] = predicted_as_accepted(lines[3])
+    path = meas_file(tmp_path, "".join(lines))
+    assert files.good_through(path, "meas", KEY) == E + 2 * STEP
+    files.roll_back(path, "meas", KEY, E + 2 * STEP)
+    assert files.good_through(path, "meas", KEY) == E + 2 * STEP
+    assert path.read_text().endswith(series_rows(3)[2])
 
 
 def test_a_sound_file_is_not_scanned(tmp_path: Path) -> None:
@@ -1438,3 +1465,305 @@ def test_clearing_deletes_the_journal(tmp_path: Path) -> None:
     assert not journal.exists()
     files.clear_journal(journal)
     assert not journal.exists()
+
+
+# ----------------------------------------------- what a person reads, exactly
+
+
+def test_an_error_is_logged_with_its_message(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log each data file error at ERROR, in the words it is raised with."""
+    with pytest.raises(DataFileError) as raised:
+        files.roll_back(tmp_path / "missing.dat", "meas", KEY, E)
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert [r.getMessage() for r in errors] == [str(raised.value)]
+    assert str(raised.value).startswith(f"cannot read data file {tmp_path}")
+
+
+def test_a_roll_back_says_what_it_did_to_each_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Say, at WARNING, which file was cut back to which epoch, or deleted."""
+    cut = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 5)
+    files.roll_back(cut, "meas", KEY, E + 2 * STEP)
+    files.roll_back(cut, "meas", KEY, None)
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+        ("WARNING", f"data file {cut} rolled back to {E + 2 * STEP}"),
+        ("WARNING", f"data file {cut} deleted: no row at or before None"),
+    ]
+
+
+def test_a_redo_says_what_it_did_to_each_file_it_changed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Say, at INFO, which files a redo cut or deleted, and nothing of the rest."""
+    (pair, _, _), (triple, _, _) = series = archive(tmp_path)
+    caplog.set_level(logging.INFO)
+    files.redo_from(series, E + 3 * STEP)
+    files.redo_from(series[1:], E + 3 * STEP)
+    files.redo_from(series[1:], E)
+    mark = E + 3 * STEP
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+        ("INFO", f"data file {pair} cut for a redo from {mark}"),
+        ("INFO", f"data file {triple} deleted for a redo from {E}"),
+    ]
+
+
+def test_a_redo_deletes_a_file_holding_nothing_good(tmp_path: Path) -> None:
+    """Delete a file with no whole row, whatever the redo's epoch."""
+    path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 0)
+    with path.open("ab") as file:
+        file.write(b"2025-09-23 06:0")
+    files.redo_from([(path, "meas", KEY)], E + 3 * STEP)
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    ("problem", "message"),
+    [
+        ("torn", "data file {pair} is not sound: {length} bytes"),
+        ("not_regular", "data file {triple} is not a regular file"),
+        ("read_only", "data file {triple} cannot be written"),
+        ("no_directory", "file {gone} cannot be created in {gone_parent}"),
+        ("not_ascii", "the rows for {pair} are not ASCII"),
+    ],
+)
+def test_a_failed_check_says_which_file_and_why(
+    tmp_path: Path, problem: str, message: str
+) -> None:
+    """Name the file and what is wrong with it, in the prepare step (5.8)."""
+    buffer, pair_path, triple_path = filled(tmp_path)
+    files.write_buffer(buffer)
+    buffer.add(pair_path, KEY, predicted(2))
+    buffer.add(triple_path, TRIPLE, triple_record(2))
+    gone = tmp_path / "gone" / "das_a.mc2.cs7.dat"
+    if problem == "torn":
+        with pair_path.open("ab") as file:
+            file.write(b"2025")
+    elif problem == "not_regular":
+        triple_path.unlink()
+        triple_path.mkdir()
+    elif problem == "read_only":
+        triple_path.chmod(0o444)
+    elif problem == "no_directory":
+        buffer.add(gone, ("mc2", "cs7"), predicted(3))
+    else:
+        buffer.texts[pair_path] += "é\n"
+    expected = message.format(
+        pair=pair_path,
+        triple=triple_path,
+        length=pair_path.stat().st_size,
+        gone=gone,
+        gone_parent=gone.parent,
+    )
+    with pytest.raises(DataFileError) as raised:
+        files.write_buffer(buffer)
+    assert str(raised.value) == expected
+
+
+def test_a_new_file_s_directory_that_cannot_be_written_into_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Refuse, before any file opens, a new file in a directory not writable."""
+    buffer, pair_path, triple_path = filled(tmp_path)
+    triple_path.parent.chmod(0o555)
+    try:
+        with pytest.raises(DataFileError, match="cannot be created in"):
+            files.write_buffer(buffer)
+        assert not pair_path.exists()
+    finally:
+        triple_path.parent.chmod(0o755)
+
+
+def test_free_space_just_enough_is_enough(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Write when the free space is exactly the bytes to write, refuse one less."""
+    buffer, pair_path, triple_path = filled(tmp_path)
+    data = files.header("meas", "a", KEY) + buffer.texts[pair_path]
+    data2 = files.header("ddiff", "a", TRIPLE) + buffer.texts[triple_path]
+    total = len(data) + len(data2)
+    monkeypatch.setattr(shutil, "disk_usage", lambda _: SimpleNamespace(free=total - 1))
+    with pytest.raises(DataFileError) as raised:
+        files.write_buffer(buffer)
+    assert str(raised.value) == (
+        f"{total} bytes to write in {triple_path.parent}, only {total - 1} free"
+    )
+    monkeypatch.setattr(shutil, "disk_usage", lambda _: SimpleNamespace(free=total))
+    files.write_buffer(buffer)
+    assert pair_path.exists()
+
+
+def test_free_space_is_counted_per_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Weigh each device's bytes against that device's free space alone."""
+    buffer, pair_path, triple_path = filled(tmp_path)
+    sizes = {
+        pair_path.parent: len(files.header("meas", "a", KEY) + buffer.texts[pair_path]),
+        triple_path.parent: len(
+            files.header("ddiff", "a", TRIPLE) + buffer.texts[triple_path]
+        ),
+    }
+    devices = {pair_path.parent: 1, triple_path.parent: 2}
+
+    def stat(path: Path, **_kwargs: object) -> object:
+        """Put each archive on a device of its own; nothing else is looked at."""
+        return SimpleNamespace(st_dev=devices[path])
+
+    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(
+        shutil, "disk_usage", lambda where: SimpleNamespace(free=sizes[where])
+    )
+    files.write_buffer(buffer)
+    monkeypatch.undo()
+    assert pair_path.exists()
+    assert triple_path.exists()
+
+
+def test_a_missing_archive_is_made_beside_one_already_there(tmp_path: Path) -> None:
+    """Make ddiff/ when only meas/ is there."""
+    (tmp_path / "meas").mkdir()
+    files.ensure_archives(tmp_path)
+    assert (tmp_path / "ddiff").is_dir()
+
+
+def test_a_measurement_time_on_a_whole_second_keeps_its_microseconds() -> None:
+    """Write a measurement time on a whole second with its six zeros."""
+    raw = DASMeasurement.model_validate(
+        {
+            name: getattr(RAW, name)
+            for name in ("measured_phase", "rms", "switch", "clock")
+        }
+        | {"measurement_mjd": 60941.25}
+    )
+    pair = measure_pair(raw, State(x=Fraction(1_234_567), y=0.0), Fraction(0), None)
+    line = files.format_meas_row(files.MeasRecord(measurement=pair, row=row()))
+    assert "2025-09-23 06:00:00.000000+00:00" in line
+
+
+def test_a_value_too_wide_names_its_row_s_epoch() -> None:
+    """Say which epoch's row holds a value too wide for its column."""
+    record = files.MeasRecord(measurement=None, row=row(flags="P", segment=10**12))
+    with pytest.raises(DataFileError, match=r"^row of 2025-09-23 06:00:00\+00:00: "):
+        files.format_meas_row(record)
+    triple = files.DdiffRecord(measurement=None, row=row(flags="P", segment=10**12))
+    with pytest.raises(DataFileError, match=r"^row of 2025-09-23 06:00:00\+00:00: "):
+        files.format_ddiff_row(triple)
+
+
+def test_a_key_of_the_wrong_size_for_its_file_is_named() -> None:
+    """Say a measurement file is for a pair, a double-difference file a triple."""
+    with pytest.raises(DataFileError) as raised:
+        files.header("meas", "a", TRIPLE)
+    assert "file is for a pair: " in str(raised.value)
+    with pytest.raises(DataFileError) as raised:
+        files.header("ddiff", "a", KEY)
+    assert "file is for a triple: " in str(raised.value)
+
+
+def field_changed(line: str, index: int, text: str) -> str:
+    """Give a line with one field's text replaced, right-justified as before."""
+    fields = line.split(", ")
+    fields[index] = text.rjust(len(fields[index]))
+    return ", ".join(fields)
+
+
+@pytest.mark.parametrize(
+    ("kind", "change", "reason"),
+    [
+        ("meas", lambda line: line.rsplit(", ", 1)[0], "27 fields, not 28"),
+        ("meas", lambda line: field_changed(line, 10, "nan"), "'nan' is not a finite"),
+        ("meas", lambda line: field_changed(line, 9, "1234574.45"), "three decimals"),
+        ("meas", lambda line: field_changed(line, 0, "-"), "never empty is empty"),
+        (
+            "ddiff",
+            lambda line: field_changed(field_changed(line, 2, "-"), 5, "-"),
+            "never empty is empty",
+        ),
+        (
+            "ddiff",
+            lambda line: field_changed(field_changed(line, 4, "-"), 5, "-"),
+            "never empty is empty",
+        ),
+        ("meas", lambda line: field_changed(line, 18, "60941.243056"), "never empty"),
+    ],
+)
+def test_a_line_that_does_not_parse_says_why(
+    kind: str, change: Callable[[str], str], reason: str
+) -> None:
+    """Name the row by its first characters and the reason it does not parse."""
+    line = change(MEAS_EXAMPLE[0] if kind == "meas" else DDIFF_EXAMPLE[0])
+    with pytest.raises(DataFileError) as raised:
+        if kind == "meas":
+            files.parse_meas_row(line, KEY)
+        else:
+            files.parse_ddiff_row(line)
+    message = str(raised.value)
+    assert message.startswith(f"row {line[:25]!r} does not parse: "), message
+    assert reason in message
+
+
+def test_a_line_not_written_so_names_its_row() -> None:
+    """Name the row by its first characters when it is not as written."""
+    line = MEAS_EXAMPLE[0].replace("+1.2301290523526430e-02", "+12.301290523526430e-03")
+    with pytest.raises(DataFileError) as raised:
+        files.parse_meas_row(line, KEY)
+    assert str(raised.value) == (
+        f"row {line[:25]!r} is not written as das_processor writes it"
+    )
+
+
+def test_a_field_never_empty_is_refused_in_those_words() -> None:
+    """End the refusal of an empty field that is never empty with its reason."""
+    line = field_changed(MEAS_EXAMPLE[0], 0, "-")
+    with pytest.raises(DataFileError) as raised:
+        files.parse_meas_row(line, KEY)
+    assert str(raised.value).endswith(
+        " does not parse: a field that is never empty is empty"
+    )
+
+
+def test_a_deletion_by_roll_back_names_the_common_epoch(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Say which epoch a deleted file had no row at or before."""
+    path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 3)
+    files.roll_back(path, "meas", KEY, E - STEP)
+    assert [r.getMessage() for r in caplog.records] == [
+        f"data file {path} deleted: no row at or before {E - STEP}"
+    ]
+
+
+def device_error(*_args: object, **_kwargs: object) -> None:
+    """Fail as a device would."""
+    raise OSError(5, "Input/output error")
+
+
+def test_a_device_fault_names_the_file_and_what_was_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Say which file could not be deleted, cut or written, and the device's error."""
+    path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 3)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", device_error)
+        with pytest.raises(DataFileError) as raised:
+            files.roll_back(path, "meas", KEY, None)
+    assert str(raised.value) == f"cannot delete {path}: [Errno 5] Input/output error"
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", device_error)
+        with pytest.raises(DataFileError) as raised:
+            files.roll_back(path, "meas", KEY, E)
+    assert str(raised.value) == (
+        f"cannot cut data file {path}: [Errno 5] Input/output error"
+    )
+    (tmp_path / "write").mkdir()
+    buffer, pair_path, _ = filled(tmp_path / "write")
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", device_error)
+        with pytest.raises(DataFileError) as raised:
+            files.write_buffer(buffer)
+    assert str(raised.value) == (
+        f"cannot write data file {pair_path}: [Errno 5] Input/output error"
+    )

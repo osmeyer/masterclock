@@ -9,6 +9,8 @@ for both ways when r = s, so every clock local to r gets (r, r, c); the
 keys come out sorted; a series' file is named for its channel and key, in
 the measurement or double-difference directory; and the existing series are
 read back from the names of a channel's files, other names ignored.
+
+An archive refusal is logged as raised.
 """
 
 from datetime import UTC, datetime
@@ -198,3 +200,14 @@ def test_an_archive_that_cannot_be_listed_is_refused(tmp_path: Path) -> None:
     (tmp_path / "meas").write_text("")
     with pytest.raises(DataFileError, match="cannot list"):
         registry.existing_series(tmp_path, "a")
+
+
+def test_an_archive_refusal_is_logged_as_raised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log the DataFileError for an archive that cannot be listed, as raised."""
+    (tmp_path / "meas").write_text("")
+    with pytest.raises(DataFileError) as raised:
+        registry.existing_series(tmp_path, "a")
+    assert [r.getMessage() for r in caplog.records] == [str(raised.value)]
+    assert str(raised.value).startswith(f"cannot list archive {tmp_path / 'meas'}: ")

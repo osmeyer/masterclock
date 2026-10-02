@@ -10,8 +10,12 @@ held in whole femtoseconds, rounded the same way; an epoch lasts 600 s; and
 a measurement is decycled against the prediction at its own time, or
 against the last buffered measurement, or with no cycles added, and
 referred back to its epoch start with one exact rounding.
+
+Decycling takes the drift term and steering inside the epoch its way, and
+each error is logged as raised.
 """
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from typing import Final
@@ -360,3 +364,51 @@ def test_a_fast_rate_is_decycled_with_its_motion() -> None:
     prediction = State(x=Fraction(truth - 75_000 - 40_000), y=150.0)
     result = phase.decycle(truth % P, Fraction(500), Fraction(0), prediction, None)
     assert result == phase.Decycled(cycle_count=7, z=truth - 75_000)
+
+
+# --------------------------------------------- drift, steering, what is logged
+
+
+def test_decycling_takes_the_drift_half_delta_squared() -> None:
+    """Refer the phase back to E with d delta**2 / 2, the drift's own term."""
+    prediction = State(x=Fraction(500_000), y=0.0, d=100 / 360_000)
+    delta = Fraction(600 - 1, 1)
+    result = phase.decycle(1_000, delta, Fraction(0), prediction, None)
+    expected = phase.round_even(
+        1_000 + result.cycle_count * phase.PHASE_PERIOD - motion(prediction, delta)
+    )
+    assert motion(prediction, delta) > 40
+    assert result.z == expected
+
+
+def test_steering_inside_the_epoch_moves_the_prediction_its_way() -> None:
+    """Add w to the prediction at t, so a large w still finds the right cycle."""
+    w = Fraction(60_000)
+    prediction = State(x=Fraction(1_000_000), y=0.0, d=0.0)
+    reading = int(1_000_000 + w) % phase.PHASE_PERIOD
+    result = phase.decycle(reading, Fraction(0), w, prediction, None)
+    assert result.z == 1_000_000
+
+
+def test_every_phase_error_is_logged_as_raised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log each PhaseError at ERROR in the words it is raised with."""
+    state = State(x=Fraction(0), y=0.0, d=0.0)
+    calls: list[Callable[[], object]] = [
+        lambda: phase.decycle(
+            phase.PHASE_PERIOD, Fraction(0), Fraction(0), state, None
+        ),
+        lambda: phase.decycle(0, Fraction(600), Fraction(0), state, None),
+        lambda: phase.seconds(MARK.replace(tzinfo=None), MARK),
+    ]
+    for call in calls:
+        caplog.clear()
+        with pytest.raises(PhaseError) as raised:
+            call()
+        assert [r.getMessage() for r in caplog.records] == [str(raised.value)]
+        assert str(raised.value)
+    caplog.clear()
+    with pytest.raises(FilterError) as not_finite:
+        phase.exact(float("nan"))
+    assert [r.getMessage() for r in caplog.records] == [str(not_finite.value)]

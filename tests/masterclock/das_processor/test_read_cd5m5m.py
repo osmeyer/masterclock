@@ -10,10 +10,13 @@ last line has no newline, or that cannot be read, ends the read; daily file
 names cover days 50000 to 99999 only and read back to the day they were made
 from; and the files of a directory are read in day order as one stream of
 ten-minute blocks, from a given epoch if one is asked for.
+
+Each refusal's reason, the skipped line as it is, each error and each DEBUG
+message are word for word.
 """
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
@@ -642,3 +645,99 @@ def test_files_before_the_start_are_not_read(tmp_path: Path) -> None:
     with pytest.raises(DataFileError, match="has no newline"):
         list(reader.read_all_blocks(tmp_path))
     assert clocks_of(reader.read_all_blocks(tmp_path, float(DAY)))[0] == f"{DAY}a"
+
+
+# ------------------------------------------------- what a person reads, exactly
+
+
+@pytest.mark.parametrize(
+    ("bad", "reason"),
+    [
+        (
+            f"60010.000694 {PHASE_MAX + 1} 20 1A01 clka\n",
+            f"measured_phase: Input should be less than or equal to {PHASE_MAX}",
+        ),
+        (
+            line(mjd_at(120, DAY + 1)),
+            f"MJD {mjd_at(120, DAY + 1)} is not in day {DAY}",
+        ),
+        (
+            line(mjd_at(30)),
+            f"MJD {mjd_at(30)} is earlier than the preceding {mjd_at(60)}",
+        ),
+        (line(mjd_at(90)), "mc1-clka was already measured in this epoch"),
+    ],
+)
+def test_a_refused_line_gives_its_reason_in_words(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, bad: str, reason: str
+) -> None:
+    """End the WARNING for a skipped line with the reason, word for word."""
+    path = data_file(tmp_path, [line(mjd_at(60)), bad])
+    list(reader.read_measurements(path))
+    (message,) = skipped(caplog)
+    assert message.endswith(f": {bad.rstrip(chr(10))!r} ({reason})")
+
+
+def test_a_refused_line_is_shown_with_its_spaces(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Show a skipped line as it is, white space kept, its newline dropped."""
+    bad = line(mjd_at(90)).replace("\n", "  \n")
+    path = data_file(tmp_path, [line(mjd_at(60)), bad])
+    list(reader.read_measurements(path))
+    (message,) = skipped(caplog)
+    assert f"{bad[:-1]!r}" in message
+
+
+def test_every_reader_error_is_logged_as_raised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log each DataFileError at ERROR in the words it is raised with."""
+    unended = data_file(tmp_path, [line(mjd_at(60)).rstrip("\n")])
+    calls: list[Callable[[], object]] = [
+        lambda: list(reader.read_measurements(unended)),
+        lambda: list(reader.read_measurements(tmp_path / f"cd5m5m_{DAY + 1}.dat")),
+        lambda: reader._file_mjd(Path("notes.txt")),
+        lambda: reader.find_data_files(tmp_path / "missing"),
+    ]
+    for call in calls:
+        caplog.clear()
+        with pytest.raises(DataFileError) as raised:
+            call()
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert [r.getMessage() for r in errors] == [str(raised.value)]
+    assert str(raised.value).startswith("cannot list the DAS directory")
+    caplog.clear()
+    with pytest.raises(DataFileError) as raised:
+        list(reader.read_measurements(unended))
+    assert str(raised.value) == (
+        f"malformed data file {unended}: line 1 has no newline"
+    )
+
+
+def test_an_ignored_entry_is_named_at_debug(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Say at DEBUG which entry is passed over, and why, word for word."""
+    caplog.set_level(logging.DEBUG)
+    notes = tmp_path / "notes.txt"
+    notes.write_text("")
+    folder = tmp_path / f"cd5m5m_{DAY}.dat"
+    folder.mkdir()
+    reader.find_data_files(tmp_path)
+    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert debug == [
+        f"ignoring {folder}, named as a daily data file but not a file",
+        f"ignoring {notes}, which is not named as a daily data file",
+    ]
+
+
+def test_a_refused_line_ending_in_any_letter_is_shown_whole(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Drop only the newline from a skipped line, whatever its last letter."""
+    bad = line(mjd_at(90), clock="clkX")
+    path = data_file(tmp_path, [line(mjd_at(60), clock="clkX"), bad])
+    list(reader.read_measurements(path))
+    (message,) = skipped(caplog)
+    assert f"{bad[:-1]!r}" in message

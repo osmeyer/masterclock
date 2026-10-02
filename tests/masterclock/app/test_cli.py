@@ -8,6 +8,9 @@ knows, most to least verbose; an option left out is told apart from None;
 an option is accepted only under its full name and only once in a command;
 and a command-line error prints the full help and the error on standard
 error and exits with status 2.
+
+An option that names the store action is given once too, and the parser
+takes positional arguments as argparse does.
 """
 
 import argparse
@@ -309,3 +312,19 @@ def test_a_subcommand_option_is_also_given_once() -> None:
     run.add_argument("--count", type=cli.positive_int)
     with pytest.raises(SystemExit):
         made.parse_args(["run", "--count", "2", "--count", "2"])
+
+
+def test_an_option_that_names_store_is_given_once_too(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Refuse an option given twice when it names the store action itself."""
+    made = cli.HelpfulArgumentParser(prog="prog")
+    made.add_argument("--label", action="store")
+    with pytest.raises(SystemExit):
+        made.parse_args(["--label", "a", "--label", "b"])
+    assert "argument --label: given more than once" in capsys.readouterr().err
+
+
+def test_the_parser_takes_its_arguments_as_argparse_does() -> None:
+    """Pass positional arguments on, so the program's name can come first."""
+    assert cli.HelpfulArgumentParser("prog").prog == "prog"

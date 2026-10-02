@@ -8,12 +8,15 @@ falls on a day a data file can cover; the count of epochs is command line
 only and takes no None; the RF channel is one of the channels; the MJD to
 start from when none is given is 59500 and the help says so; no arguments,
 a bad argument and a usage error found after parsing all print the full help
-and exit with status 2; and --help and --version exit with status 0.
+and exit with status 2; --help and --version exit with status 0, a single
+argument read from sys.argv as given; and the help reads word for word as
+written.
 """
 
 import sys
 from importlib.metadata import version
 from pathlib import Path
+from typing import Final
 
 import pytest
 from pydantic import ValidationError
@@ -37,6 +40,66 @@ EVERY_OPTION: list[str] = [
     "--backup-count", "None",
 ]  # fmt: skip
 """One command line giving every option, one of them the literal None."""
+
+
+HELP: Final = """\
+usage: das_processor [-h] [--version] [--config-file PATH] [--rf {a,b}]
+                     [--cd5m5m-path PATH] [--steering-path PATH]
+                     [--processed-path PATH] [--redo-from-mjd MJD]
+                     [--start-from-mjd MJD] [--clock-config-file PATH]
+                     [--steps N] [--log-file PATH]
+                     [--log-level {TRACE,DEBUG,INFO,WARNING,ERROR,CRITICAL,None}]
+                     [--backup-count N]
+
+Process 5 MHz phase measurements from the Data Acquisition System (DAS).
+
+options:
+  -h, --help            show this help message and exit
+  --version             show program's version number and exit
+  --config-file PATH    path to the INI configuration file (optional when
+                        every required setting is given on the command line)
+  --rf {a,b}            RF channel to process, overriding the config file's
+                        [DAS] rf (default: use the config file)
+  --cd5m5m-path PATH    path to the DAS 5 MHz phase data, overriding the
+                        config file's [DAS] cd5m5m_path (default: use the
+                        config file)
+  --steering-path PATH  path to the directory of steering files, one per
+                        reference clock, overriding the config file's [DAS]
+                        steering_path (default: use the config file)
+  --processed-path PATH
+                        path for processed results, each kind of file in a
+                        subdirectory of its own, overriding the config file's
+                        [PROCESSED] processed_path (default: use the config
+                        file)
+  --redo-from-mjd MJD   reprocess data starting from this MJD, overriding the
+                        config file's [PROCESSED] redo_from_mjd; pass None for
+                        no reprocessing (default: use the config file)
+  --start-from-mjd MJD  MJD to start processing from when there are no
+                        processed files to read a previous measurement from
+                        (floored to its ten-minute mark), overriding the
+                        config file's [PROCESSED] start_from_mjd (default: use
+                        the config file, else MJD 59500)
+  --clock-config-file PATH
+                        path to the YAML file giving each clock's estimator
+                        parameters and each pair's RMS limit, overriding the
+                        config file's [PROCESSED] clock_config_file (default:
+                        use the config file)
+  --steps N             process exactly this many ten-minute epochs and shut
+                        down, instead of every epoch not yet processed;
+                        command line only, with no config-file entry (default:
+                        process every new epoch)
+  --log-file PATH       path to the log file, overriding the config file's
+                        [LOGGING] log_file; pass None to disable file logging
+                        (default: use the config file)
+  --log-level {TRACE,DEBUG,INFO,WARNING,ERROR,CRITICAL,None}
+                        logging level, overriding the config file's [LOGGING]
+                        log_level; pass None to disable logging entirely
+                        (default: use the config file)
+  --backup-count N      number of rotated daily log files to keep, overriding
+                        the config file's [LOGGING] backup_count; pass None to
+                        keep every rotated file (default: use the config file)
+"""
+"""The full help, as a person reads it at 80 columns."""
 
 
 @pytest.fixture
@@ -313,3 +376,21 @@ def test_a_list_given_is_judged_alone_not_sys_argv(
         cli.parse_args([])
     assert raised.value.code == 2
     assert capsys.readouterr().err.endswith(cli.build_parser().format_help())
+
+
+@pytest.mark.usefixtures("uncoloured")
+def test_the_help_reads_as_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the help word for word: every option, its value's name and its text."""
+    monkeypatch.setenv("COLUMNS", "80")
+    assert cli.build_parser().format_help() == HELP
+
+
+def test_one_argument_alone_is_read_from_sys_argv(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Take a single argument on the command line, such as --version, as given."""
+    monkeypatch.setattr(sys, "argv", ["das_processor", "--version"])
+    with pytest.raises(SystemExit) as stopped:
+        cli.parse_args(None)
+    assert stopped.value.code == 0
+    assert capsys.readouterr().out == f"das_processor {version('masterclock')}\n"

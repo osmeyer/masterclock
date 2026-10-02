@@ -14,6 +14,9 @@ when it is in every failing triangle and no passing one; pairs without a
 measurement and a prediction are neither tested nor excluded, nor are pairs
 an earlier test excluded tested again; and every test that fails gives an
 event.
+
+Each limit holds exactly at its value, scales combine as the design writes
+them, and a triangle that cannot be tested does not stop the rest.
 """
 
 from fractions import Fraction
@@ -324,4 +327,98 @@ def test_a_triangle_with_a_link_not_measured_both_ways_is_not_tested() -> None:
     del innovations[("mc2", "mc1")]
     assert screen(innovations, refs) == screening.Screening(
         excluded=frozenset(), events=()
+    )
+
+
+# ------------------------------------------- limits and combined scales, exactly
+
+
+def test_a_pair_exactly_at_the_shared_limit_shares_the_shift() -> None:
+    """Exclude a pair exactly three combined scales from the self shift (10.1)."""
+    innovations = {("mc1", "mc1"): Fraction(100), ("mc1", "nav1"): Fraction(115)}
+    scales = {("mc1", "mc1"): 4.0, ("mc1", "nav1"): 3.0}
+    result = screen(innovations, ("mc1",), scales)
+    assert result.excluded == frozenset({("mc1", "nav1")})
+
+
+def test_directions_exactly_at_the_reciprocity_limit_pass() -> None:
+    """Pass a link whose directions miss cancelling by exactly five scales (10.2)."""
+    innovations = {("mc1", "mc2"): Fraction(25), ("mc2", "mc1"): Fraction(0)}
+    scales = {("mc1", "mc2"): 3.0, ("mc2", "mc1"): 4.0}
+    result = screen(innovations, ("mc1", "mc2"), scales)
+    assert (result.excluded, result.events) == (frozenset(), ())
+
+
+THREE: Final = ("mc1", "mc2", "mc3")
+"""Three references, for the closure estimate of the link mc1-mc2."""
+
+
+def test_a_direction_exactly_at_its_limit_from_the_estimate_is_not_bad() -> None:
+    """Find neither direction bad at exactly five combined scales: exclude both."""
+    innovations = links(THREE)
+    innovations[("mc1", "mc2")] = Fraction(325)
+    innovations[("mc2", "mc1")] = Fraction(200)
+    scales = {
+        ("mc1", "mc2"): 60.0,
+        ("mc2", "mc1"): 60.0,
+        ("mc2", "mc3"): 18.0,
+        ("mc3", "mc2"): 24.0,
+        ("mc3", "mc1"): 24.0,
+        ("mc1", "mc3"): 32.0,
+    }
+    result = screen(innovations, THREE, scales)
+    assert result.excluded == frozenset({("mc1", "mc2"), ("mc2", "mc1")})
+
+
+def test_the_bad_direction_is_judged_on_the_estimate_and_both_scales() -> None:
+    """Take the estimate -(r_st + r_tr) with its scale, and each pair's own (10.2)."""
+    innovations = links(THREE, {("mc2", "mc3"): 40.0, ("mc3", "mc1"): -10.0})
+    innovations[("mc1", "mc2")] = Fraction(70)
+    innovations[("mc2", "mc1")] = Fraction(47, 2)
+    result = screen(innovations, THREE)
+    assert result.excluded == frozenset({("mc1", "mc2")})
+    assert [event.kind for event in result.events] == ["reciprocity_fail"]
+
+
+def test_a_triangle_exactly_at_the_closure_limit_passes() -> None:
+    """Pass a triangle whose sum is exactly five combined scales (10.3)."""
+    innovations = links(THREE, {("mc1", "mc2"): 37.5})
+    scales = {
+        ("mc1", "mc2"): 6.0,
+        ("mc2", "mc1"): 8.0,
+        ("mc2", "mc3"): 6.0,
+        ("mc3", "mc2"): 8.0,
+        ("mc3", "mc1"): 3.0,
+        ("mc1", "mc3"): 4.0,
+    }
+    result = screen(innovations, THREE, scales)
+    assert (result.excluded, result.events) == (frozenset(), ())
+
+
+def test_a_triangle_s_scale_combines_its_legs_in_quadrature() -> None:
+    """Fail a triangle just past five scales, each leg half its directions' scale."""
+    innovations = links(THREE, {("mc1", "mc2"): 13.0})
+    scales = dict.fromkeys(innovations, 2.0)
+    result = screen(innovations, THREE, scales)
+    assert len(result.excluded) == 6
+
+
+def test_a_triangle_with_a_missing_link_does_not_stop_the_others() -> None:
+    """Test every later triangle after one that cannot be tested (10.3)."""
+    four = ("mc1", "mc2", "mc3", "mc4")
+    innovations = links(four, {("mc1", "mc4"): 100.0})
+    del innovations[("mc2", "mc3")], innovations[("mc3", "mc2")]
+    result = screen(innovations, four)
+    assert result.excluded == frozenset({("mc1", "mc4"), ("mc4", "mc1")})
+
+
+def test_a_missing_scale_is_logged_as_raised(caplog: pytest.LogCaptureFixture) -> None:
+    """Log the FilterError for an innovation without a scale, in its own words."""
+    with pytest.raises(FilterError) as raised:
+        screening.screen_references(
+            {("mc1", "mc1"): Fraction(0)}, {}, frozenset({"mc1"})
+        )
+    assert [r.getMessage() for r in caplog.records] == [str(raised.value)]
+    assert str(raised.value) == (
+        "pairs with an innovation have no innovation scale: [('mc1', 'mc1')]"
     )

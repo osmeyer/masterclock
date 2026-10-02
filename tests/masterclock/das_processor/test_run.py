@@ -7,8 +7,16 @@ the steering of every reference that steers a series, read over
 clock's entry and RMS limit and a triple its clock c's entry; an epoch
 with no block has no references and the existing series only; and the
 epoch is checked to hold settings for exactly its series.
+
+The pairs of an epoch are predicted, decycled against the prediction or the
+anchor with the steering inside the epoch taken off, screened, checked for
+slips, corrected before filtering, and filtered with what screening and the
+slip check excluded. The triples are built from the pairs' accepted
+measurements of the same epoch, the local triple given its self pair for
+both links, marked cold when a pair cold-started, and filtered.
 """
 
+import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
@@ -24,8 +32,9 @@ from masterclock.das_processor.config import AppConfig
 from masterclock.das_processor.read_cd5m5m import DASData, DASMeasurement
 from masterclock.das_processor.read_steering import STEERING_FILE_TEMPLATE
 from masterclock.das_processor.registry import Existing
+from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.phase import PHASE_PERIOD
-from masterclock.domain.series import Row, SeriesKey
+from masterclock.domain.series import Row, SeriesKey, TripleKey
 
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """An invented epoch start."""
@@ -273,8 +282,8 @@ def epoch_of(
         path.write_text(text, encoding="ascii")
     data = DASData(interpolated_datetime=E, measurements=tuple(measurements))
     existing = Existing(
-        pairs=frozenset(k for k in last if len(k) == 2),
-        triples=frozenset(),
+        pairs=frozenset((k[0], k[1]) for k in last if len(k) == 2),
+        triples=frozenset((k[0], k[1], k[-1]) for k in last if len(k) == 3),
     )
     return run.build_epoch(E, data, existing, config, clocks)
 
@@ -458,3 +467,149 @@ def test_steering_inside_the_epoch_is_taken_off(tmp_path: Path) -> None:
     done = run.process_pairs(epoch, last)
     assert done.measurements[("mc1", "mc2")].z == 5000
     assert done.results[("mc1", "mc2")].row.flags == "A"
+
+
+# ---------------------------------------------------------- triples of an epoch
+
+WORKED_RAW: Final = DASMeasurement(
+    measurement_mjd=60941.251588,
+    measured_phase=34579,
+    rms=3,
+    switch="2B07",
+    clock="ox23",
+)
+"""Appendix A's raw row."""
+
+
+def triple_last(**changes: object) -> Row:
+    """Give a tracked 3-state triple row at the epoch before E, ``changes`` made."""
+    values: dict[str, object] = {
+        "x_fs": 1_239_570_000,
+        "filter_states": 3,
+        "time_constant": 100.0,
+        "scale_time_constant": 50.0,
+        "innovation_scale": 4.0,
+    }
+    values.update(changes)
+    return last_row(**values)
+
+
+def test_triples_are_built_from_the_pairs_measurements(tmp_path: Path) -> None:
+    """Take dd from the pairs' accepted z of the epoch, not their estimates (12)."""
+    last = {**REFERENCE_LAST, ("mc2", "ox23"): WORKED_LAST}
+    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
+    pairs = run.process_pairs(epoch, last)
+    done = run.process_triples(epoch, last, pairs)
+    remote = done.measurements[("mc1", "mc2", "ox23")]
+    assert (remote.z, remote.components_used) == (1_234_577 + 5_000, "111")
+    assert remote.double_difference_sigma == math.sqrt(9 + 0.25 * (9 + 9))
+    local = done.measurements[("mc2", "mc2", "ox23")]
+    assert (local.z, local.double_difference_sigma) == (1_234_577, 3.0)
+    assert {r.row.flags for r in done.results.values()} == {"RD"}
+
+
+def test_a_tracked_triple_is_filtered_on_its_double_difference(tmp_path: Path) -> None:
+    """Accept a triple's dd against its own prediction."""
+    last = {
+        **REFERENCE_LAST,
+        ("mc2", "ox23"): WORKED_LAST,
+        ("mc1", "mc2", "ox23"): triple_last(x_fs=1_239_577_000),
+    }
+    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
+    done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
+    row = done.results[("mc1", "mc2", "ox23")].row
+    assert (row.flags, row.innovation) == ("A", 0.0)
+    assert row.x_fs == 1_239_577_000
+
+
+def test_a_missing_link_direction_uses_the_predicted_round_trip(tmp_path: Path) -> None:
+    """Give 110 when (s, r) was not measured, through the links' predictions (12.2)."""
+    last = {**REFERENCE_LAST, ("mc2", "ox23"): WORKED_LAST}
+    epoch = epoch_of([*REFERENCE_MEASURED[:3], WORKED_RAW], last, tmp_path)
+    done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
+    remote = done.measurements[("mc1", "mc2", "ox23")]
+    assert (remote.z, remote.components_used) == (1_234_577 + 5_000, "110")
+
+
+def test_a_component_cold_start_makes_the_triple_dormant(tmp_path: Path) -> None:
+    """Restart a triple whose clock pair cold-started this epoch (12.6)."""
+    acquiring = last_row(
+        x_fs=None,
+        y=None,
+        d=None,
+        innovation_scale=None,
+        flags="RD",
+        filter_states=3,
+        time_constant=100.0,
+        scale_time_constant=50.0,
+        rejects=((PREVIOUS - T, 1_234_577.0), (PREVIOUS, 1_234_577.0)),
+    )
+    last = {
+        **REFERENCE_LAST,
+        ("mc2", "ox23"): acquiring,
+        ("mc2", "mc2", "ox23"): triple_last(x_fs=1_234_577_000),
+    }
+    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
+    pairs = run.process_pairs(epoch, last)
+    assert pairs.results[("mc2", "ox23")].cold is True
+    done = run.process_triples(epoch, last, pairs)
+    assert done.measurements[("mc2", "mc2", "ox23")].cold is True
+    row = done.results[("mc2", "mc2", "ox23")].row
+    assert (row.flags, row.rejects) == ("RD", ((E, 1_234_579.0),))
+
+
+def test_a_triple_without_its_clock_pair_holds(tmp_path: Path) -> None:
+    """Give a triple a predicted row when its clock pair has no measurement."""
+    last = {
+        **REFERENCE_LAST,
+        ("mc2", "ox23"): WORKED_LAST,
+        ("mc2", "mc2", "ox23"): triple_last(x_fs=1_234_577_000),
+    }
+    epoch = epoch_of(REFERENCE_MEASURED, last, tmp_path)
+    done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
+    assert done.results[("mc2", "mc2", "ox23")].row.flags == "P"
+    assert done.measurements == {}
+
+
+def test_the_local_triple_is_checked_every_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pass the self pair for both links of a local triple, so the check runs (12.4)."""
+    seen: list[tuple[object, object]] = []
+
+    def spy(triple: TripleKey, sc: Component, rs: Component, sr: Component) -> object:
+        """Record the links a local triple is given."""
+        if triple[0] == triple[1]:
+            seen.append((rs, sr))
+        return double_difference(triple, sc, rs, sr)
+
+    monkeypatch.setattr(run, "double_difference", spy)
+    last = {**REFERENCE_LAST, ("mc2", "ox23"): WORKED_LAST}
+    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
+    run.process_triples(epoch, last, run.process_pairs(epoch, last))
+    assert len(seen) == 1
+    rs, sr = seen[0]
+    assert rs == sr
+    assert rs.z == 2000  # type: ignore[attr-defined]
+
+
+def test_a_rejected_pair_gives_its_triple_no_value(tmp_path: Path) -> None:
+    """Leave a triple held when its clock pair was measured but rejected."""
+    last = {
+        **REFERENCE_LAST,
+        ("mc2", "ox23"): WORKED_LAST,
+        ("mc2", "mc2", "ox23"): triple_last(x_fs=1_234_577_000),
+    }
+    outlier = DASMeasurement(
+        measurement_mjd=60941.251588,
+        measured_phase=34779,
+        rms=3,
+        switch="2B07",
+        clock="ox23",
+    )
+    epoch = epoch_of([*REFERENCE_MEASURED, outlier], last, tmp_path)
+    pairs = run.process_pairs(epoch, last)
+    assert pairs.results[("mc2", "ox23")].row.flags == "R"
+    done = run.process_triples(epoch, last, pairs)
+    assert ("mc2", "mc2", "ox23") not in done.measurements
+    assert done.results[("mc2", "mc2", "ox23")].row.flags == "P"

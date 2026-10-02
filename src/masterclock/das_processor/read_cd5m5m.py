@@ -4,7 +4,7 @@ The Data Acquisition System (DAS) writes one file per MJD day, named
 ``cd5m5m_<MJD>.dat``, appending to the current day's file as data arrives.
 Each line is one measurement with five whitespace-separated columns:
 
-* MJD of the measurement,
+* MJD of the measurement, five digits, a point and six decimals,
 * phase in picoseconds - a whole number from zero up to
   :data:`~masterclock.domain.phase.PHASE_MAX`, since the phase wraps at one period
   of the 5 MHz signal (unwrapping is handled downstream),
@@ -91,23 +91,30 @@ DATA_FILE_TEMPLATE: Final[str] = "cd5m5m_{mjd}.dat"
 _FIELD_COUNT: Final[int] = 5
 """Number of whitespace-separated columns in a measurement line."""
 
-_PLAIN_NUMBERS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
-    ("MJD", re.compile(r"[0-9]+\.[0-9]+")),
-    ("phase", re.compile(r"[0-9]+")),
-    ("RMS", re.compile(r"[0-9]+")),
-)
-"""The number columns, in file order, each with the only form it may take.
-
-Digits, and for the MJD a point and more digits, as the DAS writes them. A
-sign, an exponent, an underscore or a decimal point in a whole number means
-something other than the DAS wrote the line.
-"""
-
 MJD_WIDTH: Final[int] = 12
 """Width of the measurement MJD column."""
 
 MJD_DECIMALS: Final[int] = 6
 """Decimal places of the measurement MJD column, as the DAS itself writes."""
+
+_PLAIN_NUMBERS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
+    (
+        "MJD",
+        re.compile(
+            rf"[0-9]{{{MJD_WIDTH - MJD_DECIMALS - 1}}}\.[0-9]{{{MJD_DECIMALS}}}"
+        ),
+    ),
+    ("phase", re.compile(r"[0-9]+")),
+    ("RMS", re.compile(r"[0-9]+")),
+)
+"""The number columns, in file order, each with the only form it may take.
+
+Digits, as the DAS writes them, and for the MJD exactly its form there:
+five digits, a point and six decimals, for every MJD of a data day. A
+sign, an exponent, an underscore, a decimal point in a whole number, or an
+MJD with other decimals means something other than the DAS wrote the line.
+"""
+
 
 MEASURED_PHASE_WIDTH: Final[int] = 9
 """Width of the phase column."""

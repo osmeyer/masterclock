@@ -23,7 +23,7 @@ innovation, so a measurement row reads back without one.
 import os
 import re
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO, Final, Literal, NamedTuple, NoReturn, Self
@@ -39,7 +39,7 @@ from masterclock.das_processor.exceptions import DataFileError
 from masterclock.das_processor.measurements import PairMeasurement, TripleMeasurement
 from masterclock.das_processor.read_cd5m5m import DASMeasurement
 from masterclock.domain.exceptions import FilterError, PhaseError
-from masterclock.domain.phase import FS_PER_PS
+from masterclock.domain.phase import EPOCH_SECONDS, FS_PER_PS
 from masterclock.domain.references import REFERENCE_PATTERN
 from masterclock.domain.series import (
     PairKey,
@@ -1414,3 +1414,192 @@ def _sync_directory(directory: Path) -> None:
             os.close(handle)
     except OSError as exc:
         _fail(f"cannot flush directory {directory}: {exc}", exc)
+
+
+# ----------------------------------------------------------- roll-back, redo
+
+_EPOCH: Final[timedelta] = timedelta(seconds=EPOCH_SECONDS)
+"""One epoch, T."""
+
+type _Cut = Literal["kept", "cut", "deleted"]
+"""What keeping a file's rows through an epoch did to it."""
+
+
+def _keep_through(
+    path: Path, kind: FileKind, key: SeriesKey, through: datetime | None
+) -> _Cut:
+    """Keep a file's rows up to and including an epoch, and remove the rest.
+
+    Parameters
+    ----------
+    path : Path
+        The file, whose rows up to ``through`` are good.
+    kind : {'meas', 'ddiff'}
+        Its kind.
+    key : (str, str) or (str, str, str)
+        Its series.
+    through : datetime or None
+        The last epoch to keep; ``None`` to keep none.
+
+    Returns
+    -------
+    {'kept', 'cut', 'deleted'}
+        Whether the file was left as it was, truncated just after its row
+        for ``through``, or deleted because it had no row at or before it.
+
+    Raises
+    ------
+    DataFileError
+        If the file cannot be read, changed or deleted, its first row is
+        not good, or the row for ``through`` found by counting one row per
+        epoch from the first is missing or of another epoch.
+    """
+    size, header_lines = WIDTHS[kind] + 1, HEADER_LINES[kind]
+    try:
+        with path.open("rb") as file:
+            length = file.seek(0, os.SEEK_END)
+            rows = length // size - header_lines
+            first = (
+                row_epoch(_slot(file, header_lines, size), kind, key)
+                if rows > 0
+                else None
+            )
+            if through is None or first is None or through < first:
+                keep = 0
+            else:
+                keep = (through - first) // _EPOCH + 1
+                if keep > rows:
+                    _fail(f"{path} has no row for {through}")
+                found = row_epoch(_slot(file, header_lines + keep - 1, size), kind, key)
+                if found != through:
+                    _fail(
+                        f"{path} does not hold one row per epoch: {found} for {through}"
+                    )
+    except OSError as exc:
+        _fail(f"cannot read data file {path}: {exc}", exc)
+    if keep == 0:
+        _delete(path)
+        return "deleted"
+    end = (header_lines + keep) * size
+    if end == length:
+        return "kept"
+    _truncate(path, end)
+    return "cut"
+
+
+def _delete(path: Path) -> None:
+    """Delete a data file, and flush its directory so the deletion is kept.
+
+    Parameters
+    ----------
+    path : Path
+        The file.
+
+    Raises
+    ------
+    DataFileError
+        If the file cannot be deleted or the device fails.
+    """
+    try:
+        path.unlink()
+    except OSError as exc:
+        _fail(f"cannot delete data file {path}: {exc}", exc)
+    _sync_directory(path.parent)
+
+
+def _truncate(path: Path, end: int) -> None:
+    """Cut a data file to a length, and flush it.
+
+    Parameters
+    ----------
+    path : Path
+        The file.
+    end : int
+        Its new length, bytes.
+
+    Raises
+    ------
+    DataFileError
+        If the file cannot be changed or the device fails.
+    """
+    try:
+        with path.open("r+b") as file:
+            file.truncate(end)
+            file.flush()
+            os.fsync(file.fileno())
+    except OSError as exc:
+        _fail(f"cannot cut data file {path}: {exc}", exc)
+
+
+def roll_back(
+    path: Path, kind: FileKind, key: SeriesKey, common: datetime | None
+) -> None:
+    """Roll a file back to the epoch every file holds (design 6.7).
+
+    Parameters
+    ----------
+    path : Path
+        The file, good through ``common`` or later.
+    kind : {'meas', 'ddiff'}
+        Its kind.
+    key : (str, str) or (str, str, str)
+        Its series.
+    common : datetime or None
+        L, the oldest epoch any file of the channel is good through;
+        ``None`` when no file holds a whole row.
+
+    Raises
+    ------
+    DataFileError
+        If the file cannot be read, changed or deleted, or does not hold
+        one row per epoch.
+
+    Notes
+    -----
+    The file is truncated just after its row for ``common``, which also
+    removes any damaged or torn line after it, or deleted when it has no
+    row at or before ``common``. A file that already ends there is left as
+    it is. Each file changed is logged at WARNING with its path and the
+    epoch.
+    """
+    done = _keep_through(path, kind, key, common)
+    if done == "cut":
+        _log.warning("data file %s rolled back to %s", path, common)
+    elif done == "deleted":
+        _log.warning("data file %s deleted: no row at or before %s", path, common)
+
+
+def redo_from(
+    series: Iterable[tuple[Path, FileKind, SeriesKey]], mark: datetime
+) -> None:
+    """Delete every row at or after an epoch from every file (design 6.5).
+
+    Parameters
+    ----------
+    series : iterable of (Path, FileKind, series key)
+        Every file of the channel, measurement and double-difference, with
+        its kind and series.
+    mark : datetime
+        The epoch to reprocess from.
+
+    Raises
+    ------
+    DataFileError
+        If a file cannot be read, changed or deleted, its first row is not
+        good, or it does not hold one row per epoch.
+
+    Notes
+    -----
+    Each file is truncated just before its first row at or after ``mark``,
+    and deleted when it has no earlier row. A file is never kept past its
+    last good row, so a damaged one is cut there instead, and the roll-back
+    that follows (see :func:`roll_back`) brings every file to one epoch.
+    Running it again after an interruption finishes the deletion: a file
+    already cut is left as it is.
+    """
+    for path, kind, key in series:
+        good = good_through(path, kind, key)
+        through = mark - _EPOCH if good is None else min(mark - _EPOCH, good)
+        done = _keep_through(path, kind, key, None if good is None else through)
+        if done != "kept":
+            _log.info("data file %s %s for a redo from %s", path, done, mark)

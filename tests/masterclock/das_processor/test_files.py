@@ -1042,3 +1042,202 @@ def test_an_empty_buffer_writes_nothing(tmp_path: Path) -> None:
     """Change nothing when no rows are buffered."""
     files.write_buffer(files.DayBuffer("a"))
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------- roll-back, redo
+
+
+def written(path: Path, count: int) -> Path:
+    """Write the pair's file with ``count`` rows from E, and give its path."""
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(
+        files.header("meas", "a", KEY) + "".join(series_rows(count)), encoding="ascii"
+    )
+    return path
+
+
+def epochs_in(path: Path) -> list[datetime]:
+    """Give the epoch of every row of the pair's file."""
+    size = files.MEAS_WIDTH + 1
+    data = path.read_bytes()
+    rows = [
+        data[i : i + size]
+        for i in range(files.MEAS_HEADER_LINES * size, len(data), size)
+    ]
+    return [
+        files.parse_meas_row(row.decode()[:-1], KEY).row.interpolated_datetime
+        for row in rows
+    ]
+
+
+def test_a_file_is_rolled_back_to_just_after_the_common_epoch(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Truncate just after the row for L, with a WARNING naming file and epoch (6.7)."""
+    path = written(tmp_path / "meas" / "das_a.mc2.ox23.dat", 5)
+    files.roll_back(path, "meas", KEY, E + 2 * STEP)
+    assert epochs_in(path) == [E, E + STEP, E + 2 * STEP]
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert str(path) in warnings[0].getMessage()
+    assert str(E + 2 * STEP) in warnings[0].getMessage()
+
+
+def test_a_torn_line_after_the_common_epoch_goes_too(tmp_path: Path) -> None:
+    """Remove a torn line with the rows after L."""
+    path = written(tmp_path / "meas" / "das_a.mc2.ox23.dat", 3)
+    with path.open("ab") as file:
+        file.write(b"2025-09-23 06:3")
+    files.roll_back(path, "meas", KEY, E + 2 * STEP)
+    assert epochs_in(path) == [E, E + STEP, E + 2 * STEP]
+    assert files.good_through(path, "meas", KEY) == E + 2 * STEP
+
+
+def test_a_sound_file_ending_at_the_common_epoch_is_untouched(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Leave a file that already ends at L as it is, unlogged."""
+    path = written(tmp_path / "meas" / "das_a.mc2.ox23.dat", 3)
+    before = path.stat()
+    files.roll_back(path, "meas", KEY, E + 2 * STEP)
+    after = path.stat()
+    assert (after.st_ino, after.st_mtime_ns, after.st_size) == (
+        before.st_ino,
+        before.st_mtime_ns,
+        before.st_size,
+    )
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("common", [None, E - STEP])
+def test_a_file_with_no_row_at_or_before_the_common_epoch_is_deleted(
+    tmp_path: Path, common: datetime | None
+) -> None:
+    """Delete a file whose first row is after L, and every file when there is no L."""
+    path = written(tmp_path / "meas" / "das_a.mc2.ox23.dat", 3)
+    files.roll_back(path, "meas", KEY, common)
+    assert not path.exists()
+
+
+def test_a_file_without_one_row_per_epoch_is_refused(tmp_path: Path) -> None:
+    """Raise DataFileError when the row found for L is of another epoch."""
+    path = written(tmp_path / "meas" / "das_a.mc2.ox23.dat", 2)
+    rows = series_rows(4)
+    with path.open("a", encoding="ascii") as file:
+        file.write(rows[3])
+    with pytest.raises(DataFileError, match="one row per epoch"):
+        files.roll_back(path, "meas", KEY, E + 2 * STEP)
+
+
+def test_a_common_epoch_past_the_file_s_rows_is_refused(tmp_path: Path) -> None:
+    """Raise DataFileError when the file holds no row for L at all."""
+    path = written(tmp_path / "meas" / "das_a.mc2.ox23.dat", 2)
+    with pytest.raises(DataFileError, match="no row for"):
+        files.roll_back(path, "meas", KEY, E + 5 * STEP)
+
+
+def archive(tmp_path: Path) -> list[tuple[Path, files.FileKind, SeriesKey]]:
+    """Write a measurement file of five rows and a double-difference file of three."""
+    pair_path = written(tmp_path / "meas" / "das_a.mc2.ox23.dat", 5)
+    triple_path = tmp_path / "ddiff" / "das_a.mc1.mc2.ox23.dat"
+    triple_path.parent.mkdir()
+    lines = "".join(files.format_ddiff_row(triple_record(i)) + "\n" for i in range(3))
+    triple_path.write_text(files.header("ddiff", "a", TRIPLE) + lines, encoding="ascii")
+    return [(pair_path, "meas", KEY), (triple_path, "ddiff", TRIPLE)]
+
+
+def test_a_redo_deletes_every_row_at_or_after_its_epoch(tmp_path: Path) -> None:
+    """Truncate every file before its first row at or after the mark (6.5)."""
+    series = archive(tmp_path)
+    files.redo_from(series, E + 2 * STEP)
+    assert [files.good_through(path, kind, key) for path, kind, key in series] == [
+        E + STEP,
+        E + STEP,
+    ]
+
+
+def test_a_redo_deletes_a_file_with_no_earlier_row(tmp_path: Path) -> None:
+    """Delete every file when the redo starts at or before its first row."""
+    series = archive(tmp_path)
+    files.redo_from(series, E)
+    assert not any(path.exists() for path, _, _ in series)
+
+
+def test_a_redo_past_a_file_s_end_leaves_it(tmp_path: Path) -> None:
+    """Keep a file whose rows all come before the redo."""
+    series = archive(tmp_path)
+    files.redo_from(series, E + 4 * STEP)
+    assert [files.good_through(path, kind, key) for path, kind, key in series] == [
+        E + 3 * STEP,
+        E + 2 * STEP,
+    ]
+
+
+def test_an_interrupted_redo_finishes_when_run_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finish the deletion on a second run after the first stopped part way (6.5)."""
+    series = archive(tmp_path)
+    real_open = Path.open
+    calls = {"count": 0}
+
+    def failing_second(
+        path: Path, mode: str = "r", *args: object, **kwargs: object
+    ) -> object:
+        """Fail the second file opened to be cut."""
+        if mode == "r+b":
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError(5, "Input/output error")
+        return real_open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(Path, "open", failing_second)
+    with pytest.raises(DataFileError, match="Input/output error"):
+        files.redo_from(series, E + STEP)
+    monkeypatch.undo()
+    files.redo_from(series, E + STEP)
+    assert [files.good_through(path, kind, key) for path, kind, key in series] == [E, E]
+
+
+def test_a_redo_and_a_roll_back_at_one_start_keep_the_archive_in_step(
+    tmp_path: Path,
+) -> None:
+    """Redo first, then roll back what is left to the common epoch (review focus 5)."""
+    series = archive(tmp_path)
+    triple_path = series[1][0]
+    with triple_path.open("ab") as file:
+        file.write(b"2025-09-23 06:3")
+    files.redo_from(series, E + 4 * STEP)
+    good = [files.good_through(path, kind, key) for path, kind, key in series]
+    assert good == [E + 3 * STEP, E + 2 * STEP]
+    common = min(mark for mark in good if mark is not None)
+    for path, kind, key in series:
+        files.roll_back(path, kind, key, common)
+    assert [files.good_through(path, kind, key) for path, kind, key in series] == [
+        E + 2 * STEP,
+        E + 2 * STEP,
+    ]
+    assert all(
+        path.stat().st_size % (files.WIDTHS[kind] + 1) == 0 for path, kind, _ in series
+    )
+
+
+def test_an_error_deleting_a_file_is_a_data_file_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise DataFileError when a file cannot be deleted."""
+    path = written(tmp_path / "meas" / "das_a.mc2.ox23.dat", 2)
+
+    def failing(_path: Path, *_args: object) -> None:
+        """Fail as a device would."""
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "unlink", failing)
+    with pytest.raises(DataFileError, match="Permission denied"):
+        files.roll_back(path, "meas", KEY, None)
+
+
+def test_a_file_that_cannot_be_read_is_not_rolled_back(tmp_path: Path) -> None:
+    """Raise DataFileError when the file to roll back cannot be read."""
+    with pytest.raises(DataFileError, match="cannot read"):
+        files.roll_back(tmp_path / "missing.dat", "meas", KEY, E)

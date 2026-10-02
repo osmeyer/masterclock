@@ -113,8 +113,8 @@ def uncoloured(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_every_option_is_read_as_given() -> None:
     """Read each option into its field, the literal None as None."""
-    options = cli.parse_args(EVERY_OPTION)
-    assert options == cli.CliOptions(
+    cli_options = cli.parse_args(EVERY_OPTION)
+    assert cli_options == cli.CliOptions(
         config_file=Path("/etc/das.ini"),
         rf="b",
         cd5m5m_path=Path("/data/cd5m5m"),
@@ -132,8 +132,8 @@ def test_every_option_is_read_as_given() -> None:
 
 def test_an_option_left_out_defers_to_the_config_file() -> None:
     """Leave every setting left out UNSET, and the three others None."""
-    options = cli.parse_args(["--rf", "a"])
-    assert options.model_dump() == {
+    cli_options = cli.parse_args(["--rf", "a"])
+    assert cli_options.model_dump() == {
         "config_file": None,
         "rf": "a",
         "cd5m5m_path": UNSET,
@@ -150,19 +150,21 @@ def test_an_option_left_out_defers_to_the_config_file() -> None:
 
 
 @pytest.mark.parametrize(
-    ("option", "value", "field"),
+    ("cli_option", "option_value", "options_field"),
     [
         ("--log-file", "None", "log_file"),
         ("--log-level", "None", "log_level"),
     ],
 )
-def test_none_sets_no_value_where_accepted(option: str, value: str, field: str) -> None:
+def test_none_sets_no_value_where_accepted(
+    cli_option: str, option_value: str, options_field: str
+) -> None:
     """Read the literal None as no value on the options that accept it."""
-    assert getattr(cli.parse_args([option, value]), field) is None
+    assert getattr(cli.parse_args([cli_option, option_value]), options_field) is None
 
 
 @pytest.mark.parametrize(
-    ("argv", "error"),
+    ("argv", "expected_error"),
     [
         (["--config-file", "None"], "argument --config-file: path must be absolute"),
         (["--config-file", "das.ini"], "argument --config-file: path must be absolute"),
@@ -210,21 +212,21 @@ def test_none_sets_no_value_where_accepted(option: str, value: str, field: str) 
 )
 @pytest.mark.usefixtures("uncoloured")
 def test_a_bad_argument_prints_the_full_help_and_exits_2(
-    argv: list[str], error: str, capsys: pytest.CaptureFixture[str]
+    argv: list[str], expected_error: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Print the full help, then the error, on standard error; exit with 2."""
-    with pytest.raises(SystemExit) as raised:
+    with pytest.raises(SystemExit) as system_exit:
         cli.parse_args(argv)
-    assert raised.value.code == 2
-    written = capsys.readouterr()
-    assert written.out == ""
-    assert written.err.startswith(cli.build_parser().format_help())
-    assert f"\ndas_processor: error: {error}" in written.err
+    assert system_exit.value.code == 2
+    captured_output = capsys.readouterr()
+    assert captured_output.out == ""
+    assert captured_output.err.startswith(cli.build_parser().format_help())
+    assert f"\ndas_processor: error: {expected_error}" in captured_output.err
 
 
-@pytest.mark.parametrize("option", ["--start-from-mjd", "--redo-from-mjd"])
+@pytest.mark.parametrize("mjd_option", ["--start-from-mjd", "--redo-from-mjd"])
 @pytest.mark.parametrize(
-    ("text", "accepted"),
+    ("mjd_text", "accepted"),
     [
         (str(FIRST_DAY), True),
         (f"{LAST_DAY}.999999", True),
@@ -235,26 +237,28 @@ def test_a_bad_argument_prints_the_full_help_and_exits_2(
     ],
 )
 def test_an_mjd_must_fall_on_a_day_a_data_file_covers(
-    option: str, text: str, accepted: bool, capsys: pytest.CaptureFixture[str]
+    mjd_option: str, mjd_text: str, accepted: bool, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Accept an MJD on days 50000 to 99999 only, for both MJD options."""
-    field = option.removeprefix("--").replace("-", "_")
+    options_field = mjd_option.removeprefix("--").replace("-", "_")
     if accepted:
-        assert getattr(cli.parse_args([option, text]), field) == float(text)
+        assert getattr(cli.parse_args([mjd_option, mjd_text]), options_field) == float(
+            mjd_text
+        )
     else:
         with pytest.raises(SystemExit):
-            cli.parse_args([option, text])
+            cli.parse_args([mjd_option, mjd_text])
         assert (
-            f"MJD must be on a day from {FIRST_DAY} to {LAST_DAY}: {text!r}"
+            f"MJD must be on a day from {FIRST_DAY} to {LAST_DAY}: {mjd_text!r}"
             in capsys.readouterr().err
         )
 
 
-@pytest.mark.parametrize("field", ["redo_from_mjd", "start_from_mjd"])
-def test_the_model_also_holds_an_mjd_to_the_days(field: str) -> None:
+@pytest.mark.parametrize("mjd_field", ["redo_from_mjd", "start_from_mjd"])
+def test_the_model_also_holds_an_mjd_to_the_days(mjd_field: str) -> None:
     """Refuse an MJD outside the days when the options are built directly."""
     with pytest.raises(ValidationError, match="greater than or equal to 50000"):
-        cli.CliOptions.model_validate({field: 1.0})
+        cli.CliOptions.model_validate({mjd_field: 1.0})
 
 
 PATH_FIELDS: list[str] = [
@@ -270,34 +274,36 @@ PATH_FIELDS: list[str] = [
 
 def test_the_path_fields_are_every_path_field() -> None:
     """List every field whose type admits a path, so none goes unchecked."""
-    fields = cli.CliOptions.model_fields.items()
+    model_fields = cli.CliOptions.model_fields.items()
     assert sorted(PATH_FIELDS) == sorted(
-        name for name, field in fields if "Path" in str(field.annotation)
+        field_name
+        for field_name, field_info in model_fields
+        if "Path" in str(field_info.annotation)
     )
 
 
-@pytest.mark.parametrize("field", PATH_FIELDS)
-@pytest.mark.parametrize("text", ["", "das.ini", "../data", "None"])
-def test_the_model_refuses_a_relative_path(field: str, text: str) -> None:
+@pytest.mark.parametrize("path_field", PATH_FIELDS)
+@pytest.mark.parametrize("path_text", ["", "das.ini", "../data", "None"])
+def test_the_model_refuses_a_relative_path(path_field: str, path_text: str) -> None:
     """Refuse a relative path in any path field when the options are built directly."""
     with pytest.raises(ValidationError, match="path must be absolute"):
-        cli.CliOptions.model_validate({field: Path(text)})
+        cli.CliOptions.model_validate({path_field: Path(path_text)})
 
 
-@pytest.mark.parametrize("field", PATH_FIELDS)
-def test_the_model_accepts_an_absolute_path(field: str) -> None:
+@pytest.mark.parametrize("path_field", PATH_FIELDS)
+def test_the_model_accepts_an_absolute_path(path_field: str) -> None:
     """Accept an absolute path in any path field."""
-    options = cli.CliOptions.model_validate({field: Path("/data/x")})
-    assert getattr(options, field) == Path("/data/x")
+    cli_options = cli.CliOptions.model_validate({path_field: Path("/data/x")})
+    assert getattr(cli_options, path_field) == Path("/data/x")
 
 
 def test_the_model_refuses_unknown_fields_and_is_frozen() -> None:
     """Refuse a field the model does not declare, and any change after."""
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         cli.CliOptions.model_validate({"colour": "red"})
-    options = cli.CliOptions()
+    cli_options = cli.CliOptions()
     with pytest.raises(ValidationError, match="frozen"):
-        options.steps = 1  # type: ignore[misc]
+        cli_options.steps = 1  # type: ignore[misc]
 
 
 def test_the_start_used_when_none_is_given_is_59500() -> None:
@@ -325,12 +331,12 @@ def test_no_arguments_print_the_full_help_and_exit_2(
 ) -> None:
     """Print the full help and exit with 2, given no list or an empty one."""
     monkeypatch.setattr(sys, "argv", ["das_processor"])
-    with pytest.raises(SystemExit) as raised:
+    with pytest.raises(SystemExit) as system_exit:
         cli.parse_args(argv)
-    assert raised.value.code == 2
-    written = capsys.readouterr()
-    assert written.out == ""
-    assert written.err == cli.build_parser().format_help()
+    assert system_exit.value.code == 2
+    captured_output = capsys.readouterr()
+    assert captured_output.out == ""
+    assert captured_output.err == cli.build_parser().format_help()
 
 
 def test_the_command_line_is_read_from_sys_argv_by_default(
@@ -346,9 +352,9 @@ def test_a_usage_error_prints_the_full_help_and_exits_2(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Report an error found after parsing as an argument error is reported."""
-    with pytest.raises(SystemExit) as raised:
+    with pytest.raises(SystemExit) as system_exit:
         cli.usage_error("no rf given")
-    assert raised.value.code == 2
+    assert system_exit.value.code == 2
     assert capsys.readouterr().err == (
         f"{cli.build_parser().format_help()}\ndas_processor: error: no rf given\n"
     )
@@ -357,13 +363,13 @@ def test_a_usage_error_prints_the_full_help_and_exits_2(
 @pytest.mark.usefixtures("uncoloured")
 def test_help_and_version_exit_0(capsys: pytest.CaptureFixture[str]) -> None:
     """Print the help, and the program's name and version, then exit with 0."""
-    with pytest.raises(SystemExit) as raised:
+    with pytest.raises(SystemExit) as system_exit:
         cli.parse_args(["--help"])
-    assert raised.value.code == 0
+    assert system_exit.value.code == 0
     assert capsys.readouterr().out == cli.build_parser().format_help()
-    with pytest.raises(SystemExit) as raised:
+    with pytest.raises(SystemExit) as system_exit:
         cli.parse_args(["--version"])
-    assert raised.value.code == 0
+    assert system_exit.value.code == 0
     assert capsys.readouterr().out == f"das_processor {version('masterclock')}\n"
 
 
@@ -374,9 +380,9 @@ def test_a_list_given_is_judged_alone_not_sys_argv(
     monkeypatch.setattr(sys, "argv", ["das_processor"])
     assert cli.parse_args(["--rf", "a"]).rf == "a"
     monkeypatch.setattr(sys, "argv", ["das_processor", "--rf", "a"])
-    with pytest.raises(SystemExit) as raised:
+    with pytest.raises(SystemExit) as system_exit:
         cli.parse_args([])
-    assert raised.value.code == 2
+    assert system_exit.value.code == 2
     assert capsys.readouterr().err.endswith(cli.build_parser().format_help())
 
 
@@ -392,7 +398,7 @@ def test_one_argument_alone_is_read_from_sys_argv(
 ) -> None:
     """Take a single argument on the command line, such as --version, as given."""
     monkeypatch.setattr(sys, "argv", ["das_processor", "--version"])
-    with pytest.raises(SystemExit) as stopped:
+    with pytest.raises(SystemExit) as system_exit:
         cli.parse_args(None)
-    assert stopped.value.code == 0
+    assert system_exit.value.code == 0
     assert capsys.readouterr().out == f"das_processor {version('masterclock')}\n"

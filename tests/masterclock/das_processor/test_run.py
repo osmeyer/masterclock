@@ -71,10 +71,10 @@ E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 T: Final = timedelta(minutes=10)
 """One epoch."""
 
-NONE: Final = ExistingSeries(pairs=frozenset(), triples=frozenset())
+NO_SERIES: Final = ExistingSeries(pairs=frozenset(), triples=frozenset())
 """No series yet."""
 
-CLOCKS: Final = (
+CLOCK_CONFIG_YAML: Final = (
     "rejects_before_restart: 6\n"
     "rms_limit: {default: 50, pairs: {mc2.nav23: 80}}\n"
     "types:\n"
@@ -91,12 +91,12 @@ CLOCKS: Final = (
 """An invented clock configuration: three references and a maser."""
 
 
-def deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
+def make_deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
     """Make an invented deployment's directories and give its configuration."""
-    for name in ("das", "steering", "processed"):
-        (tmp_path / name).mkdir(parents=True)
-    clocks = tmp_path / "clock_config.yaml"
-    clocks.write_text(CLOCKS, encoding="utf-8")
+    for directory_name in ("das", "steering", "processed"):
+        (tmp_path / directory_name).mkdir(parents=True)
+    clock_config_file = tmp_path / "clock_config.yaml"
+    clock_config_file.write_text(CLOCK_CONFIG_YAML, encoding="utf-8")
     config = AppConfig.model_validate(
         {
             "das": {
@@ -107,33 +107,35 @@ def deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
             "processed": {
                 "processed_path": tmp_path / "processed",
                 "start_from_mjd": None,
-                "clock_config_file": clocks,
+                "clock_config_file": clock_config_file,
             },
             "logging": {"log_file": None, "log_level": None, "backup_count": None},
         }
     )
-    return config, read_clock_config(clocks)
+    return config, read_clock_config(clock_config_file)
 
 
-def block(pairs: list[tuple[str, str]]) -> DASData:
+def das_block_of(measured_pairs: list[tuple[str, str]]) -> DASData:
     """Give a block measuring each (reference, clock) pair once."""
-    start = datetime_to_mjd(E)
+    epoch_start_mjd = datetime_to_mjd(E)
     return DASData(
         interpolated_datetime=E,
         measurements=tuple(
             DASMeasurement(
-                measurement_mjd=round(start + (i + 1) * 2e-6, 6),
+                measurement_mjd=round(
+                    epoch_start_mjd + (measurement_index + 1) * 2e-6, 6
+                ),
                 measured_phase=1000,
                 rms=3,
-                switch=f"{reference[-1]}A{i:02d}",
+                switch=f"{reference[-1]}A{measurement_index:02d}",
                 clock=clock,
             )
-            for i, (reference, clock) in enumerate(pairs)
+            for measurement_index, (reference, clock) in enumerate(measured_pairs)
         ),
     )
 
 
-MEASURED: Final = [
+MEASURED_PAIRS: Final = [
     ("mc1", "mc1"),
     ("mc2", "mc2"),
     ("mc1", "mc2"),
@@ -145,26 +147,47 @@ MEASURED: Final = [
 
 def test_an_epoch_holds_its_references_and_series(tmp_path: Path) -> None:
     """Give the block's references, pairs and triples, sorted (3.1, 3.4)."""
-    config, clocks = deployment(tmp_path)
-    epoch = run.build_epoch(E, block(MEASURED), NONE, config, clocks)
+    config, clock_config = make_deployment(tmp_path)
+    epoch = run.build_epoch(
+        E, das_block_of(MEASURED_PAIRS), NO_SERIES, config, clock_config
+    )
     assert epoch.interpolated_datetime == E
     assert epoch.refs == frozenset({"mc1", "mc2"})
-    assert epoch.pairs == tuple(sorted(MEASURED))
+    assert epoch.pairs == tuple(sorted(MEASURED_PAIRS))
     assert epoch.triples == tuple(
-        sorted((r, s, c) for r in ("mc1", "mc2") for s, c in MEASURED)
+        sorted(
+            (log_record, s, c)
+            for log_record in ("mc1", "mc2")
+            for s, c in MEASURED_PAIRS
+        )
     )
 
 
 def test_a_series_takes_the_entry_of_its_clock_side(tmp_path: Path) -> None:
     """Give a pair its second clock's entry and a triple its clock c's (8.1)."""
-    config, clocks = deployment(tmp_path)
-    epoch = run.build_epoch(E, block(MEASURED), NONE, config, clocks)
-    pair = epoch.series_params[("mc2", "nav23")]
-    assert (pair.filter_states, pair.M, pair.rms_max) == (3, 100.0, 80)
-    link = epoch.series_params[("mc1", "mc2")]
-    assert (link.filter_states, link.M, link.sigma0, link.rms_max) == (1, None, 2.0, 50)
-    triple = epoch.series_params[("mc1", "mc2", "nav23")]
-    assert (triple.filter_states, triple.M, triple.rms_max) == (3, 100.0, None)
+    config, clock_config = make_deployment(tmp_path)
+    epoch = run.build_epoch(
+        E, das_block_of(MEASURED_PAIRS), NO_SERIES, config, clock_config
+    )
+    pair_params = epoch.series_params[("mc2", "nav23")]
+    assert (pair_params.filter_states, pair_params.M, pair_params.rms_max) == (
+        3,
+        100.0,
+        80,
+    )
+    link_params = epoch.series_params[("mc1", "mc2")]
+    assert (
+        link_params.filter_states,
+        link_params.M,
+        link_params.sigma0,
+        link_params.rms_max,
+    ) == (1, None, 2.0, 50)
+    triple_params = epoch.series_params[("mc1", "mc2", "nav23")]
+    assert (triple_params.filter_states, triple_params.M, triple_params.rms_max) == (
+        3,
+        100.0,
+        None,
+    )
     assert set(epoch.series_params) == set(epoch.pairs) | set(epoch.triples)
 
 
@@ -172,28 +195,39 @@ def test_steering_is_read_for_every_reference_over_the_epoch_either_side(
     tmp_path: Path,
 ) -> None:
     """Read each steering reference's events in (E - T, E + T] (I4)."""
-    config, clocks = deployment(tmp_path)
-    inside = [E - T + timedelta(seconds=60), E + T - timedelta(seconds=30)]
-    outside = [E - T - timedelta(seconds=30), E + T + timedelta(seconds=60)]
-    times = sorted(inside + outside)
-    lines = "".join(f"{datetime_to_mjd(t):.6f} 1.0 0.0\n" for t in times)
+    config, clock_config = make_deployment(tmp_path)
+    inside_times = [E - T + timedelta(seconds=60), E + T - timedelta(seconds=30)]
+    outside_times = [E - T - timedelta(seconds=30), E + T + timedelta(seconds=60)]
+    event_times = sorted(inside_times + outside_times)
+    steering_text = "".join(
+        f"{datetime_to_mjd(event_time):.6f} 1.0 0.0\n" for event_time in event_times
+    )
     for mc in ("mc1", "mc2"):
-        (tmp_path / "steering" / STEERING_FILE_TEMPLATE.format(mc=mc)).write_text(lines)
-    epoch = run.build_epoch(E, block(MEASURED), NONE, config, clocks)
+        (tmp_path / "steering" / STEERING_FILE_TEMPLATE.format(mc=mc)).write_text(
+            steering_text
+        )
+    epoch = run.build_epoch(
+        E, das_block_of(MEASURED_PAIRS), NO_SERIES, config, clock_config
+    )
     assert sorted(epoch.steering) == ["mc1", "mc2"]
-    expected = [mjd_to_datetime(float(f"{datetime_to_mjd(t):.6f}")) for t in inside]
-    for events in epoch.steering.values():
-        assert [event.applied_datetime for event in events] == expected
+    expected_times = [
+        mjd_to_datetime(float(f"{datetime_to_mjd(event_time):.6f}"))
+        for event_time in inside_times
+    ]
+    for steer_events in epoch.steering.values():
+        assert [
+            steer_event.applied_datetime for steer_event in steer_events
+        ] == expected_times
 
 
 def test_an_epoch_with_no_block_has_the_existing_series_only(tmp_path: Path) -> None:
     """Give no references and every existing series when the DAS measured nothing."""
-    config, clocks = deployment(tmp_path)
-    existing = ExistingSeries(
+    config, clock_config = make_deployment(tmp_path)
+    earlier_series = ExistingSeries(
         pairs=frozenset({("mc2", "nav23"), ("mc2", "mc2")}),
         triples=frozenset({("mc2", "mc2", "nav23")}),
     )
-    epoch = run.build_epoch(E, None, existing, config, clocks)
+    epoch = run.build_epoch(E, None, earlier_series, config, clock_config)
     assert (epoch.das_block, epoch.refs) == (None, frozenset())
     assert epoch.pairs == (("mc2", "mc2"), ("mc2", "nav23"))
     assert epoch.triples == (("mc2", "mc2", "nav23"),)
@@ -202,42 +236,54 @@ def test_an_epoch_with_no_block_has_the_existing_series_only(tmp_path: Path) -> 
 
 def test_a_clock_with_no_entry_stops_the_epoch(tmp_path: Path) -> None:
     """Raise ConfigError for a measured clock the clock configuration lacks."""
-    config, clocks = deployment(tmp_path)
+    config, clock_config = make_deployment(tmp_path)
     with pytest.raises(ConfigError, match="hm9"):
-        run.build_epoch(E, block([*MEASURED, ("mc2", "hm9")]), NONE, config, clocks)
+        run.build_epoch(
+            E,
+            das_block_of([*MEASURED_PAIRS, ("mc2", "hm9")]),
+            NO_SERIES,
+            config,
+            clock_config,
+        )
 
 
 def test_an_epoch_holds_settings_for_exactly_its_series(tmp_path: Path) -> None:
     """Refuse an epoch whose settings miss a series or name another."""
-    config, clocks = deployment(tmp_path)
-    epoch = run.build_epoch(E, block(MEASURED), NONE, config, clocks)
-    values = dict(epoch)
-    values["series_params"] = {
-        k: v for k, v in epoch.series_params.items() if k != ("mc1", "mc1")
+    config, clock_config = make_deployment(tmp_path)
+    epoch = run.build_epoch(
+        E, das_block_of(MEASURED_PAIRS), NO_SERIES, config, clock_config
+    )
+    epoch_fields = dict(epoch)
+    epoch_fields["series_params"] = {
+        series_key: series_params
+        for series_key, series_params in epoch.series_params.items()
+        if series_key != ("mc1", "mc1")
     }
     with pytest.raises(ValidationError, match="settings"):
-        run.Epoch.model_validate(values)
+        run.Epoch.model_validate(epoch_fields)
 
 
 def test_an_epoch_s_block_is_of_its_epoch(tmp_path: Path) -> None:
     """Refuse an epoch holding another epoch's block."""
-    config, clocks = deployment(tmp_path)
-    epoch = run.build_epoch(E, block(MEASURED), NONE, config, clocks)
-    values = {**dict(epoch), "interpolated_datetime": E + T}
+    config, clock_config = make_deployment(tmp_path)
+    epoch = run.build_epoch(
+        E, das_block_of(MEASURED_PAIRS), NO_SERIES, config, clock_config
+    )
+    epoch_fields = {**dict(epoch), "interpolated_datetime": E + T}
     with pytest.raises(ValidationError, match="block"):
-        run.Epoch.model_validate(values)
+        run.Epoch.model_validate(epoch_fields)
 
 
 # ------------------------------------------------------------ pairs of an epoch
 
-PREVIOUS: Final = E - T
+PREVIOUS_EPOCH: Final = E - T
 """The epoch before E."""
 
 
-def last_row(**changes: object) -> Row:
-    """Give a settled 1-state reference row at the epoch before E, ``changes`` made."""
-    values: dict[str, object] = {
-        "interpolated_datetime": PREVIOUS,
+def last_row(**changed_fields: object) -> Row:
+    """Give a settled 1-state reference row before E, with ``changed_fields`` made."""
+    row_fields: dict[str, object] = {
+        "interpolated_datetime": PREVIOUS_EPOCH,
         "innovation": None,
         "x_fs": 0,
         "y": 0.0,
@@ -254,11 +300,11 @@ def last_row(**changes: object) -> Row:
         "scale_time_constant": 30.0,
         "flags": "A",
     }
-    values.update(changes)
-    return Row.model_validate(values)
+    row_fields.update(changed_fields)
+    return Row.model_validate(row_fields)
 
 
-WORKED_LAST: Final = last_row(
+WORKED_LAST_ROW: Final = last_row(
     x_fs=1_234_567_000,
     y=0.0123,
     innovation_scale=3.0,
@@ -271,18 +317,20 @@ WORKED_LAST: Final = last_row(
 """Appendix A's last row of (mc2, nav23)."""
 
 
-def measured(reference: str, clock: str, phase: int, offset_us: int) -> DASMeasurement:
+def das_measurement_of(
+    reference: str, clock: str, measured_phase: int, offset_us: int
+) -> DASMeasurement:
     """Give a measurement of the pair ``offset_us`` microdays after E."""
     return DASMeasurement(
         measurement_mjd=round(datetime_to_mjd(E) + offset_us * 1e-6, 6),
-        measured_phase=phase,
+        measured_phase=measured_phase,
         rms=3,
         switch=f"{reference[-1]}A01",
         clock=clock,
     )
 
 
-REFERENCE_LAST: Final[dict[SeriesKey, Row]] = {
+REFERENCE_LAST_ROWS: Final[dict[SeriesKey, Row]] = {
     ("mc1", "mc1"): last_row(x_fs=1_000_000),
     ("mc2", "mc2"): last_row(x_fs=2_000_000),
     ("mc1", "mc2"): last_row(x_fs=5_000_000),
@@ -290,69 +338,77 @@ REFERENCE_LAST: Final[dict[SeriesKey, Row]] = {
 }
 """The references' last rows: their self and link pairs, 1-state, settled."""
 
-REFERENCE_MEASURED: Final = [
-    measured("mc1", "mc1", 1000, 10),
-    measured("mc2", "mc2", 2000, 20),
-    measured("mc1", "mc2", 5000, 30),
-    measured("mc2", "mc1", PHASE_PERIOD - 5000, 40),
+REFERENCE_MEASUREMENTS: Final = [
+    das_measurement_of("mc1", "mc1", 1000, 10),
+    das_measurement_of("mc2", "mc2", 2000, 20),
+    das_measurement_of("mc1", "mc2", 5000, 30),
+    das_measurement_of("mc2", "mc1", PHASE_PERIOD - 5000, 40),
 ]
 """Each self and link pair measured where its last row says it is."""
 
 
 def epoch_of(
     measurements: list[DASMeasurement],
-    last: dict[SeriesKey, Row],
+    last_rows: dict[SeriesKey, Row],
     tmp_path: Path,
     steering: dict[str, str] | None = None,
 ) -> run.Epoch:
-    """Build E from ``measurements``, with ``last``'s series existing.
+    """Build E from ``measurements``, with ``last_rows``'s series existing.
 
     ``steering`` gives the text of each reference's steering file.
     """
-    config, clocks = deployment(tmp_path)
-    for mc, text in (steering or {}).items():
-        path = tmp_path / "steering" / STEERING_FILE_TEMPLATE.format(mc=mc)
-        path.write_text(text, encoding="ascii")
-    data = DASData(interpolated_datetime=E, measurements=tuple(measurements))
-    existing = ExistingSeries(
-        pairs=frozenset((k[0], k[1]) for k in last if len(k) == 2),
-        triples=frozenset((k[0], k[1], k[-1]) for k in last if len(k) == 3),
+    config, clock_config = make_deployment(tmp_path)
+    for mc, steering_text in (steering or {}).items():
+        steering_file = tmp_path / "steering" / STEERING_FILE_TEMPLATE.format(mc=mc)
+        steering_file.write_text(steering_text, encoding="ascii")
+    das_block = DASData(interpolated_datetime=E, measurements=tuple(measurements))
+    earlier_series = ExistingSeries(
+        pairs=frozenset(
+            (series_key[0], series_key[1])
+            for series_key in last_rows
+            if len(series_key) == 2
+        ),
+        triples=frozenset(
+            (series_key[0], series_key[1], series_key[-1])
+            for series_key in last_rows
+            if len(series_key) == 3
+        ),
     )
-    return run.build_epoch(E, data, existing, config, clocks)
+    return run.build_epoch(E, das_block, earlier_series, config, clock_config)
 
 
 def test_the_worked_epoch_s_pairs_are_processed_end_to_end(tmp_path: Path) -> None:
     """Give Appendix A's row, and every reference pair accepted at its value (D3)."""
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
-    raw = DASMeasurement(
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): WORKED_LAST_ROW}
+    worked_measurement = DASMeasurement(
         measurement_mjd=60941.251588,
         measured_phase=34579,
         rms=3,
         switch="2B07",
         clock="nav23",
     )
-    epoch = epoch_of([*REFERENCE_MEASURED, raw], last, tmp_path)
-    done = run.process_pairs(epoch, last)
-    worked = done.step_results[("mc2", "nav23")].row
-    assert (worked.flags, worked.x_fs, worked.y, worked.d) == (
+    epoch = epoch_of([*REFERENCE_MEASUREMENTS, worked_measurement], last_rows, tmp_path)
+    pair_step = run.process_pairs(epoch, last_rows)
+    worked_row = pair_step.step_results[("mc2", "nav23")].row
+    assert (worked_row.flags, worked_row.x_fs, worked_row.y, worked_row.d) == (
         "A",
         1_234_574_457,
         0.01230129052352643,
         7.169515400974333e-12,
     )
-    assert done.measurements[("mc2", "nav23")].z == 1_234_577
-    for key, row in REFERENCE_LAST.items():
-        result = done.step_results[(key[0], key[1])].row
-        assert (result.flags, result.x_fs) == ("A", row.x_fs), key
-    assert done.screening.events == ()
-    assert done.slips.events == ()
+    assert pair_step.measurements[("mc2", "nav23")].z == 1_234_577
+    for series_key, row in REFERENCE_LAST_ROWS.items():
+        result_row = pair_step.step_results[(series_key[0], series_key[1])].row
+        assert (result_row.flags, result_row.x_fs) == ("A", row.x_fs), series_key
+    assert pair_step.screening.events == ()
+    assert pair_step.slips.events == ()
 
 
 def test_a_slip_correction_is_made_before_filtering(tmp_path: Path) -> None:
     """Correct the weak pair's cycle count first, so its row holds S and the truth."""
-    jump = PHASE_PERIOD // 2 + 2
-    last = {
-        **REFERENCE_LAST,
+    cycle_jump = PHASE_PERIOD // 2 + 2
+    last_rows = {
+        **REFERENCE_LAST_ROWS,
         ("mc1", "nav23"): last_row(
             x_fs=1_000_000_000,
             filter_states=3,
@@ -370,141 +426,163 @@ def test_a_slip_correction_is_made_before_filtering(tmp_path: Path) -> None:
             innovation_scale=3.0,
         ),
     }
-    truth = {("mc1", "nav23"): 1_000_000 + jump, ("mc2", "nav23"): 2_000_000 + jump - 4}
-    clocks = [
-        measured("mc1", "nav23", truth[("mc1", "nav23")] % PHASE_PERIOD, 50),
-        measured("mc2", "nav23", truth[("mc2", "nav23")] % PHASE_PERIOD, 60),
+    true_phases = {
+        ("mc1", "nav23"): 1_000_000 + cycle_jump,
+        ("mc2", "nav23"): 2_000_000 + cycle_jump - 4,
+    }
+    clock_measurements = [
+        das_measurement_of(
+            "mc1", "nav23", true_phases[("mc1", "nav23")] % PHASE_PERIOD, 50
+        ),
+        das_measurement_of(
+            "mc2", "nav23", true_phases[("mc2", "nav23")] % PHASE_PERIOD, 60
+        ),
     ]
-    epoch = epoch_of([*REFERENCE_MEASURED, *clocks], last, tmp_path)
-    done = run.process_pairs(epoch, last)
-    assert done.slips.corrections == {("mc1", "nav23"): 1}
-    assert done.measurements[("mc1", "nav23")].z == truth[("mc1", "nav23")]
-    assert done.measurements[("mc1", "nav23")].slip is True
-    corrected = done.step_results[("mc1", "nav23")].row
-    assert "S" in corrected.flags
-    assert corrected.innovation == float(jump)
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, *clock_measurements], last_rows, tmp_path
+    )
+    pair_step = run.process_pairs(epoch, last_rows)
+    assert pair_step.slips.corrections == {("mc1", "nav23"): 1}
+    assert pair_step.measurements[("mc1", "nav23")].z == true_phases[("mc1", "nav23")]
+    assert pair_step.measurements[("mc1", "nav23")].slip is True
+    corrected_row = pair_step.step_results[("mc1", "nav23")].row
+    assert "S" in corrected_row.flags
+    assert corrected_row.innovation == float(cycle_jump)
 
 
 def test_a_reference_missing_from_the_block_leaves_its_pairs_predicted(
     tmp_path: Path,
 ) -> None:
     """Give mc1's pairs predicted rows and screen without it (review focus 4)."""
-    last = dict(REFERENCE_LAST)
-    epoch = epoch_of([REFERENCE_MEASURED[1]], last, tmp_path)
+    last_rows = dict(REFERENCE_LAST_ROWS)
+    epoch = epoch_of([REFERENCE_MEASUREMENTS[1]], last_rows, tmp_path)
     assert epoch.refs == frozenset({"mc2"})
-    done = run.process_pairs(epoch, last)
-    for key in (("mc1", "mc1"), ("mc1", "mc2"), ("mc2", "mc1")):
-        assert done.step_results[key].row.flags == "P"
-    assert done.step_results[("mc2", "mc2")].row.flags == "A"
-    assert done.screening.events == ()
+    pair_step = run.process_pairs(epoch, last_rows)
+    for series_key in (("mc1", "mc1"), ("mc1", "mc2"), ("mc2", "mc1")):
+        assert pair_step.step_results[series_key].row.flags == "P"
+    assert pair_step.step_results[("mc2", "mc2")].row.flags == "A"
+    assert pair_step.screening.events == ()
 
 
 def test_a_new_pair_starts_acquiring(tmp_path: Path) -> None:
     """Give a pair with no last row a dormant row with its measurement buffered."""
-    epoch = epoch_of(REFERENCE_MEASURED, {}, tmp_path)
-    done = run.process_pairs(epoch, {})
-    for key in REFERENCE_LAST:
-        row = done.step_results[(key[0], key[1])].row
+    epoch = epoch_of(REFERENCE_MEASUREMENTS, {}, tmp_path)
+    pair_step = run.process_pairs(epoch, {})
+    for series_key in REFERENCE_LAST_ROWS:
+        row = pair_step.step_results[(series_key[0], series_key[1])].row
         assert (row.flags, len(row.rejects), row.segment) == ("RD", 1, 0)
-    assert done.predictions[("mc1", "mc1")] is None
+    assert pair_step.predictions[("mc1", "mc1")] is None
 
 
 def test_screening_excludes_and_the_filter_holds(tmp_path: Path) -> None:
     """Hold as X a pair that shares a self pair's shift inside its gate (9.5, 10.1)."""
-    maser = last_row(
+    maser_last_row = last_row(
         x_fs=2_000_000,
         filter_states=3,
         time_constant=100.0,
         scale_time_constant=50.0,
         innovation_scale=40.0,
     )
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): maser}
-    shifted = [
-        measured("mc1", "mc1", 1000, 10),
-        measured("mc2", "mc2", 2100, 20),
-        measured("mc1", "mc2", 5000, 30),
-        measured("mc2", "mc1", PHASE_PERIOD - 5000, 40),
-        measured("mc2", "nav23", 2008, 50),
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): maser_last_row}
+    shifted_measurements = [
+        das_measurement_of("mc1", "mc1", 1000, 10),
+        das_measurement_of("mc2", "mc2", 2100, 20),
+        das_measurement_of("mc1", "mc2", 5000, 30),
+        das_measurement_of("mc2", "mc1", PHASE_PERIOD - 5000, 40),
+        das_measurement_of("mc2", "nav23", 2008, 50),
     ]
-    epoch = epoch_of(shifted, last, tmp_path)
-    done = run.process_pairs(epoch, last)
-    assert [event.finding for event in done.screening.events] == ["self_fail"]
-    assert done.screening.excluded == frozenset({("mc2", "nav23")})
-    assert done.step_results[("mc2", "nav23")].row.flags == "X"
-    assert done.step_results[("mc2", "mc2")].row.flags == "R"
+    epoch = epoch_of(shifted_measurements, last_rows, tmp_path)
+    pair_step = run.process_pairs(epoch, last_rows)
+    assert [
+        screening_event.finding for screening_event in pair_step.screening.events
+    ] == ["self_fail"]
+    assert pair_step.screening.excluded == frozenset({("mc2", "nav23")})
+    assert pair_step.step_results[("mc2", "nav23")].row.flags == "X"
+    assert pair_step.step_results[("mc2", "mc2")].row.flags == "R"
 
 
 def test_an_epoch_with_no_block_predicts_every_pair(tmp_path: Path) -> None:
     """Give every existing pair a predicted row when the DAS measured nothing (6.2)."""
-    config, clocks = deployment(tmp_path)
-    existing = ExistingSeries(
-        pairs=frozenset(k for k in REFERENCE_LAST if len(k) == 2), triples=frozenset()
+    config, clock_config = make_deployment(tmp_path)
+    earlier_series = ExistingSeries(
+        pairs=frozenset(
+            series_key for series_key in REFERENCE_LAST_ROWS if len(series_key) == 2
+        ),
+        triples=frozenset(),
     )
-    epoch = run.build_epoch(E, None, existing, config, clocks)
-    done = run.process_pairs(epoch, REFERENCE_LAST)
-    assert {result.row.flags for result in done.step_results.values()} == {"P"}
-    assert done.measurements == {}
+    epoch = run.build_epoch(E, None, earlier_series, config, clock_config)
+    pair_step = run.process_pairs(epoch, REFERENCE_LAST_ROWS)
+    assert {result_row.row.flags for result_row in pair_step.step_results.values()} == {
+        "P"
+    }
+    assert pair_step.measurements == {}
 
 
 def test_an_undecided_slip_excludes_both_clock_pairs(tmp_path: Path) -> None:
     """Hold as X the clock pairs of an undecided slip, inside their gates (11.2)."""
-    jump = PHASE_PERIOD // 2 + 2
-    wide = {
+    cycle_jump = PHASE_PERIOD // 2 + 2
+    wide_scale_fields = {
         "filter_states": 3,
         "time_constant": 100.0,
         "scale_time_constant": 50.0,
         "innovation_scale": 25_000.0,
     }
-    last = {
-        **REFERENCE_LAST,
-        ("mc1", "nav23"): last_row(x_fs=1_000_000_000, **wide),
-        ("mc2", "nav23"): last_row(x_fs=2_000_000_000, **wide),
+    last_rows = {
+        **REFERENCE_LAST_ROWS,
+        ("mc1", "nav23"): last_row(x_fs=1_000_000_000, **wide_scale_fields),
+        ("mc2", "nav23"): last_row(x_fs=2_000_000_000, **wide_scale_fields),
     }
-    clocks = [
-        measured("mc1", "nav23", (1_000_000 + jump) % PHASE_PERIOD, 50),
-        measured("mc2", "nav23", (2_000_000 + jump - 4) % PHASE_PERIOD, 60),
+    clock_measurements = [
+        das_measurement_of("mc1", "nav23", (1_000_000 + cycle_jump) % PHASE_PERIOD, 50),
+        das_measurement_of(
+            "mc2", "nav23", (2_000_000 + cycle_jump - 4) % PHASE_PERIOD, 60
+        ),
     ]
-    epoch = epoch_of([*REFERENCE_MEASURED, *clocks], last, tmp_path)
-    done = run.process_pairs(epoch, last)
-    assert [event.finding for event in done.slips.events] == ["slip_undecided"]
-    assert done.step_results[("mc1", "nav23")].row.flags == "X"
-    assert done.step_results[("mc2", "nav23")].row.flags == "X"
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, *clock_measurements], last_rows, tmp_path
+    )
+    pair_step = run.process_pairs(epoch, last_rows)
+    assert [slip_event.finding for slip_event in pair_step.slips.events] == [
+        "slip_undecided"
+    ]
+    assert pair_step.step_results[("mc1", "nav23")].row.flags == "X"
+    assert pair_step.step_results[("mc2", "nav23")].row.flags == "X"
 
 
 def test_a_dormant_pair_is_decycled_against_its_anchor(tmp_path: Path) -> None:
     """Decycle a pair with no prediction against its last buffered measurement (7.5)."""
-    dormant = last_row(
+    dormant_row = last_row(
         x_fs=None,
         y=None,
         d=None,
         innovation_scale=None,
         flags="RD",
-        rejects=((PREVIOUS, 201_000.0),),
+        rejects=((PREVIOUS_EPOCH, 201_000.0),),
     )
-    last = {**REFERENCE_LAST, ("mc1", "mc1"): dormant}
-    epoch = epoch_of(REFERENCE_MEASURED, last, tmp_path)
-    done = run.process_pairs(epoch, last)
-    assert done.measurements[("mc1", "mc1")].z == 201_000
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc1", "mc1"): dormant_row}
+    epoch = epoch_of(REFERENCE_MEASUREMENTS, last_rows, tmp_path)
+    pair_step = run.process_pairs(epoch, last_rows)
+    assert pair_step.measurements[("mc1", "mc1")].z == 201_000
 
 
 def test_steering_inside_the_epoch_is_taken_off(tmp_path: Path) -> None:
     """Refer a measurement to E with the steering since E taken off (7.1)."""
-    last = dict(REFERENCE_LAST)
-    event = f"{datetime_to_mjd(E) + 2e-6:.6f} 10.0 0.0\n"
-    moved = [
-        *REFERENCE_MEASURED[:2],
-        measured("mc1", "mc2", 5010, 30),
-        REFERENCE_MEASURED[3],
+    last_rows = dict(REFERENCE_LAST_ROWS)
+    steering_line = f"{datetime_to_mjd(E) + 2e-6:.6f} 10.0 0.0\n"
+    moved_measurements = [
+        *REFERENCE_MEASUREMENTS[:2],
+        das_measurement_of("mc1", "mc2", 5010, 30),
+        REFERENCE_MEASUREMENTS[3],
     ]
-    epoch = epoch_of(moved, last, tmp_path, {"mc1": event})
-    done = run.process_pairs(epoch, last)
-    assert done.measurements[("mc1", "mc2")].z == 5000
-    assert done.step_results[("mc1", "mc2")].row.flags == "A"
+    epoch = epoch_of(moved_measurements, last_rows, tmp_path, {"mc1": steering_line})
+    pair_step = run.process_pairs(epoch, last_rows)
+    assert pair_step.measurements[("mc1", "mc2")].z == 5000
+    assert pair_step.step_results[("mc1", "mc2")].row.flags == "A"
 
 
 # ---------------------------------------------------------- triples of an epoch
 
-WORKED_RAW: Final = DASMeasurement(
+WORKED_DAS_MEASUREMENT: Final = DASMeasurement(
     measurement_mjd=60941.251588,
     measured_phase=34579,
     rms=3,
@@ -514,59 +592,80 @@ WORKED_RAW: Final = DASMeasurement(
 """Appendix A's raw row."""
 
 
-def triple_last(**changes: object) -> Row:
-    """Give a tracked 3-state triple row at the epoch before E, ``changes`` made."""
-    values: dict[str, object] = {
+def triple_last_row(**changed_fields: object) -> Row:
+    """Give a tracked 3-state triple row before E, with ``changed_fields`` made."""
+    row_fields: dict[str, object] = {
         "x_fs": 1_239_570_000,
         "filter_states": 3,
         "time_constant": 100.0,
         "scale_time_constant": 50.0,
         "innovation_scale": 4.0,
     }
-    values.update(changes)
-    return last_row(**values)
+    row_fields.update(changed_fields)
+    return last_row(**row_fields)
 
 
 def test_triples_are_built_from_the_pairs_measurements(tmp_path: Path) -> None:
     """Take dd from the pairs' accepted z of the epoch, not their estimates (12)."""
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
-    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
-    pairs = run.process_pairs(epoch, last)
-    done = run.process_triples(epoch, last, pairs)
-    remote = done.measurements[("mc1", "mc2", "nav23")]
-    assert (remote.z, remote.components_used) == (1_234_577 + 5_000, "111")
-    assert remote.double_difference_sigma == math.sqrt(9 + 0.25 * (9 + 9))
-    local = done.measurements[("mc2", "mc2", "nav23")]
-    assert (local.z, local.double_difference_sigma) == (1_234_577, 3.0)
-    assert {r.row.flags for r in done.step_results.values()} == {"RD"}
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): WORKED_LAST_ROW}
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+    )
+    pair_step = run.process_pairs(epoch, last_rows)
+    triple_step = run.process_triples(epoch, last_rows, pair_step)
+    remote_measurement = triple_step.measurements[("mc1", "mc2", "nav23")]
+    assert (remote_measurement.z, remote_measurement.components_used) == (
+        1_234_577 + 5_000,
+        "111",
+    )
+    assert remote_measurement.double_difference_sigma == math.sqrt(9 + 0.25 * (9 + 9))
+    local_measurement = triple_step.measurements[("mc2", "mc2", "nav23")]
+    assert (local_measurement.z, local_measurement.double_difference_sigma) == (
+        1_234_577,
+        3.0,
+    )
+    assert {
+        log_record.row.flags for log_record in triple_step.step_results.values()
+    } == {"RD"}
 
 
 def test_a_tracked_triple_is_filtered_on_its_double_difference(tmp_path: Path) -> None:
     """Accept a triple's dd against its own prediction."""
-    last = {
-        **REFERENCE_LAST,
-        ("mc2", "nav23"): WORKED_LAST,
-        ("mc1", "mc2", "nav23"): triple_last(x_fs=1_239_577_000),
+    last_rows = {
+        **REFERENCE_LAST_ROWS,
+        ("mc2", "nav23"): WORKED_LAST_ROW,
+        ("mc1", "mc2", "nav23"): triple_last_row(x_fs=1_239_577_000),
     }
-    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
-    done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
-    row = done.step_results[("mc1", "mc2", "nav23")].row
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+    )
+    triple_step = run.process_triples(
+        epoch, last_rows, run.process_pairs(epoch, last_rows)
+    )
+    row = triple_step.step_results[("mc1", "mc2", "nav23")].row
     assert (row.flags, row.innovation) == ("A", 0.0)
     assert row.x_fs == 1_239_577_000
 
 
 def test_a_missing_link_direction_uses_the_predicted_round_trip(tmp_path: Path) -> None:
     """Give 110 when (s, r) was not measured, through the links' predictions (12.2)."""
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
-    epoch = epoch_of([*REFERENCE_MEASURED[:3], WORKED_RAW], last, tmp_path)
-    done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
-    remote = done.measurements[("mc1", "mc2", "nav23")]
-    assert (remote.z, remote.components_used) == (1_234_577 + 5_000, "110")
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): WORKED_LAST_ROW}
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS[:3], WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+    )
+    triple_step = run.process_triples(
+        epoch, last_rows, run.process_pairs(epoch, last_rows)
+    )
+    remote_measurement = triple_step.measurements[("mc1", "mc2", "nav23")]
+    assert (remote_measurement.z, remote_measurement.components_used) == (
+        1_234_577 + 5_000,
+        "110",
+    )
 
 
 def test_a_component_cold_start_makes_the_triple_dormant(tmp_path: Path) -> None:
     """Restart a triple whose clock pair cold-started this epoch (12.6)."""
-    acquiring = last_row(
+    acquiring_row = last_row(
         x_fs=None,
         y=None,
         d=None,
@@ -575,129 +674,150 @@ def test_a_component_cold_start_makes_the_triple_dormant(tmp_path: Path) -> None
         filter_states=3,
         time_constant=100.0,
         scale_time_constant=50.0,
-        rejects=((PREVIOUS - T, 1_234_577.0), (PREVIOUS, 1_234_577.0)),
+        rejects=((PREVIOUS_EPOCH - T, 1_234_577.0), (PREVIOUS_EPOCH, 1_234_577.0)),
     )
-    last = {
-        **REFERENCE_LAST,
-        ("mc2", "nav23"): acquiring,
-        ("mc2", "mc2", "nav23"): triple_last(x_fs=1_234_577_000),
+    last_rows = {
+        **REFERENCE_LAST_ROWS,
+        ("mc2", "nav23"): acquiring_row,
+        ("mc2", "mc2", "nav23"): triple_last_row(x_fs=1_234_577_000),
     }
-    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
-    pairs = run.process_pairs(epoch, last)
-    assert pairs.step_results[("mc2", "nav23")].cold_started is True
-    done = run.process_triples(epoch, last, pairs)
-    assert done.measurements[("mc2", "mc2", "nav23")].pair_cold_started is True
-    row = done.step_results[("mc2", "mc2", "nav23")].row
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+    )
+    pair_step = run.process_pairs(epoch, last_rows)
+    assert pair_step.step_results[("mc2", "nav23")].cold_started is True
+    triple_step = run.process_triples(epoch, last_rows, pair_step)
+    assert triple_step.measurements[("mc2", "mc2", "nav23")].pair_cold_started is True
+    row = triple_step.step_results[("mc2", "mc2", "nav23")].row
     assert (row.flags, row.rejects) == ("RD", ((E, 1_234_579.0),))
 
 
 def test_a_triple_without_its_clock_pair_holds(tmp_path: Path) -> None:
     """Give a triple a predicted row when its clock pair has no measurement."""
-    last = {
-        **REFERENCE_LAST,
-        ("mc2", "nav23"): WORKED_LAST,
-        ("mc2", "mc2", "nav23"): triple_last(x_fs=1_234_577_000),
+    last_rows = {
+        **REFERENCE_LAST_ROWS,
+        ("mc2", "nav23"): WORKED_LAST_ROW,
+        ("mc2", "mc2", "nav23"): triple_last_row(x_fs=1_234_577_000),
     }
-    epoch = epoch_of(REFERENCE_MEASURED, last, tmp_path)
-    done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
-    assert done.step_results[("mc2", "mc2", "nav23")].row.flags == "P"
-    assert ("mc2", "mc2", "nav23") not in done.measurements
+    epoch = epoch_of(REFERENCE_MEASUREMENTS, last_rows, tmp_path)
+    triple_step = run.process_triples(
+        epoch, last_rows, run.process_pairs(epoch, last_rows)
+    )
+    assert triple_step.step_results[("mc2", "mc2", "nav23")].row.flags == "P"
+    assert ("mc2", "mc2", "nav23") not in triple_step.measurements
 
 
 def test_the_local_triple_is_checked_every_epoch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Pass the self pair for both links of a local triple, so the check runs (12.4)."""
-    seen: list[tuple[object, object]] = []
+    links_seen: list[tuple[object, object]] = []
 
-    def spy(triple: TripleKey, sc: Component, rs: Component, sr: Component) -> object:
+    def record_links(
+        triple: TripleKey, sc: Component, rs: Component, sr: Component
+    ) -> object:
         """Record the links a local triple is given."""
         if triple == ("mc2", "mc2", "nav23"):
-            seen.append((rs, sr))
+            links_seen.append((rs, sr))
         return double_difference(triple, sc, rs, sr)
 
-    monkeypatch.setattr(run, "double_difference", spy)
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
-    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
-    run.process_triples(epoch, last, run.process_pairs(epoch, last))
-    assert len(seen) == 1
-    rs, sr = seen[0]
+    monkeypatch.setattr(run, "double_difference", record_links)
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): WORKED_LAST_ROW}
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+    )
+    run.process_triples(epoch, last_rows, run.process_pairs(epoch, last_rows))
+    assert len(links_seen) == 1
+    rs, sr = links_seen[0]
     assert rs == sr
     assert rs.z == 2000  # type: ignore[attr-defined]
 
 
 def test_a_rejected_pair_gives_its_triple_no_value(tmp_path: Path) -> None:
     """Leave a triple held when its clock pair was measured but rejected."""
-    last = {
-        **REFERENCE_LAST,
-        ("mc2", "nav23"): WORKED_LAST,
-        ("mc2", "mc2", "nav23"): triple_last(x_fs=1_234_577_000),
+    last_rows = {
+        **REFERENCE_LAST_ROWS,
+        ("mc2", "nav23"): WORKED_LAST_ROW,
+        ("mc2", "mc2", "nav23"): triple_last_row(x_fs=1_234_577_000),
     }
-    outlier = DASMeasurement(
+    outlier_measurement = DASMeasurement(
         measurement_mjd=60941.251588,
         measured_phase=34779,
         rms=3,
         switch="2B07",
         clock="nav23",
     )
-    epoch = epoch_of([*REFERENCE_MEASURED, outlier], last, tmp_path)
-    pairs = run.process_pairs(epoch, last)
-    assert pairs.step_results[("mc2", "nav23")].row.flags == "R"
-    done = run.process_triples(epoch, last, pairs)
-    assert ("mc2", "mc2", "nav23") not in done.measurements
-    assert done.step_results[("mc2", "mc2", "nav23")].row.flags == "P"
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, outlier_measurement], last_rows, tmp_path
+    )
+    pair_step = run.process_pairs(epoch, last_rows)
+    assert pair_step.step_results[("mc2", "nav23")].row.flags == "R"
+    triple_step = run.process_triples(epoch, last_rows, pair_step)
+    assert ("mc2", "mc2", "nav23") not in triple_step.measurements
+    assert triple_step.step_results[("mc2", "mc2", "nav23")].row.flags == "P"
 
 
 # ---------------------------------------------------------------- the epoch loop
 
-LATE: Final = datetime(2025, 9, 23, 23, 20, tzinfo=UTC)
+LATE_START: Final = datetime(2025, 9, 23, 23, 20, tzinfo=UTC)
 """The first epoch of the runs below: four epochs before midnight."""
 
 
-def das_files(tmp_path: Path, marks: list[datetime]) -> None:
-    """Write DAS daily files measuring mc1 against itself and nav23 at ``marks``."""
-    days: dict[int, list[str]] = {}
-    for mark in marks:
-        start = datetime_to_mjd(mark)
-        for offset, (clock, phase) in enumerate((("mc1", 1000), ("nav23", 50_000))):
-            raw = DASMeasurement(
-                measurement_mjd=round(start + (offset + 1) * 2e-5, 6),
-                measured_phase=phase,
+def write_das_files(tmp_path: Path, epoch_starts: list[datetime]) -> None:
+    """Write DAS daily files measuring mc1 and nav23 against mc1 at ``epoch_starts``."""
+    das_lines_by_day: dict[int, list[str]] = {}
+    for epoch_start in epoch_starts:
+        epoch_start_mjd = datetime_to_mjd(epoch_start)
+        for clock_index, (clock_name, measured_phase) in enumerate(
+            (("mc1", 1000), ("nav23", 50_000))
+        ):
+            das_measurement = DASMeasurement(
+                measurement_mjd=round(epoch_start_mjd + (clock_index + 1) * 2e-5, 6),
+                measured_phase=measured_phase,
                 rms=3,
-                switch="1A01" if clock == "mc1" else "1A02",
-                clock=clock,
+                switch="1A01" if clock_name == "mc1" else "1A02",
+                clock=clock_name,
             )
-            days.setdefault(int(start), []).append(f"{raw}\n")
-    for day, lines in days.items():
-        (tmp_path / "das" / f"cd5m5m_{day}.dat").write_text(
-            "".join(lines), encoding="ascii"
+            das_lines_by_day.setdefault(int(epoch_start_mjd), []).append(
+                f"{das_measurement}\n"
+            )
+    for data_day, das_lines in das_lines_by_day.items():
+        (tmp_path / "das" / f"cd5m5m_{data_day}.dat").write_text(
+            "".join(das_lines), encoding="ascii"
         )
 
 
-def loop_deployment(
-    tmp_path: Path, start: datetime = LATE
+def make_loop_deployment(
+    tmp_path: Path, first_epoch_start: datetime = LATE_START
 ) -> tuple[AppConfig, ClockConfig]:
-    """Give a deployment whose first epoch is ``start``."""
-    config, clocks = deployment(tmp_path)
-    processed = config.processed.model_copy(
-        update={"start_from_mjd": datetime_to_mjd(start)}
+    """Give a deployment whose first epoch is ``first_epoch_start``."""
+    config, clock_config = make_deployment(tmp_path)
+    processed_config = config.processed.model_copy(
+        update={"start_from_mjd": datetime_to_mjd(first_epoch_start)}
     )
-    return config.model_copy(update={"processed": processed}), clocks
+    return config.model_copy(update={"processed": processed_config}), clock_config
 
 
-def rows_of(config: AppConfig, key: SeriesKey) -> list[Row]:
+def rows_of(config: AppConfig, series_key: SeriesKey) -> list[Row]:
     """Read every row of a series' file."""
-    path = registry.series_file(config.processed.processed_path, "a", key)
-    kind: files.FileKind = "meas" if len(key) == 2 else "ddiff"
-    size = files.WIDTHS[kind] + 1
-    data = path.read_bytes()[files.HEADER_LINES[kind] * size :]
-    lines = [data[i : i + size - 1].decode() for i in range(0, len(data), size)]
-    if kind == "meas":
-        return [files.parse_meas_row(line).row for line in lines]
-    return [files.parse_ddiff_row(line).row for line in lines]
+    series_file_path = registry.series_file(
+        config.processed.processed_path, "a", series_key
+    )
+    file_kind: files.FileKind = "meas" if len(series_key) == 2 else "ddiff"
+    line_size = files.WIDTHS[file_kind] + 1
+    row_bytes = series_file_path.read_bytes()[
+        files.HEADER_LINES[file_kind] * line_size :
+    ]
+    row_lines = [
+        row_bytes[line_start : line_start + line_size - 1].decode()
+        for line_start in range(0, len(row_bytes), line_size)
+    ]
+    if file_kind == "meas":
+        return [files.parse_meas_row(row_line).row for row_line in row_lines]
+    return [files.parse_ddiff_row(row_line).row for row_line in row_lines]
 
 
-SERIES: Final[tuple[SeriesKey, ...]] = (
+LOOP_SERIES: Final[tuple[SeriesKey, ...]] = (
     ("mc1", "mc1"),
     ("mc1", "nav23"),
     ("mc1", "mc1", "mc1"),
@@ -708,35 +828,38 @@ SERIES: Final[tuple[SeriesKey, ...]] = (
 
 def recorded_writes(monkeypatch: pytest.MonkeyPatch) -> list[datetime | None]:
     """Record, at every write, the newest epoch the buffer holds text for."""
-    marks: list[datetime | None] = []
-    real = files.write_buffer
+    newest_epochs: list[datetime | None] = []
+    real_write_buffer = files.write_buffer
 
-    def spy(buffer: files.DayBuffer) -> None:
+    def record_and_write(day_buffer: files.DayBuffer) -> None:
         """Record the newest buffered epoch, then write."""
-        newest = (
-            [buffer.last_rows[key].interpolated_datetime for key in buffer.last_rows]
-            if buffer.file_texts
+        buffered_epochs = (
+            [
+                day_buffer.last_rows[series_key].interpolated_datetime
+                for series_key in day_buffer.last_rows
+            ]
+            if day_buffer.file_texts
             else []
         )
-        marks.append(max(newest, default=None))
-        real(buffer)
+        newest_epochs.append(max(buffered_epochs, default=None))
+        real_write_buffer(day_buffer)
 
-    monkeypatch.setattr(run, "write_buffer", spy)
-    return marks
+    monkeypatch.setattr(run, "write_buffer", record_and_write)
+    return newest_epochs
 
 
 def test_a_day_is_written_after_its_last_epoch_and_at_the_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Write after 23:50 UTC and when the data end (5.8)."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE + i * T for i in range(6)])
-    writes = recorded_writes(monkeypatch)
-    run.run(config, clocks, None, ShutdownHandler())
-    assert writes == [LATE + 3 * T, LATE + 5 * T]
-    for key in SERIES:
-        assert [row.interpolated_datetime for row in rows_of(config, key)] == [
-            LATE + i * T for i in range(6)
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(6)])
+    write_epochs = recorded_writes(monkeypatch)
+    run.run(config, clock_config, None, ShutdownHandler())
+    assert write_epochs == [LATE_START + 3 * T, LATE_START + 5 * T]
+    for series_key in LOOP_SERIES:
+        assert [row.interpolated_datetime for row in rows_of(config, series_key)] == [
+            LATE_START + i * T for i in range(6)
         ]
 
 
@@ -744,11 +867,11 @@ def test_a_day_without_a_block_at_23_50_is_still_written_after_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Write after 23:50 although the DAS measured nothing then (review focus 2)."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE + i * T for i in (0, 1, 2, 4, 5)])
-    writes = recorded_writes(monkeypatch)
-    run.run(config, clocks, None, ShutdownHandler())
-    assert writes == [LATE + 3 * T, LATE + 5 * T]
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START + i * T for i in (0, 1, 2, 4, 5)])
+    write_epochs = recorded_writes(monkeypatch)
+    run.run(config, clock_config, None, ShutdownHandler())
+    assert write_epochs == [LATE_START + 3 * T, LATE_START + 5 * T]
     assert rows_of(config, ("mc1", "mc1"))[3].flags == "P"
 
 
@@ -756,23 +879,23 @@ def test_a_gap_gives_predicted_rows_and_the_run_stops_at_the_end_of_the_data(
     tmp_path: Path,
 ) -> None:
     """Give every series a row for a gap epoch, and nothing after the data (6.2)."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE, LATE + T, LATE + 4 * T])
-    run.run(config, clocks, None, ShutdownHandler())
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START, LATE_START + T, LATE_START + 4 * T])
+    run.run(config, clock_config, None, ShutdownHandler())
     self_rows = rows_of(config, ("mc1", "mc1"))
     assert [row.interpolated_datetime for row in self_rows] == [
-        LATE + i * T for i in range(5)
+        LATE_START + i * T for i in range(5)
     ]
     assert [row.flags for row in self_rows] == ["RD", "RD", "PD", "PD", "RD"]
 
 
 def test_steps_stop_the_run_after_that_many_epochs(tmp_path: Path) -> None:
     """Process --steps N epochs and stop, writing the buffer (6.1)."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE + i * T for i in range(6)])
-    run.run(config, clocks, 2, ShutdownHandler())
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(6)])
+    run.run(config, clock_config, 2, ShutdownHandler())
     assert len(rows_of(config, ("mc1", "mc1"))) == 2
-    run.run(config, clocks, 1, ShutdownHandler())
+    run.run(config, clock_config, 1, ShutdownHandler())
     assert len(rows_of(config, ("mc1", "mc1"))) == 3
 
 
@@ -780,20 +903,20 @@ def test_a_shutdown_stops_between_epochs_after_writing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Finish the epoch, write the buffer and stop when a shutdown is asked (6.1)."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE + i * T for i in range(6)])
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(6)])
     shutdown = ShutdownHandler()
-    real = run.process_epoch
+    real_process_epoch = run.process_epoch
 
-    def asking(*args: object) -> run.EpochDone:
+    def ask_for_shutdown(*args: object) -> run.EpochDone:
         """Process the epoch, asking for a shutdown during the second."""
-        done = real(*args)  # type: ignore[arg-type]
-        if done.epoch.interpolated_datetime == LATE + T:
+        epoch_done = real_process_epoch(*args)  # type: ignore[arg-type]
+        if epoch_done.epoch.interpolated_datetime == LATE_START + T:
             shutdown.request_shutdown()
-        return done
+        return epoch_done
 
-    monkeypatch.setattr(run, "process_epoch", asking)
-    run.run(config, clocks, None, shutdown)
+    monkeypatch.setattr(run, "process_epoch", ask_for_shutdown)
+    run.run(config, clock_config, None, shutdown)
     assert len(rows_of(config, ("mc1", "mc1"))) == 2
     assert len(rows_of(config, ("mc1", "mc1", "nav23"))) == 2
 
@@ -802,140 +925,177 @@ def test_a_run_restarted_after_every_epoch_writes_the_same_files(
     tmp_path: Path,
 ) -> None:
     """Give byte-identical files whether run as a batch or one epoch at a time (I5)."""
-    batch, clocks = loop_deployment(tmp_path / "batch")
-    das_files(tmp_path / "batch", [LATE + i * T for i in range(6)])
-    run.run(batch, clocks, None, ShutdownHandler())
-    stepped, clocks = loop_deployment(tmp_path / "stepped")
-    das_files(tmp_path / "stepped", [LATE + i * T for i in range(6)])
+    batch_config, clock_config = make_loop_deployment(tmp_path / "batch")
+    write_das_files(tmp_path / "batch", [LATE_START + i * T for i in range(6)])
+    run.run(batch_config, clock_config, None, ShutdownHandler())
+    stepped_config, clock_config = make_loop_deployment(tmp_path / "stepped")
+    write_das_files(tmp_path / "stepped", [LATE_START + i * T for i in range(6)])
     for _ in range(8):
-        run.run(stepped, clocks, 1, ShutdownHandler())
-    for key in SERIES:
-        one = registry.series_file(batch.processed.processed_path, "a", key)
-        other = registry.series_file(stepped.processed.processed_path, "a", key)
-        assert one.read_bytes() == other.read_bytes(), key
+        run.run(stepped_config, clock_config, 1, ShutdownHandler())
+    for series_key in LOOP_SERIES:
+        first_series_file = registry.series_file(
+            batch_config.processed.processed_path, "a", series_key
+        )
+        second_series_file = registry.series_file(
+            stepped_config.processed.processed_path, "a", series_key
+        )
+        assert first_series_file.read_bytes() == second_series_file.read_bytes(), (
+            series_key
+        )
 
 
 def test_a_damaged_line_found_at_the_start_redoes_every_file_from_its_epoch(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Roll every file back before a damaged line, then redo them alike (6.7, U26)."""
-    clean, clocks = loop_deployment(tmp_path / "clean")
-    das_files(tmp_path / "clean", [LATE + i * T for i in range(6)])
-    run.run(clean, clocks, None, ShutdownHandler())
-    damaged, clocks = loop_deployment(tmp_path / "damaged")
-    das_files(tmp_path / "damaged", [LATE + i * T for i in range(6)])
-    run.run(damaged, clocks, None, ShutdownHandler())
-    path = registry.series_file(damaged.processed.processed_path, "a", ("mc1", "nav23"))
-    data = bytearray(path.read_bytes())
-    size = files.MEAS_WIDTH + 1
-    data[(files.MEAS_HEADER_LINES + 2) * size + 3] = ord("x")
-    path.write_bytes(bytes(data[: -size // 2]))
-    assert run.next_epoch(damaged) == LATE + 2 * T
-    logged_here = [(r.levelname, r.getMessage()) for r in caplog.records]
-    assert [level for level, _ in logged_here] == ["ERROR", "WARNING"]
-    assert logged_here[0][1].startswith(
-        f"data file {path} is damaged after its row of {LATE + T}: "
+    clean_config, clock_config = make_loop_deployment(tmp_path / "clean")
+    write_das_files(tmp_path / "clean", [LATE_START + i * T for i in range(6)])
+    run.run(clean_config, clock_config, None, ShutdownHandler())
+    damaged_config, clock_config = make_loop_deployment(tmp_path / "damaged")
+    write_das_files(tmp_path / "damaged", [LATE_START + i * T for i in range(6)])
+    run.run(damaged_config, clock_config, None, ShutdownHandler())
+    data_file = registry.series_file(
+        damaged_config.processed.processed_path, "a", ("mc1", "nav23")
     )
-    assert logged_here[1][1] == (
-        f"rolled back every file of channel a to {LATE + T}, after damaged files,"
-        f" each logged at ERROR: {len(SERIES)} files cut, 0 deleted, 0 already there"
+    file_bytes = bytearray(data_file.read_bytes())
+    line_size = files.MEAS_WIDTH + 1
+    file_bytes[(files.MEAS_HEADER_LINES + 2) * line_size + 3] = ord("x")
+    data_file.write_bytes(bytes(file_bytes[: -line_size // 2]))
+    assert run.next_epoch(damaged_config) == LATE_START + 2 * T
+    log_entries = [
+        (log_record.levelname, log_record.getMessage()) for log_record in caplog.records
+    ]
+    assert [level_name for level_name, _ in log_entries] == ["ERROR", "WARNING"]
+    assert log_entries[0][1].startswith(
+        f"data file {data_file} is damaged after its row of {LATE_START + T}: "
     )
-    run.run(damaged, clocks, None, ShutdownHandler())
-    for key in SERIES:
-        one = registry.series_file(clean.processed.processed_path, "a", key)
-        other = registry.series_file(damaged.processed.processed_path, "a", key)
-        assert one.read_bytes() == other.read_bytes(), key
+    assert log_entries[1][1] == (
+        f"rolled back every file of channel a to {LATE_START + T}, after damaged"
+        f" files, each logged at ERROR: {len(LOOP_SERIES)} files cut, 0 deleted,"
+        " 0 already there"
+    )
+    run.run(damaged_config, clock_config, None, ShutdownHandler())
+    for series_key in LOOP_SERIES:
+        first_series_file = registry.series_file(
+            clean_config.processed.processed_path, "a", series_key
+        )
+        second_series_file = registry.series_file(
+            damaged_config.processed.processed_path, "a", series_key
+        )
+        assert first_series_file.read_bytes() == second_series_file.read_bytes(), (
+            series_key
+        )
 
 
 def test_a_journal_found_at_the_start_rolls_every_file_back_before_its_epoch(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Roll every file back to before a stopped write's first epoch, then redo (6.7)."""
-    clean, clocks = loop_deployment(tmp_path / "clean")
-    das_files(tmp_path / "clean", [LATE + i * T for i in range(6)])
-    run.run(clean, clocks, None, ShutdownHandler())
-    stopped, clocks = loop_deployment(tmp_path / "stopped")
-    das_files(tmp_path / "stopped", [LATE + i * T for i in range(6)])
-    run.run(stopped, clocks, None, ShutdownHandler())
-    journal = stopped.processed.processed_path / JOURNAL_FILE_TEMPLATE.format(rf="a")
-    journal.write_text(f"{(LATE + 3 * T).isoformat()}\n", encoding="ascii")
+    clean_config, clock_config = make_loop_deployment(tmp_path / "clean")
+    write_das_files(tmp_path / "clean", [LATE_START + i * T for i in range(6)])
+    run.run(clean_config, clock_config, None, ShutdownHandler())
+    stopped_config, clock_config = make_loop_deployment(tmp_path / "stopped")
+    write_das_files(tmp_path / "stopped", [LATE_START + i * T for i in range(6)])
+    run.run(stopped_config, clock_config, None, ShutdownHandler())
+    journal = stopped_config.processed.processed_path / JOURNAL_FILE_TEMPLATE.format(
+        rf="a"
+    )
+    journal.write_text(f"{(LATE_START + 3 * T).isoformat()}\n", encoding="ascii")
     caplog.clear()
-    assert run.next_epoch(stopped) == LATE + 3 * T
-    assert [r.getMessage() for r in caplog.records] == [
-        f"rolled back every file of channel a to {LATE + 2 * T}, after a write that"
-        f" stopped part way: {len(SERIES)} files cut, 0 deleted, 0 already there"
+    assert run.next_epoch(stopped_config) == LATE_START + 3 * T
+    assert [log_record.getMessage() for log_record in caplog.records] == [
+        f"rolled back every file of channel a to {LATE_START + 2 * T}, after a write"
+        f" that stopped part way: {len(LOOP_SERIES)} files cut, 0 deleted,"
+        " 0 already there"
     ]
     caplog.clear()
-    assert run.next_epoch(stopped) == LATE + 3 * T
+    assert run.next_epoch(stopped_config) == LATE_START + 3 * T
     assert not caplog.records
     assert not journal.exists()
-    series = run.data_series(stopped)
-    assert len(series) == len(SERIES)
-    for path, kind, key in series:
-        assert files.good_through(path, kind) == LATE + 2 * T, key
-    run.run(stopped, clocks, None, ShutdownHandler())
-    for key in SERIES:
-        one = registry.series_file(clean.processed.processed_path, "a", key)
-        other = registry.series_file(stopped.processed.processed_path, "a", key)
-        assert one.read_bytes() == other.read_bytes(), key
+    series_files = run.data_series(stopped_config)
+    assert len(series_files) == len(LOOP_SERIES)
+    for data_file, file_kind, series_key in series_files:
+        assert files.good_through(data_file, file_kind) == LATE_START + 2 * T, (
+            series_key
+        )
+    run.run(stopped_config, clock_config, None, ShutdownHandler())
+    for series_key in LOOP_SERIES:
+        first_series_file = registry.series_file(
+            clean_config.processed.processed_path, "a", series_key
+        )
+        second_series_file = registry.series_file(
+            stopped_config.processed.processed_path, "a", series_key
+        )
+        assert first_series_file.read_bytes() == second_series_file.read_bytes(), (
+            series_key
+        )
 
 
 def test_with_no_files_the_run_starts_at_start_from_mjd(tmp_path: Path) -> None:
     """Start at the epoch containing start_from_mjd when no file exists (6.7)."""
-    config, _ = loop_deployment(tmp_path, LATE + 2 * T + timedelta(seconds=90))
-    assert run.next_epoch(config) == LATE + 2 * T
+    config, _ = make_loop_deployment(
+        tmp_path, LATE_START + 2 * T + timedelta(seconds=90)
+    )
+    assert run.next_epoch(config) == LATE_START + 2 * T
 
 
 def test_a_block_before_the_next_epoch_is_passed_over(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Skip a block earlier than the epoch the run is at, rather than loop on it."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE - T, LATE, LATE + T])
-    real = read_all_blocks
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START - T, LATE_START, LATE_START + T])
+    real_read_all_blocks = read_all_blocks
 
-    def from_earlier(directory: Path, start_at_mjd: float | None = None) -> object:
+    def read_from_earlier(
+        das_directory: Path, start_at_mjd: float | None = None
+    ) -> object:
         """Read from one epoch before the start."""
         del start_at_mjd
-        return real(directory, datetime_to_mjd(LATE - T))
+        return real_read_all_blocks(das_directory, datetime_to_mjd(LATE_START - T))
 
-    monkeypatch.setattr(run, "read_all_blocks", from_earlier)
-    run.run(config, clocks, None, ShutdownHandler())
-    rows = rows_of(config, ("mc1", "mc1"))
-    assert [row.interpolated_datetime for row in rows] == [LATE, LATE + T]
+    monkeypatch.setattr(run, "read_all_blocks", read_from_earlier)
+    run.run(config, clock_config, None, ShutdownHandler())
+    series_rows = rows_of(config, ("mc1", "mc1"))
+    assert [row.interpolated_datetime for row in series_rows] == [
+        LATE_START,
+        LATE_START + T,
+    ]
 
 
 def test_an_epoch_that_fails_adds_none_of_its_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Leave the day buffer as it was when an epoch fails part way (5.8 step 1)."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE + i * T for i in range(3)])
-    buffer = files.DayBuffer("a")
-    blocks = list(read_all_blocks(tmp_path / "das", datetime_to_mjd(LATE)))
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(3)])
+    day_buffer = files.DayBuffer("a")
+    das_blocks = list(read_all_blocks(tmp_path / "das", datetime_to_mjd(LATE_START)))
     files.ensure_archives(config.processed.processed_path)
-    run.process_epoch(LATE, blocks[0], buffer, config, clocks)
-    before = dict(buffer.file_texts), dict(buffer.last_rows)
-    real = files.DayBuffer.add
-    calls: list[SeriesKey] = []
+    run.process_epoch(LATE_START, das_blocks[0], day_buffer, config, clock_config)
+    buffer_before = dict(day_buffer.file_texts), dict(day_buffer.last_rows)
+    real_add = files.DayBuffer.add
+    added_series: list[SeriesKey] = []
 
-    def failing(
+    def fail_on_second_add(
         self: files.DayBuffer,
-        path: Path,
-        key: SeriesKey,
-        record: files.MeasRecord | files.DdiffRecord,
+        data_file: Path,
+        series_key: SeriesKey,
+        file_record: files.MeasRecord | files.DdiffRecord,
     ) -> None:
         """Add the first row, then fail on the second, as a bad value would."""
-        calls.append(key)
-        if len(calls) == 2:
+        added_series.append(series_key)
+        if len(added_series) == 2:
             message = "injected"
             raise DataFileError(message)
-        real(self, path, key, record)
+        real_add(self, data_file, series_key, file_record)
 
-    monkeypatch.setattr(files.DayBuffer, "add", failing)
+    monkeypatch.setattr(files.DayBuffer, "add", fail_on_second_add)
     with pytest.raises(DataFileError, match="injected"):
-        run.process_epoch(LATE + T, blocks[1], buffer, config, clocks)
-    assert (dict(buffer.file_texts), dict(buffer.last_rows)) == before
+        run.process_epoch(
+            LATE_START + T, das_blocks[1], day_buffer, config, clock_config
+        )
+    assert (dict(day_buffer.file_texts), dict(day_buffer.last_rows)) == buffer_before
 
 
 # --------------------------------------------------------------- log events
@@ -944,37 +1104,49 @@ RUN_LOGGER: Final = "masterclock.das_processor.run"
 """The logger the run's events go to."""
 
 
-def logged(
+def logged_events(
     caplog: pytest.LogCaptureFixture,
     epoch: run.Epoch,
-    last: dict[SeriesKey, Row],
+    last_rows: dict[SeriesKey, Row],
 ) -> list[tuple[str, str]]:
     """Process ``epoch`` and give the run's log records as (level, message)."""
-    pairs = run.process_pairs(epoch, last)
-    triples = run.process_triples(epoch, last, pairs)
-    done = run.EpochDone(epoch=epoch, pair_step=pairs, triple_step=triples)
+    pair_step = run.process_pairs(epoch, last_rows)
+    triple_step = run.process_triples(epoch, last_rows, pair_step)
+    epoch_done = run.EpochDone(
+        epoch=epoch, pair_step=pair_step, triple_step=triple_step
+    )
     caplog.clear()
     with caplog.at_level(TRACE, logger=RUN_LOGGER):
-        run.log_epoch(done, last, "a")
+        run.log_epoch(epoch_done, last_rows, "a")
     return [
-        (r.levelname, r.getMessage()) for r in caplog.records if r.name == RUN_LOGGER
+        (log_record.levelname, log_record.getMessage())
+        for log_record in caplog.records
+        if log_record.name == RUN_LOGGER
     ]
 
 
-def at(records: list[tuple[str, str]], level: str) -> list[str]:
-    """Give the messages logged at ``level``."""
-    return [message for name, message in records if name == level]
+def messages_at(log_entries: list[tuple[str, str]], level_name: str) -> list[str]:
+    """Give the messages logged at ``level_name``."""
+    return [
+        entry_message
+        for entry_level, entry_message in log_entries
+        if entry_level == level_name
+    ]
 
 
 def test_an_epoch_is_logged_with_its_counts(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log each epoch at INFO with its series, accepted and held (16.2)."""
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
-    records = logged(
-        caplog, epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path), last
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): WORKED_LAST_ROW}
+    log_entries = logged_events(
+        caplog,
+        epoch_of(
+            [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+        ),
+        last_rows,
     )
-    assert at(records, "INFO") == [
+    assert messages_at(log_entries, "INFO") == [
         "epoch 2025-09-23 06:00:00+00:00: 5 pairs, 10 triples, 5 accepted, 10 held"
     ]
 
@@ -983,20 +1155,24 @@ def test_each_series_outcome_and_update_are_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log each series' flags at DEBUG and its prediction and update at TRACE."""
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
-    records = logged(
-        caplog, epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path), last
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): WORKED_LAST_ROW}
+    log_entries = logged_events(
+        caplog,
+        epoch_of(
+            [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+        ),
+        last_rows,
     )
-    debug = at(records, "DEBUG")
-    assert len(debug) == 5 + 10
-    assert "das_a.mc2.nav23: A" in debug
-    assert "das_a.mc1.mc2.nav23: RD" in debug
-    trace = at(records, "TRACE")
-    assert len(trace) == 5 + 10
+    debug_messages = messages_at(log_entries, "DEBUG")
+    assert len(debug_messages) == 5 + 10
+    assert "das_a.mc2.nav23: A" in debug_messages
+    assert "das_a.mc1.mc2.nav23: RD" in debug_messages
+    trace_messages = messages_at(log_entries, "TRACE")
+    assert len(trace_messages) == 5 + 10
     assert any(
-        line.startswith("das_a.mc2.nav23: prediction 1234574.38")
-        and "x 1234574.457" in line
-        for line in trace
+        trace_line.startswith("das_a.mc2.nav23: prediction 1234574.38")
+        and "x 1234574.457" in trace_line
+        for trace_line in trace_messages
     )
 
 
@@ -1004,18 +1180,20 @@ def test_a_reject_is_logged_at_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a counted reject with its innovation, scale and count (16.2)."""
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
-    outlier = DASMeasurement(
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): WORKED_LAST_ROW}
+    outlier_measurement = DASMeasurement(
         measurement_mjd=60941.251588,
         measured_phase=34779,
         rms=3,
         switch="2B07",
         clock="nav23",
     )
-    records = logged(
-        caplog, epoch_of([*REFERENCE_MEASURED, outlier], last, tmp_path), last
+    log_entries = logged_events(
+        caplog,
+        epoch_of([*REFERENCE_MEASUREMENTS, outlier_measurement], last_rows, tmp_path),
+        last_rows,
     )
-    assert at(records, "WARNING") == [
+    assert messages_at(log_entries, "WARNING") == [
         "das_a.mc2.nav23 rejected: innovation 202.6 ps, scale 3.0 ps, 1 consecutive"
     ]
 
@@ -1024,27 +1202,29 @@ def test_a_phase_step_is_logged_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a phase step with its size and the step offset (16.2)."""
-    stepping = WORKED_LAST.model_copy(
+    stepping_row = WORKED_LAST_ROW.model_copy(
         update={
             "flags": "R",
             "consecutive_rejects": 2,
-            "rejects": ((PREVIOUS - T, 150.0), (PREVIOUS, 150.0)),
+            "rejects": ((PREVIOUS_EPOCH - T, 150.0), (PREVIOUS_EPOCH, 150.0)),
             "epochs_since_accept": 2,
         }
     )
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): stepping}
-    moved = DASMeasurement(
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): stepping_row}
+    moved_measurement = DASMeasurement(
         measurement_mjd=60941.251588,
         measured_phase=34579 + 150 - 3,
         rms=3,
         switch="2B07",
         clock="nav23",
     )
-    records = logged(
-        caplog, epoch_of([*REFERENCE_MEASURED, moved], last, tmp_path), last
+    log_entries = logged_events(
+        caplog,
+        epoch_of([*REFERENCE_MEASUREMENTS, moved_measurement], last_rows, tmp_path),
+        last_rows,
     )
-    assert "das_a.mc2.nav23 phase step of 150 ps; step offset 150 ps" in at(
-        records, "INFO"
+    assert "das_a.mc2.nav23 phase step of 150 ps; step offset 150 ps" in messages_at(
+        log_entries, "INFO"
     )
 
 
@@ -1052,7 +1232,7 @@ def test_a_cold_start_and_dormancy_are_logged_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a series that cold-starts and one that goes dormant (16.2)."""
-    acquiring = last_row(
+    acquiring_row = last_row(
         x_fs=None,
         y=None,
         d=None,
@@ -1061,32 +1241,40 @@ def test_a_cold_start_and_dormancy_are_logged_at_info(
         filter_states=3,
         time_constant=100.0,
         scale_time_constant=50.0,
-        rejects=((PREVIOUS - T, 1_234_579.0), (PREVIOUS, 1_234_579.0)),
+        rejects=((PREVIOUS_EPOCH - T, 1_234_579.0), (PREVIOUS_EPOCH, 1_234_579.0)),
     )
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): acquiring}
-    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
-    info = at(logged(caplog, epoch, last), "INFO")
-    assert "das_a.mc2.nav23 cold start: segment 2" in info
-    stopping = {
-        **REFERENCE_LAST,
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): acquiring_row}
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+    )
+    info_messages = messages_at(logged_events(caplog, epoch, last_rows), "INFO")
+    assert "das_a.mc2.nav23 cold start: segment 2" in info_messages
+    stopping_last_rows = {
+        **REFERENCE_LAST_ROWS,
         ("mc1", "mc1"): last_row(x_fs=1_000_000, epochs_since_accept=40),
     }
-    epoch = epoch_of(REFERENCE_MEASURED[1:], stopping, tmp_path / "second")
-    info = at(logged(caplog, epoch, stopping), "INFO")
-    assert "das_a.mc1.mc1 dormant" in info
+    epoch = epoch_of(
+        REFERENCE_MEASUREMENTS[1:], stopping_last_rows, tmp_path / "second"
+    )
+    info_messages = messages_at(
+        logged_events(caplog, epoch, stopping_last_rows), "INFO"
+    )
+    assert "das_a.mc1.mc1 dormant" in info_messages
 
 
 def test_a_configuration_change_is_logged_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a warm start for new time constants (16.2)."""
-    older = WORKED_LAST.model_copy(update={"time_constant": 80.0})
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): older}
-    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
-    info = at(logged(caplog, epoch, last), "INFO")
+    older_row = WORKED_LAST_ROW.model_copy(update={"time_constant": 80.0})
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): older_row}
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+    )
+    info_messages = messages_at(logged_events(caplog, epoch, last_rows), "INFO")
     assert (
         "das_a.mc2.nav23 configuration change: M 80.0 to 100.0, M_sigma 50.0 to 50.0"
-        in info
+        in info_messages
     )
 
 
@@ -1094,60 +1282,71 @@ def test_a_frequency_step_is_logged_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a frequency step and the segment it starts (16.2)."""
-    ramping = WORKED_LAST.model_copy(
+    ramping_row = WORKED_LAST_ROW.model_copy(
         update={
             "flags": "R",
             "consecutive_rejects": 2,
-            "rejects": ((PREVIOUS - T, 30.0), (PREVIOUS, 60.0)),
+            "rejects": ((PREVIOUS_EPOCH - T, 30.0), (PREVIOUS_EPOCH, 60.0)),
             "epochs_since_accept": 2,
         }
     )
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): ramping}
-    moved = DASMeasurement(
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): ramping_row}
+    moved_measurement = DASMeasurement(
         measurement_mjd=60941.251588,
         measured_phase=34579 + 90 - 3,
         rms=3,
         switch="2B07",
         clock="nav23",
     )
-    info = at(
-        logged(caplog, epoch_of([*REFERENCE_MEASURED, moved], last, tmp_path), last),
+    info_messages = messages_at(
+        logged_events(
+            caplog,
+            epoch_of([*REFERENCE_MEASUREMENTS, moved_measurement], last_rows, tmp_path),
+            last_rows,
+        ),
         "INFO",
     )
-    assert "das_a.mc2.nav23 frequency step: segment 5" in info
+    assert "das_a.mc2.nav23 frequency step: segment 5" in info_messages
 
 
 def test_screening_and_slip_events_are_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log screening failures at WARNING and a corrected slip at INFO (16.2)."""
-    maser = last_row(
+    maser_last_row = last_row(
         x_fs=2_000_000,
         filter_states=3,
         time_constant=100.0,
         scale_time_constant=50.0,
         innovation_scale=40.0,
     )
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): maser}
-    shifted = [
-        measured("mc1", "mc1", 1000, 10),
-        measured("mc2", "mc2", 2100, 20),
-        measured("mc1", "mc2", 5000, 30),
-        measured("mc2", "mc1", PHASE_PERIOD - 5000, 40),
-        measured("mc2", "nav23", 2008, 50),
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): maser_last_row}
+    shifted_measurements = [
+        das_measurement_of("mc1", "mc1", 1000, 10),
+        das_measurement_of("mc2", "mc2", 2100, 20),
+        das_measurement_of("mc1", "mc2", 5000, 30),
+        das_measurement_of("mc2", "mc1", PHASE_PERIOD - 5000, 40),
+        das_measurement_of("mc2", "nav23", 2008, 50),
     ]
-    warnings = at(logged(caplog, epoch_of(shifted, last, tmp_path), last), "WARNING")
-    assert "self-measurement of mc2 failed: excluded das_a.mc2.nav23" in warnings
+    warning_messages = messages_at(
+        logged_events(
+            caplog, epoch_of(shifted_measurements, last_rows, tmp_path), last_rows
+        ),
+        "WARNING",
+    )
+    assert (
+        "self-measurement of mc2 failed: excluded das_a.mc2.nav23" in warning_messages
+    )
 
 
 def test_a_missing_self_measurement_is_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a self pair with a prediction but no measurement at WARNING (10.1)."""
-    last = dict(REFERENCE_LAST)
-    epoch = epoch_of(REFERENCE_MEASURED[1:], last, tmp_path)
-    assert "self-measurement of mc1 missing" in at(
-        logged(caplog, epoch, last), "WARNING"
+    last_rows = dict(REFERENCE_LAST_ROWS)
+    epoch = epoch_of(REFERENCE_MEASUREMENTS[1:], last_rows, tmp_path)
+    assert "self-measurement of mc1 missing" in messages_at(
+        logged_events(caplog, epoch, last_rows), "WARNING"
     )
 
 
@@ -1155,16 +1354,21 @@ def test_a_reciprocity_and_a_closure_failure_are_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log the link directions reciprocity excludes, and links closure excludes."""
-    last = dict(REFERENCE_LAST)
-    bad = [
-        *REFERENCE_MEASURED[:2],
-        measured("mc1", "mc2", 5100, 30),
-        REFERENCE_MEASURED[3],
+    last_rows = dict(REFERENCE_LAST_ROWS)
+    bad_link_measurements = [
+        *REFERENCE_MEASUREMENTS[:2],
+        das_measurement_of("mc1", "mc2", 5100, 30),
+        REFERENCE_MEASUREMENTS[3],
     ]
-    warnings = at(logged(caplog, epoch_of(bad, last, tmp_path), last), "WARNING")
+    warning_messages = messages_at(
+        logged_events(
+            caplog, epoch_of(bad_link_measurements, last_rows, tmp_path), last_rows
+        ),
+        "WARNING",
+    )
     assert (
         "reciprocity of mc1-mc2 failed: excluded das_a.mc1.mc2, das_a.mc2.mc1"
-        in warnings
+        in warning_messages
     )
 
 
@@ -1172,36 +1376,44 @@ def test_slips_corrected_and_undecided_are_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a corrected slip at INFO, as the slip check found it."""
-    jump = PHASE_PERIOD // 2 + 2
-    clock = {
+    cycle_jump = PHASE_PERIOD // 2 + 2
+    maser_fields = {
         "filter_states": 3,
         "time_constant": 100.0,
         "scale_time_constant": 50.0,
         "innovation_scale": 3.0,
     }
-    last = {
-        **REFERENCE_LAST,
+    last_rows = {
+        **REFERENCE_LAST_ROWS,
         ("mc1", "nav23"): last_row(
-            x_fs=1_000_000_000, epochs_in_segment=10, flags="AU", **clock
+            x_fs=1_000_000_000, epochs_in_segment=10, flags="AU", **maser_fields
         ),
-        ("mc2", "nav23"): last_row(x_fs=2_000_000_000, **clock),
+        ("mc2", "nav23"): last_row(x_fs=2_000_000_000, **maser_fields),
     }
-    clocks = [
-        measured("mc1", "nav23", (1_000_000 + jump) % PHASE_PERIOD, 50),
-        measured("mc2", "nav23", (2_000_000 + jump - 4) % PHASE_PERIOD, 60),
+    clock_measurements = [
+        das_measurement_of("mc1", "nav23", (1_000_000 + cycle_jump) % PHASE_PERIOD, 50),
+        das_measurement_of(
+            "mc2", "nav23", (2_000_000 + cycle_jump - 4) % PHASE_PERIOD, 60
+        ),
     ]
-    records = logged(
-        caplog, epoch_of([*REFERENCE_MEASURED, *clocks], last, tmp_path), last
+    log_entries = logged_events(
+        caplog,
+        epoch_of([*REFERENCE_MEASUREMENTS, *clock_measurements], last_rows, tmp_path),
+        last_rows,
     )
-    assert "das_a.mc1.nav23 slip corrected: +1 cycles" in at(records, "INFO")
-    wide = {**clock, "innovation_scale": 25_000.0}
-    last[("mc1", "nav23")] = last_row(x_fs=1_000_000_000, **wide)
-    last[("mc2", "nav23")] = last_row(x_fs=2_000_000_000, **wide)
-    epoch = epoch_of([*REFERENCE_MEASURED, *clocks], last, tmp_path / "second")
-    warnings = at(logged(caplog, epoch, last), "WARNING")
+    assert "das_a.mc1.nav23 slip corrected: +1 cycles" in messages_at(
+        log_entries, "INFO"
+    )
+    wide_scale_fields = {**maser_fields, "innovation_scale": 25_000.0}
+    last_rows[("mc1", "nav23")] = last_row(x_fs=1_000_000_000, **wide_scale_fields)
+    last_rows[("mc2", "nav23")] = last_row(x_fs=2_000_000_000, **wide_scale_fields)
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, *clock_measurements], last_rows, tmp_path / "second"
+    )
+    warning_messages = messages_at(logged_events(caplog, epoch, last_rows), "WARNING")
     assert (
         "slip of clock nav23 undecided: excluded das_a.mc1.nav23, das_a.mc2.nav23"
-        in warnings
+        in warning_messages
     )
 
 
@@ -1210,73 +1422,95 @@ def test_a_closure_failure_is_logged(
 ) -> None:
     """Log each link closure excludes, at WARNING (10.3)."""
     refs = ("mc1", "mc2", "mc3")
-    values = {"mc1": 1000, "mc2": 2000, "mc3": 3000}
-    last: dict[SeriesKey, Row] = {}
-    raws = []
-    for index, (a, b) in enumerate((a, b) for a in refs for b in refs):
-        x = values[a] if a == b else 1000 * (int(a[-1]) - int(b[-1]))
-        error = (
+    self_phases = {"mc1": 1000, "mc2": 2000, "mc3": 3000}
+    last_rows: dict[SeriesKey, Row] = {}
+    das_measurements = []
+    for measurement_index, (a, b) in enumerate((a, b) for a in refs for b in refs):
+        x = self_phases[a] if a == b else 1000 * (int(a[-1]) - int(b[-1]))
+        injected_error = (
             50 if (a, b) == ("mc2", "mc3") else -50 if (a, b) == ("mc3", "mc2") else 0
         )
-        last[(a, b)] = last_row(x_fs=x * 1000)
-        raws.append(measured(a, b, (x + error) % PHASE_PERIOD, 10 * (index + 1)))
-    warnings = at(logged(caplog, epoch_of(raws, last, tmp_path), last), "WARNING")
+        last_rows[(a, b)] = last_row(x_fs=x * 1000)
+        das_measurements.append(
+            das_measurement_of(
+                a, b, (x + injected_error) % PHASE_PERIOD, 10 * (measurement_index + 1)
+            )
+        )
+    warning_messages = messages_at(
+        logged_events(
+            caplog, epoch_of(das_measurements, last_rows, tmp_path), last_rows
+        ),
+        "WARNING",
+    )
     assert (
         "closure of link mc2-mc3 failed: excluded das_a.mc2.mc3, das_a.mc3.mc2"
-        in warnings
+        in warning_messages
     )
 
 
 def test_a_first_run_starts_at_the_first_data(tmp_path: Path) -> None:
     """Start at the first block when no series exists yet, so each step progresses."""
-    config, clocks = loop_deployment(tmp_path, LATE - 3 * T)
-    das_files(tmp_path, [LATE, LATE + T])
-    run.run(config, clocks, 1, ShutdownHandler())
+    config, clock_config = make_loop_deployment(tmp_path, LATE_START - 3 * T)
+    write_das_files(tmp_path, [LATE_START, LATE_START + T])
+    run.run(config, clock_config, 1, ShutdownHandler())
     assert [row.interpolated_datetime for row in rows_of(config, ("mc1", "mc1"))] == [
-        LATE
+        LATE_START
     ]
-    run.run(config, clocks, 1, ShutdownHandler())
+    run.run(config, clock_config, 1, ShutdownHandler())
     assert len(rows_of(config, ("mc1", "mc1"))) == 2
 
 
 def test_a_link_not_accepted_does_not_make_the_triple_cold(tmp_path: Path) -> None:
     """Take a link rejected for its RMS by its prediction, not marked cold (12.6)."""
-    last = {
-        **REFERENCE_LAST,
-        ("mc2", "nav23"): WORKED_LAST,
-        ("mc1", "mc2", "nav23"): triple_last(x_fs=1_239_577_000),
+    last_rows = {
+        **REFERENCE_LAST_ROWS,
+        ("mc2", "nav23"): WORKED_LAST_ROW,
+        ("mc1", "mc2", "nav23"): triple_last_row(x_fs=1_239_577_000),
     }
-    link = REFERENCE_MEASURED[3]
-    noisy = DASMeasurement.model_validate(
+    link_measurement = REFERENCE_MEASUREMENTS[3]
+    noisy_link = DASMeasurement.model_validate(
         {
-            "measurement_mjd": link.measurement_mjd,
-            "measured_phase": link.measured_phase,
+            "measurement_mjd": link_measurement.measurement_mjd,
+            "measured_phase": link_measurement.measured_phase,
             "rms": 99,
-            "switch": link.switch,
-            "clock": link.clock,
+            "switch": link_measurement.switch,
+            "clock": link_measurement.clock,
         }
     )
-    epoch = epoch_of([*REFERENCE_MEASURED[:3], noisy, WORKED_RAW], last, tmp_path)
-    pairs = run.process_pairs(epoch, last)
-    assert "A" not in pairs.step_results[("mc2", "mc1")].row.flags
-    done = run.process_triples(epoch, last, pairs)
-    remote = done.measurements[("mc1", "mc2", "nav23")]
-    assert (remote.components_used, remote.pair_cold_started) == ("110", False)
-    assert done.step_results[("mc1", "mc2", "nav23")].row.flags == "A"
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS[:3], noisy_link, WORKED_DAS_MEASUREMENT],
+        last_rows,
+        tmp_path,
+    )
+    pair_step = run.process_pairs(epoch, last_rows)
+    assert "A" not in pair_step.step_results[("mc2", "mc1")].row.flags
+    triple_step = run.process_triples(epoch, last_rows, pair_step)
+    remote_measurement = triple_step.measurements[("mc1", "mc2", "nav23")]
+    assert (
+        remote_measurement.components_used,
+        remote_measurement.pair_cold_started,
+    ) == ("110", False)
+    assert triple_step.step_results[("mc1", "mc2", "nav23")].row.flags == "A"
 
 
 def test_each_series_takes_the_settings_in_force_at_its_epoch(tmp_path: Path) -> None:
     """Give the clock entry that took effect at or before E, not a later one (8.1)."""
-    config, _ = deployment(tmp_path)
-    dated = CLOCKS.replace(
+    config, _ = make_deployment(tmp_path)
+    dated_clock_config = CLOCK_CONFIG_YAML.replace(
         "  nav23: [{type: maser}]\n",
         "  nav23: [{type: maser},"
         f" {{effective_mjd: {datetime_to_mjd(E)}, time_constant: 150.0}},"
         f" {{effective_mjd: {datetime_to_mjd(E + T)}, time_constant: 200.0}}]\n",
     )
-    path = tmp_path / "dated.yaml"
-    path.write_text(dated, encoding="utf-8")
-    epoch = run.build_epoch(E, block(MEASURED), NONE, config, read_clock_config(path))
+    dated_file = tmp_path / "dated.yaml"
+    dated_file.write_text(dated_clock_config, encoding="utf-8")
+    epoch = run.build_epoch(
+        E,
+        das_block_of(MEASURED_PAIRS),
+        NO_SERIES,
+        config,
+        read_clock_config(dated_file),
+    )
     assert epoch.series_params[("mc2", "nav23")].M == 150.0
 
 
@@ -1284,49 +1518,53 @@ def test_the_prediction_and_update_are_logged_in_full(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log at TRACE each series' prediction, innovation, x, y and d, as they are."""
-    last = {
-        **REFERENCE_LAST,
-        ("mc2", "nav23"): WORKED_LAST,
-        ("mc1", "mc2", "nav23"): triple_last(x_fs=1_239_577_000),
+    last_rows = {
+        **REFERENCE_LAST_ROWS,
+        ("mc2", "nav23"): WORKED_LAST_ROW,
+        ("mc1", "mc2", "nav23"): triple_last_row(x_fs=1_239_577_000),
     }
-    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
-    trace = at(logged(caplog, epoch, last), "TRACE")
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+    )
+    trace_messages = messages_at(logged_events(caplog, epoch, last_rows), "TRACE")
     assert (
         "das_a.mc2.nav23: prediction 1234574.38, innovation 2.62, x 1234574.457,"
         " y 0.01230129052352643, d 7.169515400974333e-12"
-    ) in trace
+    ) in trace_messages
     assert (
         "das_a.mc1.mc2.nav23: prediction 1239577.0, innovation 0.0, x 1239577.000,"
         " y 0.0, d 0.0"
-    ) in trace
+    ) in trace_messages
 
 
 def test_a_phase_step_logs_the_step_alone_and_the_new_offset(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log the step as the change in offset, and the offset it reaches (16.2)."""
-    stepping = WORKED_LAST.model_copy(
+    stepping_row = WORKED_LAST_ROW.model_copy(
         update={
             "flags": "R",
             "consecutive_rejects": 2,
-            "rejects": ((PREVIOUS - T, 150.0), (PREVIOUS, 150.0)),
+            "rejects": ((PREVIOUS_EPOCH - T, 150.0), (PREVIOUS_EPOCH, 150.0)),
             "epochs_since_accept": 2,
             "step_offset": 40,
         }
     )
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): stepping}
-    moved = DASMeasurement(
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): stepping_row}
+    moved_measurement = DASMeasurement(
         measurement_mjd=60941.251588,
         measured_phase=34579 + 150 - 3,
         rms=3,
         switch="2B07",
         clock="nav23",
     )
-    records = logged(
-        caplog, epoch_of([*REFERENCE_MEASURED, moved], last, tmp_path), last
+    log_entries = logged_events(
+        caplog,
+        epoch_of([*REFERENCE_MEASUREMENTS, moved_measurement], last_rows, tmp_path),
+        last_rows,
     )
-    assert "das_a.mc2.nav23 phase step of 150 ps; step offset 190 ps" in at(
-        records, "INFO"
+    assert "das_a.mc2.nav23 phase step of 150 ps; step offset 190 ps" in messages_at(
+        log_entries, "INFO"
     )
 
 
@@ -1334,36 +1572,43 @@ def test_a_frequency_step_with_a_configuration_change_is_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log both when new settings and a frequency step come in one epoch (16.2)."""
-    ramping = WORKED_LAST.model_copy(
+    ramping_row = WORKED_LAST_ROW.model_copy(
         update={
             "flags": "R",
             "consecutive_rejects": 2,
-            "rejects": ((PREVIOUS - T, 30.0), (PREVIOUS, 60.0)),
+            "rejects": ((PREVIOUS_EPOCH - T, 30.0), (PREVIOUS_EPOCH, 60.0)),
             "epochs_since_accept": 2,
             "time_constant": 80.0,
         }
     )
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): ramping}
-    moved = DASMeasurement(
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): ramping_row}
+    moved_measurement = DASMeasurement(
         measurement_mjd=60941.251588,
         measured_phase=34579 + 90 - 3,
         rms=3,
         switch="2B07",
         clock="nav23",
     )
-    info = at(
-        logged(caplog, epoch_of([*REFERENCE_MEASURED, moved], last, tmp_path), last),
+    info_messages = messages_at(
+        logged_events(
+            caplog,
+            epoch_of([*REFERENCE_MEASUREMENTS, moved_measurement], last_rows, tmp_path),
+            last_rows,
+        ),
         "INFO",
     )
-    assert any(m.startswith("das_a.mc2.nav23 configuration change") for m in info)
-    assert "das_a.mc2.nav23 frequency step: segment 6" in info
+    assert any(
+        message.startswith("das_a.mc2.nav23 configuration change")
+        for message in info_messages
+    )
+    assert "das_a.mc2.nav23 frequency step: segment 6" in info_messages
 
 
 def test_a_cold_start_logs_no_step(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a cold start from dormancy as a cold start, never as a step (16.2)."""
-    acquiring = last_row(
+    acquiring_row = last_row(
         x_fs=None,
         y=None,
         d=None,
@@ -1372,158 +1617,196 @@ def test_a_cold_start_logs_no_step(
         filter_states=3,
         time_constant=100.0,
         scale_time_constant=50.0,
-        rejects=((PREVIOUS - T, 1_234_579.0), (PREVIOUS, 1_234_579.0)),
+        rejects=((PREVIOUS_EPOCH - T, 1_234_579.0), (PREVIOUS_EPOCH, 1_234_579.0)),
     )
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): acquiring}
-    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
-    info = at(logged(caplog, epoch, last), "INFO")
-    mine = [m for m in info if m.startswith("das_a.mc2.nav23 ")]
-    assert mine == ["das_a.mc2.nav23 cold start: segment 2"]
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): acquiring_row}
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+    )
+    info_messages = messages_at(logged_events(caplog, epoch, last_rows), "INFO")
+    nav23_messages = [
+        message for message in info_messages if message.startswith("das_a.mc2.nav23 ")
+    ]
+    assert nav23_messages == ["das_a.mc2.nav23 cold start: segment 2"]
 
 
 def test_an_epoch_s_log_names_the_series_of_its_channel(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Name each series in the log by the run's RF channel."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE])
-    (first,) = read_all_blocks(tmp_path / "das", datetime_to_mjd(LATE))
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START])
+    (first_block,) = read_all_blocks(tmp_path / "das", datetime_to_mjd(LATE_START))
     files.ensure_archives(config.processed.processed_path)
     with caplog.at_level(logging.DEBUG, logger=RUN_LOGGER):
-        run.process_epoch(LATE, first, files.DayBuffer("a"), config, clocks)
-    debug = [r.getMessage() for r in caplog.records if r.levelname == "DEBUG"]
-    assert "das_a.mc1.mc1: RD" in debug
+        run.process_epoch(
+            LATE_START, first_block, files.DayBuffer("a"), config, clock_config
+        )
+    debug_messages = [
+        log_record.getMessage()
+        for log_record in caplog.records
+        if log_record.levelname == "DEBUG"
+    ]
+    assert "das_a.mc1.mc1: RD" in debug_messages
 
 
 def test_each_series_last_row_is_read_from_its_file(tmp_path: Path) -> None:
     """Give each series' last row, as its file holds it, for every series."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE, LATE + T])
-    run.run(config, clocks, None, ShutdownHandler())
-    last = run.read_last_state(config)
-    assert sorted(last) == sorted(SERIES)
-    for key in SERIES:
-        assert last[key] == rows_of(config, key)[-1], key
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START, LATE_START + T])
+    run.run(config, clock_config, None, ShutdownHandler())
+    last_rows = run.read_last_state(config)
+    assert sorted(last_rows) == sorted(LOOP_SERIES)
+    for series_key in LOOP_SERIES:
+        assert last_rows[series_key] == rows_of(config, series_key)[-1], series_key
 
 
-def das_lines(tmp_path: Path, epochs: list[list[tuple[str, str, int]]]) -> None:
-    """Write one DAS day file: each epoch's (reference, clock, phase) from LATE."""
-    lines = []
-    for index, measured_here in enumerate(epochs):
-        start = datetime_to_mjd(LATE + index * T)
-        for slot, (reference, clock, phase) in enumerate(measured_here):
-            raw = DASMeasurement(
-                measurement_mjd=round(start + (slot + 1) * 2e-5, 6),
-                measured_phase=phase,
+def write_das_day(
+    tmp_path: Path, epoch_readings: list[list[tuple[str, str, int]]]
+) -> None:
+    """Write a day file of each epoch's (reference, clock, phase), from LATE_START."""
+    day_lines = []
+    for epoch_index, epoch_measurements in enumerate(epoch_readings):
+        epoch_start_mjd = datetime_to_mjd(LATE_START + epoch_index * T)
+        for reading_index, (reference, clock_name, measured_phase) in enumerate(
+            epoch_measurements
+        ):
+            das_measurement = DASMeasurement(
+                measurement_mjd=round(epoch_start_mjd + (reading_index + 1) * 2e-5, 6),
+                measured_phase=measured_phase,
                 rms=3,
-                switch=f"{reference[-1]}A{slot:02d}",
-                clock=clock,
+                switch=f"{reference[-1]}A{reading_index:02d}",
+                clock=clock_name,
             )
-            lines.append(f"{raw}\n")
-    day = int(datetime_to_mjd(LATE))
-    (tmp_path / "das" / f"cd5m5m_{day}.dat").write_text("".join(lines))
+            day_lines.append(f"{das_measurement}\n")
+    data_day = int(datetime_to_mjd(LATE_START))
+    (tmp_path / "das" / f"cd5m5m_{data_day}.dat").write_text("".join(day_lines))
 
 
 def test_a_remote_triple_goes_on_when_its_reference_is_missing(
     tmp_path: Path,
 ) -> None:
     """Give an existing triple a row at an epoch its reference r was not measured."""
-    config, clocks = loop_deployment(tmp_path)
-    both = [
+    config, clock_config = make_loop_deployment(tmp_path)
+    both_references = [
         ("mc1", "mc1", 1000),
         ("mc1", "mc2", 5000),
         ("mc2", "mc1", PHASE_PERIOD - 5000),
         ("mc2", "mc2", 2000),
         ("mc2", "nav23", 50_000),
     ]
-    das_lines(tmp_path, [both, both, [both[3], both[4]]])
-    run.run(config, clocks, None, ShutdownHandler())
-    rows = rows_of(config, ("mc1", "mc2", "nav23"))
-    assert [row.interpolated_datetime for row in rows] == [LATE, LATE + T, LATE + 2 * T]
+    write_das_day(
+        tmp_path,
+        [both_references, both_references, [both_references[3], both_references[4]]],
+    )
+    run.run(config, clock_config, None, ShutdownHandler())
+    series_rows = rows_of(config, ("mc1", "mc2", "nav23"))
+    assert [row.interpolated_datetime for row in series_rows] == [
+        LATE_START,
+        LATE_START + T,
+        LATE_START + 2 * T,
+    ]
 
 
 def test_a_run_with_no_data_and_no_series_does_nothing(tmp_path: Path) -> None:
     """Finish without a row when there is neither data nor a file yet."""
-    config, clocks = loop_deployment(tmp_path)
-    run.run(config, clocks, None, ShutdownHandler())
+    config, clock_config = make_loop_deployment(tmp_path)
+    run.run(config, clock_config, None, ShutdownHandler())
     assert run.data_series(config) == []
 
 
 def test_a_gap_at_the_start_of_a_run_is_predicted_not_skipped(tmp_path: Path) -> None:
     """Give the epoch after the files' end a row, though the DAS skipped it (6.2)."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE, LATE + 2 * T])
-    run.run(config, clocks, 1, ShutdownHandler())
-    run.run(config, clocks, 1, ShutdownHandler())
-    rows = rows_of(config, ("mc1", "mc1"))
-    assert [row.interpolated_datetime for row in rows] == [LATE, LATE + T]
-    assert "P" in rows[1].flags
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START, LATE_START + 2 * T])
+    run.run(config, clock_config, 1, ShutdownHandler())
+    run.run(config, clock_config, 1, ShutdownHandler())
+    series_rows = rows_of(config, ("mc1", "mc1"))
+    assert [row.interpolated_datetime for row in series_rows] == [
+        LATE_START,
+        LATE_START + T,
+    ]
+    assert "P" in series_rows[1].flags
 
 
 def test_a_clock_measured_with_an_rms_of_zero_gives_its_triple_a_row(
     tmp_path: Path,
 ) -> None:
     """Measure a local triple whose clock pair's rms is 0, with a sigma of 0."""
-    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
-    still = DASMeasurement.model_validate(
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): WORKED_LAST_ROW}
+    zero_rms_measurement = DASMeasurement.model_validate(
         {
-            "measurement_mjd": WORKED_RAW.measurement_mjd,
-            "measured_phase": WORKED_RAW.measured_phase,
+            "measurement_mjd": WORKED_DAS_MEASUREMENT.measurement_mjd,
+            "measured_phase": WORKED_DAS_MEASUREMENT.measured_phase,
             "rms": 0,
-            "switch": WORKED_RAW.switch,
-            "clock": WORKED_RAW.clock,
+            "switch": WORKED_DAS_MEASUREMENT.switch,
+            "clock": WORKED_DAS_MEASUREMENT.clock,
         }
     )
-    epoch = epoch_of([*REFERENCE_MEASURED, still], last, tmp_path)
-    done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
-    assert done.measurements[("mc2", "mc2", "nav23")].double_difference_sigma == 0.0
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, zero_rms_measurement], last_rows, tmp_path
+    )
+    triple_step = run.process_triples(
+        epoch, last_rows, run.process_pairs(epoch, last_rows)
+    )
+    assert (
+        triple_step.measurements[("mc2", "mc2", "nav23")].double_difference_sigma == 0.0
+    )
 
 
 def test_a_new_file_left_without_its_rows_by_a_stopped_write_is_made_again(
     tmp_path: Path,
 ) -> None:
     """Delete a file whose rows a crash never wrote, when the journal shows why."""
-    clean, clocks = loop_deployment(tmp_path / "clean")
-    das_files(tmp_path / "clean", [LATE + i * T for i in range(6)])
-    run.run(clean, clocks, None, ShutdownHandler())
-    stopped, clocks = loop_deployment(tmp_path / "stopped")
-    das_files(tmp_path / "stopped", [LATE + i * T for i in range(6)])
-    run.run(stopped, clocks, 2, ShutdownHandler())
-    processed = stopped.processed.processed_path
-    path = registry.series_file(processed, "a", ("mc1", "nav23"))
-    path.write_bytes(
-        path.read_bytes()[: files.MEAS_HEADER_LINES * (files.MEAS_WIDTH + 1)]
+    clean_config, clock_config = make_loop_deployment(tmp_path / "clean")
+    write_das_files(tmp_path / "clean", [LATE_START + i * T for i in range(6)])
+    run.run(clean_config, clock_config, None, ShutdownHandler())
+    stopped_config, clock_config = make_loop_deployment(tmp_path / "stopped")
+    write_das_files(tmp_path / "stopped", [LATE_START + i * T for i in range(6)])
+    run.run(stopped_config, clock_config, 2, ShutdownHandler())
+    processed_path = stopped_config.processed.processed_path
+    data_file = registry.series_file(processed_path, "a", ("mc1", "nav23"))
+    data_file.write_bytes(
+        data_file.read_bytes()[: files.MEAS_HEADER_LINES * (files.MEAS_WIDTH + 1)]
         + b"\0" * (files.MEAS_WIDTH + 1) * 2
     )
     with pytest.raises(DataFileError, match="damaged first row"):
-        run.next_epoch(stopped)
-    journal = processed / JOURNAL_FILE_TEMPLATE.format(rf="a")
-    journal.write_text(f"{LATE.isoformat()}\n", encoding="ascii")
-    assert run.next_epoch(stopped) == LATE
-    assert not path.exists()
-    run.run(stopped, clocks, None, ShutdownHandler())
-    for key in SERIES:
-        one = registry.series_file(clean.processed.processed_path, "a", key)
-        other = registry.series_file(processed, "a", key)
-        assert one.read_bytes() == other.read_bytes(), key
+        run.next_epoch(stopped_config)
+    journal = processed_path / JOURNAL_FILE_TEMPLATE.format(rf="a")
+    journal.write_text(f"{LATE_START.isoformat()}\n", encoding="ascii")
+    assert run.next_epoch(stopped_config) == LATE_START
+    assert not data_file.exists()
+    run.run(stopped_config, clock_config, None, ShutdownHandler())
+    for series_key in LOOP_SERIES:
+        first_series_file = registry.series_file(
+            clean_config.processed.processed_path, "a", series_key
+        )
+        second_series_file = registry.series_file(processed_path, "a", series_key)
+        assert first_series_file.read_bytes() == second_series_file.read_bytes(), (
+            series_key
+        )
 
 
 def test_files_ending_apart_are_rolled_back_with_that_reason(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log the roll-back once, naming files that ended at different epochs."""
-    config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE + i * T for i in range(3)])
-    run.run(config, clocks, None, ShutdownHandler())
-    path = registry.series_file(config.processed.processed_path, "a", ("mc1", "nav23"))
-    path.write_bytes(path.read_bytes()[: -(files.MEAS_WIDTH + 1)])
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(3)])
+    run.run(config, clock_config, None, ShutdownHandler())
+    data_file = registry.series_file(
+        config.processed.processed_path, "a", ("mc1", "nav23")
+    )
+    data_file.write_bytes(data_file.read_bytes()[: -(files.MEAS_WIDTH + 1)])
     caplog.clear()
-    assert run.next_epoch(config) == LATE + 2 * T
-    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+    assert run.next_epoch(config) == LATE_START + 2 * T
+    assert [
+        (log_record.levelname, log_record.getMessage()) for log_record in caplog.records
+    ] == [
         (
             "WARNING",
-            f"rolled back every file of channel a to {LATE + T}, after files that"
-            f" ended at different epochs: {len(SERIES) - 1} files cut, 0 deleted,"
+            f"rolled back every file of channel a to {LATE_START + T}, after files that"
+            f" ended at different epochs: {len(LOOP_SERIES) - 1} files cut, 0 deleted,"
             " 1 already there",
         )
     ]

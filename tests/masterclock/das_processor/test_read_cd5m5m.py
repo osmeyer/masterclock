@@ -37,24 +37,24 @@ from masterclock.das_processor.exceptions import (
 )
 from masterclock.domain.phase import PHASE_MAX
 
-DAY: Final = 60010
+DATA_DAY: Final = 60010
 """An invented day every file here covers unless a test says otherwise."""
 
-SECOND: Final = 1 / 86_400
+SECOND_IN_DAYS: Final = 1 / 86_400
 """One second, as a fraction of a day."""
 
 
-def mjd_at(seconds: float, day: int = DAY) -> float:
+def mjd_at(seconds: float, day: int = DATA_DAY) -> float:
     """Return the MJD ``seconds`` into ``day``, to the places the DAS writes."""
-    return round(day + seconds * SECOND, reader.MJD_DECIMALS)
+    return round(day + seconds * SECOND_IN_DAYS, reader.MJD_DECIMALS)
 
 
-def exact_mjd(seconds: int, day: int = DAY) -> float:
+def exact_mjd(seconds: int, day: int = DATA_DAY) -> float:
     """Return the MJD of the instant ``seconds`` into ``day``, unrounded."""
     return datetime_to_mjd(mjd_to_datetime(day) + timedelta(seconds=seconds))
 
 
-def line(
+def das_line(
     mjd: float,
     phase: int = 1000,
     rms: int = 20,
@@ -65,14 +65,16 @@ def line(
     return f"{mjd:.6f} {phase} {rms} {switch} {clock}\n"
 
 
-def data_file(directory: Path, lines: list[str], day: int = DAY) -> Path:
-    """Write ``lines`` as the daily file of ``day`` in ``directory``."""
-    path = directory / f"cd5m5m_{day}.dat"
-    path.write_text("".join(lines), encoding="utf-8")
-    return path
+def write_data_file(directory: Path, das_lines: list[str], day: int = DATA_DAY) -> Path:
+    """Write ``das_lines`` as the daily file of ``day`` in ``directory``."""
+    day_file = directory / f"cd5m5m_{day}.dat"
+    day_file.write_text("".join(das_lines), encoding="utf-8")
+    return day_file
 
 
-def make(seconds: float, clock: str = "clka", day: int = DAY) -> reader.DASMeasurement:
+def measurement_at(
+    seconds: float, clock: str = "clka", day: int = DATA_DAY
+) -> reader.DASMeasurement:
     """Build a measurement ``seconds`` into ``day``."""
     return reader.DASMeasurement(
         measurement_mjd=mjd_at(seconds, day),
@@ -83,12 +85,12 @@ def make(seconds: float, clock: str = "clka", day: int = DAY) -> reader.DASMeasu
     )
 
 
-def skipped(caplog: pytest.LogCaptureFixture) -> list[str]:
+def skipped_line_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
     """Return the WARNING messages logged, which name each skipped line."""
     return [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno == logging.WARNING
+        log_record.getMessage()
+        for log_record in caplog.records
+        if log_record.levelno == logging.WARNING
     ]
 
 
@@ -110,17 +112,19 @@ def test_a_line_is_read_into_its_columns_and_what_follows_from_them() -> None:
 
 
 @pytest.mark.parametrize(
-    ("text", "count"),
+    ("line_text", "column_count"),
     [("", 0), ("60010.000694 1 1 1A01", 4), ("60010.000694 1 1 1A01 clka x", 6)],
 )
-def test_a_line_without_five_columns_is_malformed(text: str, count: int) -> None:
+def test_a_line_without_five_columns_is_malformed(
+    line_text: str, column_count: int
+) -> None:
     """Refuse a line of any other number of columns, saying how many."""
-    with pytest.raises(MalformedLineError, match=f"found {count}$"):
-        reader.parse_line(text)
+    with pytest.raises(MalformedLineError, match=f"found {column_count}$"):
+        reader.parse_line(line_text)
 
 
 @pytest.mark.parametrize(
-    ("column", "text"),
+    ("column_index", "line_text"),
     [
         (0, "60010"),
         (0, "6.0010e4"),
@@ -145,16 +149,18 @@ def test_a_line_without_five_columns_is_malformed(text: str, count: int) -> None
         (2, "\u0662\u0660"),
     ],
 )
-def test_a_number_not_in_its_plain_form_is_malformed(column: int, text: str) -> None:
+def test_a_number_not_in_its_plain_form_is_malformed(
+    column_index: int, line_text: str
+) -> None:
     """Refuse a sign, exponent, underscore, point, non-ASCII digit or other MJD form."""
-    fields = ["60010.000694", "1000", "20", "1A01", "clka"]
-    fields[column] = text
+    line_columns = ["60010.000694", "1000", "20", "1A01", "clka"]
+    line_columns[column_index] = line_text
     with pytest.raises(MalformedLineError, match="is not a plain number"):
-        reader.parse_line(" ".join(fields))
+        reader.parse_line(" ".join(line_columns))
 
 
 @pytest.mark.parametrize(
-    "text",
+    "line_text",
     [
         f"60010.000694 {PHASE_MAX + 1} 20 1A01 clka",
         "49999.999999 1000 20 1A01 clka",
@@ -165,10 +171,10 @@ def test_a_number_not_in_its_plain_form_is_malformed(column: int, text: str) -> 
         "60010.000694 1000 20 1A001 clka",
     ],
 )
-def test_a_column_outside_its_range_or_spelling_is_malformed(text: str) -> None:
+def test_a_column_outside_its_range_or_spelling_is_malformed(line_text: str) -> None:
     """Refuse a phase past one period, a day out of range, or a bad switch."""
     with pytest.raises(MalformedLineError, match=r"."):
-        reader.parse_line(text)
+        reader.parse_line(line_text)
 
 
 def test_the_largest_phase_and_both_ends_of_the_days_are_read() -> None:
@@ -180,63 +186,71 @@ def test_the_largest_phase_and_both_ends_of_the_days_are_read() -> None:
 
 def test_a_line_that_is_not_utf8_is_malformed() -> None:
     """Refuse a line holding a byte that was not UTF-8, kept as a surrogate."""
-    text = b"60010.000694 1000 20 1A01 clk\xff".decode("utf-8", "surrogateescape")
+    line_text = b"60010.000694 1000 20 1A01 clk\xff".decode("utf-8", "surrogateescape")
     with pytest.raises(MalformedLineError, match="not UTF-8 text"):
-        reader.parse_line(text)
+        reader.parse_line(line_text)
 
 
 # ---------------------------------------------------------- the two records
 
 
-@pytest.mark.parametrize("name", reader.DASMeasurement._DERIVED)
-@pytest.mark.parametrize("valid", [True, False])
-def test_a_worked_out_value_may_not_be_passed_in(name: str, valid: bool) -> None:
+@pytest.mark.parametrize("derived_field", reader.DASMeasurement._DERIVED)
+@pytest.mark.parametrize("looks_valid", [True, False])
+def test_a_worked_out_value_may_not_be_passed_in(
+    derived_field: str, looks_valid: bool
+) -> None:
     """Refuse any of the four worked-out values, whether it looks valid or not."""
-    measurement = make(60)
-    value = getattr(measurement, name) if valid else "zz"
-    columns = measurement.model_dump(exclude=set(reader.DASMeasurement._DERIVED))
-    with pytest.raises(ValidationError, match=f"may not be passed in: {name} "):
-        reader.DASMeasurement.model_validate({**columns, name: value})
+    measurement = measurement_at(60)
+    passed_value = getattr(measurement, derived_field) if looks_valid else "zz"
+    column_values = measurement.model_dump(exclude=set(reader.DASMeasurement._DERIVED))
+    with pytest.raises(
+        ValidationError, match=f"may not be passed in: {derived_field} "
+    ):
+        reader.DASMeasurement.model_validate(
+            {**column_values, derived_field: passed_value}
+        )
 
 
 def test_every_worked_out_value_passed_in_is_named() -> None:
     """Name each worked-out value passed in, not only the first."""
-    measurement = make(60)
-    expected = ", ".join(reader.DASMeasurement._DERIVED)
-    with pytest.raises(ValidationError, match=f"may not be passed in: {expected} "):
+    measurement = measurement_at(60)
+    derived_names = ", ".join(reader.DASMeasurement._DERIVED)
+    with pytest.raises(
+        ValidationError, match=f"may not be passed in: {derived_names} "
+    ):
         reader.DASMeasurement.model_validate(measurement.model_dump())
 
 
 def test_the_derived_names_are_every_field_not_a_column() -> None:
     """List as worked out exactly the fields that are not the five columns."""
-    columns = {"measurement_mjd", "measured_phase", "rms", "switch", "clock"}
-    fields = set(reader.DASMeasurement.model_fields)
-    assert set(reader.DASMeasurement._DERIVED) == fields - columns
+    column_names = {"measurement_mjd", "measured_phase", "rms", "switch", "clock"}
+    model_fields = set(reader.DASMeasurement.model_fields)
+    assert set(reader.DASMeasurement._DERIVED) == model_fields - column_names
     assert set(reader.DASData._DERIVED) == set(reader.DASData.model_fields) - {
         "interpolated_datetime",
         "measurements",
     }
 
 
-@pytest.mark.parametrize("model", [reader.DASMeasurement, reader.DASData])
+@pytest.mark.parametrize("record_model", [reader.DASMeasurement, reader.DASData])
 def test_a_record_refuses_unknown_fields_and_is_frozen(
-    model: type[reader.DASMeasurement | reader.DASData],
+    record_model: type[reader.DASMeasurement | reader.DASData],
 ) -> None:
     """Refuse a field the model does not declare, and any change after."""
-    measurement = make(60)
-    record = (
+    measurement = measurement_at(60)
+    das_record = (
         measurement
-        if model is reader.DASMeasurement
+        if record_model is reader.DASMeasurement
         else reader.DASData(
             interpolated_datetime=measurement.interpolated_datetime,
             measurements=(measurement,),
         )
     )
-    given_fields = record.model_dump(exclude=set(model._DERIVED))
+    column_fields = das_record.model_dump(exclude=set(record_model._DERIVED))
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        model.model_validate({**given_fields, "other": 1})
+        record_model.model_validate({**column_fields, "other": 1})
     with pytest.raises(ValidationError, match="frozen"):
-        record.interpolated_mjd = 1.0  # type: ignore[misc]
+        das_record.interpolated_mjd = 1.0  # type: ignore[misc]
 
 
 def test_input_that_is_not_a_mapping_is_left_for_pydantic_to_refuse() -> None:
@@ -249,24 +263,24 @@ def test_input_that_is_not_a_mapping_is_left_for_pydantic_to_refuse() -> None:
 
 def test_a_block_works_out_its_epoch_as_an_mjd() -> None:
     """Give a block the MJD of its mark."""
-    measurement = make(60)
-    block = reader.DASData(
+    measurement = measurement_at(60)
+    das_block = reader.DASData(
         interpolated_datetime=measurement.interpolated_datetime,
         measurements=(measurement,),
     )
-    assert block.interpolated_mjd == DAY
+    assert das_block.interpolated_mjd == DATA_DAY
 
 
 def test_a_block_may_not_be_passed_its_mjd() -> None:
     """Refuse a block's worked-out MJD, even the right one."""
-    measurement = make(60)
+    measurement = measurement_at(60)
     with pytest.raises(
         ValidationError, match="may not be passed in: interpolated_mjd "
     ):
         reader.DASData(
             interpolated_datetime=measurement.interpolated_datetime,
             measurements=(measurement,),
-            interpolated_mjd=float(DAY),
+            interpolated_mjd=float(DATA_DAY),
         )
 
 
@@ -280,11 +294,11 @@ def test_a_block_is_never_empty() -> None:
 
 def test_a_block_refuses_a_measurement_of_another_epoch() -> None:
     """Refuse a measurement whose epoch is not the block's, naming both."""
-    first, second = make(60), make(660)
+    first_measurement, second_measurement = measurement_at(60), measurement_at(660)
     with pytest.raises(ValidationError, match="does not belong in the block"):
         reader.DASData(
-            interpolated_datetime=first.interpolated_datetime,
-            measurements=(first, second),
+            interpolated_datetime=first_measurement.interpolated_datetime,
+            measurements=(first_measurement, second_measurement),
         )
 
 
@@ -329,9 +343,9 @@ def test_a_line_written_back_reads_as_the_same_measurement(
 @given(st.integers(min_value=reader.FIRST_DAY, max_value=reader.LAST_DAY))
 def test_a_file_name_made_from_a_day_reads_back_as_that_day(day: int) -> None:
     """Match the pattern with every name made, and read the same day back."""
-    name = reader.data_file_name(day)
-    assert reader.DATA_FILE_PATTERN.fullmatch(name) is not None
-    assert reader._file_mjd(Path(name)) == day
+    file_name = reader.data_file_name(day)
+    assert reader.DATA_FILE_PATTERN.fullmatch(file_name) is not None
+    assert reader._file_mjd(Path(file_name)) == day
 
 
 @pytest.mark.parametrize(
@@ -344,7 +358,7 @@ def test_no_file_name_is_made_for_a_day_out_of_range(day: int) -> None:
 
 
 @pytest.mark.parametrize(
-    "name",
+    "file_name",
     [
         "cd5m5m_49999.dat",
         "cd5m5m_01234.dat",
@@ -357,13 +371,13 @@ def test_no_file_name_is_made_for_a_day_out_of_range(day: int) -> None:
     ],
 )
 def test_only_names_of_days_in_range_are_daily_file_names(
-    name: str, caplog: pytest.LogCaptureFixture
+    file_name: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Match no other name, and refuse to read a day from one, logging why."""
-    assert reader.DATA_FILE_PATTERN.fullmatch(name) is None
+    assert reader.DATA_FILE_PATTERN.fullmatch(file_name) is None
     with pytest.raises(DataFileError, match="not a daily data file name"):
-        reader._file_mjd(Path(name))
-    assert [record.levelname for record in caplog.records] == ["ERROR"]
+        reader._file_mjd(Path(file_name))
+    assert [log_record.levelname for log_record in caplog.records] == ["ERROR"]
 
 
 # --------------------------------------------------------- read_measurements
@@ -371,47 +385,54 @@ def test_only_names_of_days_in_range_are_daily_file_names(
 
 def test_a_clean_file_is_read_in_file_order(tmp_path: Path) -> None:
     """Yield every line, repeated instants included, in the order written."""
-    path = data_file(
+    day_file = write_data_file(
         tmp_path,
         [
-            line(mjd_at(60), clock="clka"),
-            line(mjd_at(60), clock="clkb"),
-            line(mjd_at(700), clock="clka"),
+            das_line(mjd_at(60), clock="clka"),
+            das_line(mjd_at(60), clock="clkb"),
+            das_line(mjd_at(700), clock="clka"),
         ],
     )
-    clocks = [m.clock for m in reader.read_measurements(path)]
-    assert clocks == ["clka", "clkb", "clka"]
+    clock_names = [
+        das_measurement.clock for das_measurement in reader.read_measurements(day_file)
+    ]
+    assert clock_names == ["clka", "clkb", "clka"]
 
 
 def test_an_empty_file_yields_nothing(tmp_path: Path) -> None:
     """Yield nothing from a file with no lines, without complaint."""
-    assert list(reader.read_measurements(data_file(tmp_path, []))) == []
+    assert list(reader.read_measurements(write_data_file(tmp_path, []))) == []
 
 
 @pytest.mark.parametrize(
-    ("bad", "kind"),
+    ("refused_line", "refusal_kind"),
     [
         ("60010.000694 1000 20 1A01\n", "malformed"),
-        (line(mjd_at(120, DAY + 1)), "wrong-day"),
-        (line(mjd_at(595)), "late"),
-        (line(mjd_at(30)), "out-of-order"),
-        (line(mjd_at(90)), "duplicate"),
+        (das_line(mjd_at(120, DATA_DAY + 1)), "wrong-day"),
+        (das_line(mjd_at(595)), "late"),
+        (das_line(mjd_at(30)), "out-of-order"),
+        (das_line(mjd_at(90)), "duplicate"),
     ],
 )
 def test_a_refused_line_is_logged_under_its_reason_and_skipped(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, bad: str, kind: str
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    refused_line: str,
+    refusal_kind: str,
 ) -> None:
     """Skip the line, logging its reason, number, file and text."""
-    path = data_file(
+    day_file = write_data_file(
         tmp_path,
-        [line(mjd_at(60)), bad, line(mjd_at(120), clock="clkz")],
+        [das_line(mjd_at(60)), refused_line, das_line(mjd_at(120), clock="clkz")],
     )
-    clocks = [m.clock for m in reader.read_measurements(path)]
-    assert clocks == ["clka", "clkz"]
-    messages = skipped(caplog)
-    assert len(messages) == 1
-    assert messages[0].startswith(
-        f"skipping {kind} line 2 of {path}: {bad.rstrip()!r} ("
+    clock_names = [
+        das_measurement.clock for das_measurement in reader.read_measurements(day_file)
+    ]
+    assert clock_names == ["clka", "clkz"]
+    warnings = skipped_line_warnings(caplog)
+    assert len(warnings) == 1
+    assert warnings[0].startswith(
+        f"skipping {refusal_kind} line 2 of {day_file}: {refused_line.rstrip()!r} ("
     )
 
 
@@ -419,55 +440,61 @@ def test_a_line_that_is_not_utf8_is_skipped_and_reading_goes_on(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Skip a line with a byte that is not UTF-8, and read the lines after."""
-    path = tmp_path / f"cd5m5m_{DAY}.dat"
-    path.write_bytes(
-        line(mjd_at(60)).encode()
+    day_file = tmp_path / f"cd5m5m_{DATA_DAY}.dat"
+    day_file.write_bytes(
+        das_line(mjd_at(60)).encode()
         + b"60010.000700 1000 20 1A01 clk\xff\n"
-        + line(mjd_at(120), clock="clkz").encode()
+        + das_line(mjd_at(120), clock="clkz").encode()
     )
-    assert [m.clock for m in reader.read_measurements(path)] == ["clka", "clkz"]
-    assert skipped(caplog) == [
-        f"skipping malformed line 2 of {path}: "
+    assert [
+        das_measurement.clock for das_measurement in reader.read_measurements(day_file)
+    ] == ["clka", "clkz"]
+    assert skipped_line_warnings(caplog) == [
+        f"skipping malformed line 2 of {day_file}: "
         "'60010.000700 1000 20 1A01 clk\\udcff' (not UTF-8 text)"
     ]
 
 
 def test_a_skipped_line_is_not_remembered(tmp_path: Path) -> None:
     """Judge the next line against the last line accepted, not the skipped one."""
-    path = data_file(
+    day_file = write_data_file(
         tmp_path,
         [
-            line(mjd_at(60)),
-            line(mjd_at(120, DAY + 1), clock="clkb"),
-            line(mjd_at(90), clock="clkb"),
-            line(mjd_at(595), clock="clkc"),
-            line(mjd_at(100), clock="clkc"),
+            das_line(mjd_at(60)),
+            das_line(mjd_at(120, DATA_DAY + 1), clock="clkb"),
+            das_line(mjd_at(90), clock="clkb"),
+            das_line(mjd_at(595), clock="clkc"),
+            das_line(mjd_at(100), clock="clkc"),
         ],
     )
-    clocks = [m.clock for m in reader.read_measurements(path)]
-    assert clocks == ["clka", "clkb", "clkc"]
+    clock_names = [
+        das_measurement.clock for das_measurement in reader.read_measurements(day_file)
+    ]
+    assert clock_names == ["clka", "clkb", "clkc"]
 
 
 def test_a_pair_may_be_measured_again_in_the_next_epoch(tmp_path: Path) -> None:
     """Refuse a repeated pair only within one epoch."""
-    path = data_file(tmp_path, [line(mjd_at(60)), line(mjd_at(660))])
-    assert len(list(reader.read_measurements(path))) == 2
+    day_file = write_data_file(tmp_path, [das_line(mjd_at(60)), das_line(mjd_at(660))])
+    assert len(list(reader.read_measurements(day_file))) == 2
 
 
 def test_the_same_clock_against_another_reference_is_not_a_repeat(
     tmp_path: Path,
 ) -> None:
     """Treat a pair as reference and clock together."""
-    path = data_file(tmp_path, [line(mjd_at(60)), line(mjd_at(60), switch="2A01")])
-    assert len(list(reader.read_measurements(path))) == 2
+    day_file = write_data_file(
+        tmp_path, [das_line(mjd_at(60)), das_line(mjd_at(60), switch="2A01")]
+    )
+    assert len(list(reader.read_measurements(day_file))) == 2
 
 
 # EPOCH_EDGE before the end of DAY's first epoch: an instant an MJD holds
 # exactly, so the test is of the bound and not of rounding around it.
-EDGE: Final = mjd_to_datetime(DAY) + EPOCH_LENGTH - reader.EPOCH_EDGE
+EPOCH_EDGE_INSTANT: Final = mjd_to_datetime(DATA_DAY) + EPOCH_LENGTH - reader.EPOCH_EDGE
 
 
-def at_instant(instant: datetime) -> reader.DASMeasurement:
+def measurement_taken_at(instant: datetime) -> reader.DASMeasurement:
     """Build a measurement taken at ``instant``."""
     return reader.DASMeasurement(
         measurement_mjd=datetime_to_mjd(instant),
@@ -480,16 +507,16 @@ def at_instant(instant: datetime) -> reader.DASMeasurement:
 
 def test_a_measurement_exactly_at_the_epoch_edge_is_late() -> None:
     """Refuse a measurement exactly EPOCH_EDGE before the next mark."""
-    measurement = at_instant(EDGE)
-    assert measurement.measurement_datetime == EDGE
+    measurement = measurement_taken_at(EPOCH_EDGE_INSTANT)
+    assert measurement.measurement_datetime == EPOCH_EDGE_INSTANT
     with pytest.raises(LateLineError, match="before the next epoch"):
         reader._check_early(measurement)
 
 
 def test_a_measurement_just_before_the_epoch_edge_is_kept() -> None:
     """Accept a measurement a little more than EPOCH_EDGE before the mark."""
-    measurement = at_instant(EDGE - timedelta(milliseconds=20))
-    assert measurement.measurement_datetime < EDGE
+    measurement = measurement_taken_at(EPOCH_EDGE_INSTANT - timedelta(milliseconds=20))
+    assert measurement.measurement_datetime < EPOCH_EDGE_INSTANT
     reader._check_early(measurement)
 
 
@@ -497,27 +524,29 @@ def test_a_last_line_with_no_newline_ends_the_read(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Refuse the file at its unended last line, after yielding what precedes it."""
-    path = data_file(tmp_path, [line(mjd_at(60)), line(mjd_at(120)).rstrip("\n")])
-    measurements = reader.read_measurements(path)
+    day_file = write_data_file(
+        tmp_path, [das_line(mjd_at(60)), das_line(mjd_at(120)).rstrip("\n")]
+    )
+    measurements = reader.read_measurements(day_file)
     assert next(measurements).clock == "clka"
     with pytest.raises(DataFileError, match=r"line 2 has no newline$"):
         next(measurements)
-    assert [record.levelname for record in caplog.records] == ["ERROR"]
+    assert [log_record.levelname for log_record in caplog.records] == ["ERROR"]
 
 
 def test_a_missing_file_fails_on_first_iteration_not_at_call(tmp_path: Path) -> None:
     """Raise DataFileError when iteration starts, not when called."""
-    measurements = reader.read_measurements(tmp_path / f"cd5m5m_{DAY}.dat")
+    measurements = reader.read_measurements(tmp_path / f"cd5m5m_{DATA_DAY}.dat")
     with pytest.raises(DataFileError, match="cannot read data file"):
         next(measurements)
 
 
 def test_a_directory_named_as_a_data_file_cannot_be_read(tmp_path: Path) -> None:
     """Raise DataFileError for an entry that is not a file."""
-    path = tmp_path / f"cd5m5m_{DAY}.dat"
-    path.mkdir()
+    day_file = tmp_path / f"cd5m5m_{DATA_DAY}.dat"
+    day_file.mkdir()
     with pytest.raises(DataFileError, match="cannot read data file"):
-        list(reader.read_measurements(path))
+        list(reader.read_measurements(day_file))
 
 
 # -------------------------------------------------------------- the blocks
@@ -525,26 +554,38 @@ def test_a_directory_named_as_a_data_file_cannot_be_read(tmp_path: Path) -> None
 
 def test_blocks_group_consecutive_measurements_by_epoch() -> None:
     """Give one block per run of one epoch, measurements in stream order."""
-    stream = [make(60, "a"), make(61, "b"), make(660, "c"), make(1300, "d")]
-    blocks = list(reader.iter_blocks(stream))
-    assert [[m.clock for m in b.measurements] for b in blocks] == [
+    measurement_stream = [
+        measurement_at(60, "a"),
+        measurement_at(61, "b"),
+        measurement_at(660, "c"),
+        measurement_at(1300, "d"),
+    ]
+    das_blocks = list(reader.iter_blocks(measurement_stream))
+    assert [
+        [das_measurement.clock for das_measurement in das_block.measurements]
+        for das_block in das_blocks
+    ] == [
         ["a", "b"],
         ["c"],
         ["d"],
     ]
-    assert [b.interpolated_datetime for b in blocks] == [
-        stream[0].interpolated_datetime,
-        stream[2].interpolated_datetime,
-        stream[3].interpolated_datetime,
+    assert [das_block.interpolated_datetime for das_block in das_blocks] == [
+        measurement_stream[0].interpolated_datetime,
+        measurement_stream[2].interpolated_datetime,
+        measurement_stream[3].interpolated_datetime,
     ]
 
 
 def test_a_stream_that_goes_back_gives_an_epoch_twice() -> None:
     """Neither reorder nor merge: a return to an epoch is a new block."""
-    stream = [make(60, "a"), make(660, "b"), make(61, "c")]
-    blocks = list(reader.iter_blocks(stream))
-    assert [len(b.measurements) for b in blocks] == [1, 1, 1]
-    assert blocks[0].interpolated_datetime == blocks[2].interpolated_datetime
+    measurement_stream = [
+        measurement_at(60, "a"),
+        measurement_at(660, "b"),
+        measurement_at(61, "c"),
+    ]
+    das_blocks = list(reader.iter_blocks(measurement_stream))
+    assert [len(das_block.measurements) for das_block in das_blocks] == [1, 1, 1]
+    assert das_blocks[0].interpolated_datetime == das_blocks[2].interpolated_datetime
 
 
 def test_no_measurements_give_no_blocks() -> None:
@@ -556,11 +597,12 @@ def test_reading_a_file_as_blocks_is_grouping_its_measurements(
     tmp_path: Path,
 ) -> None:
     """Give the same blocks as grouping what the file yields."""
-    path = data_file(
-        tmp_path, [line(mjd_at(60)), line(mjd_at(61), clock="b"), line(mjd_at(700))]
+    day_file = write_data_file(
+        tmp_path,
+        [das_line(mjd_at(60)), das_line(mjd_at(61), clock="b"), das_line(mjd_at(700))],
     )
-    assert list(reader.read_blocks(path)) == list(
-        reader.iter_blocks(reader.read_measurements(path))
+    assert list(reader.read_blocks(day_file)) == list(
+        reader.iter_blocks(reader.read_measurements(day_file))
     )
 
 
@@ -572,17 +614,21 @@ def test_data_files_are_found_in_day_order(
 ) -> None:
     """Keep files and links to files named for a day, ignore the rest."""
     caplog.set_level(logging.DEBUG)
-    later = data_file(tmp_path, [], DAY + 1)
-    earlier = data_file(tmp_path, [], DAY)
-    (tmp_path / f"cd5m5m_{DAY + 2}.dat").mkdir()
+    later_file = write_data_file(tmp_path, [], DATA_DAY + 1)
+    earlier_file = write_data_file(tmp_path, [], DATA_DAY)
+    (tmp_path / f"cd5m5m_{DATA_DAY + 2}.dat").mkdir()
     (tmp_path / "cd5m5m_49999.dat").write_text("")
     (tmp_path / "notes.txt").write_text("")
-    link = tmp_path / f"cd5m5m_{DAY + 3}.dat"
-    link.symlink_to(earlier)
-    assert reader.find_data_files(tmp_path) == (earlier, later, link)
-    ignored = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
-    assert len(ignored) == 3
-    assert sum("not a file" in message for message in ignored) == 1
+    linked_file = tmp_path / f"cd5m5m_{DATA_DAY + 3}.dat"
+    linked_file.symlink_to(earlier_file)
+    assert reader.find_data_files(tmp_path) == (earlier_file, later_file, linked_file)
+    debug_messages = [
+        log_record.getMessage()
+        for log_record in caplog.records
+        if log_record.levelno == logging.DEBUG
+    ]
+    assert len(debug_messages) == 3
+    assert sum("not a file" in debug_message for debug_message in debug_messages) == 1
 
 
 def test_a_directory_with_no_data_files_warns(
@@ -590,7 +636,9 @@ def test_a_directory_with_no_data_files_warns(
 ) -> None:
     """Return nothing, with a WARNING naming the directory."""
     assert reader.find_data_files(tmp_path) == ()
-    assert skipped(caplog) == [f"no cd5m5m data files found in {tmp_path}"]
+    assert skipped_line_warnings(caplog) == [
+        f"no cd5m5m data files found in {tmp_path}"
+    ]
 
 
 def test_a_directory_that_cannot_be_listed_fails_at_call(tmp_path: Path) -> None:
@@ -599,124 +647,153 @@ def test_a_directory_that_cannot_be_listed_fails_at_call(tmp_path: Path) -> None
         reader.read_all_blocks(tmp_path / "missing")
 
 
-def three_days(directory: Path) -> None:
+def write_three_days(das_directory: Path) -> None:
     """Write files for three days, two epochs each, one line per epoch."""
-    for day in (DAY, DAY + 1, DAY + 2):
-        data_file(
-            directory,
+    for mjd_day in (DATA_DAY, DATA_DAY + 1, DATA_DAY + 2):
+        write_data_file(
+            das_directory,
             [
-                line(mjd_at(60, day), clock=f"{day}a"),
-                line(mjd_at(4000, day), clock=f"{day}b"),
+                das_line(mjd_at(60, mjd_day), clock=f"{mjd_day}a"),
+                das_line(mjd_at(4000, mjd_day), clock=f"{mjd_day}b"),
             ],
-            day,
+            mjd_day,
         )
 
 
-def clocks_of(blocks: Iterator[reader.DASData]) -> list[str]:
-    """Return the clock of every measurement in ``blocks``, in order."""
-    return [m.clock for block in blocks for m in block.measurements]
+def clocks_of(das_blocks: Iterator[reader.DASData]) -> list[str]:
+    """Return the clock of every measurement in ``das_blocks``, in order."""
+    return [
+        das_measurement.clock
+        for das_block in das_blocks
+        for das_measurement in das_block.measurements
+    ]
 
 
 def test_every_file_is_read_as_one_stream(tmp_path: Path) -> None:
     """Yield the blocks of every file, in day order."""
-    three_days(tmp_path)
+    write_three_days(tmp_path)
     assert clocks_of(reader.read_all_blocks(tmp_path)) == [
-        f"{day}{part}" for day in (DAY, DAY + 1, DAY + 2) for part in "ab"
+        f"{mjd_day}{epoch_letter}"
+        for mjd_day in (DATA_DAY, DATA_DAY + 1, DATA_DAY + 2)
+        for epoch_letter in "ab"
     ]
 
 
 @pytest.mark.parametrize(
-    ("start", "expected"),
+    ("start_mjd", "expected_clocks"),
     [
-        (exact_mjd(0, DAY + 1), [f"{DAY + 1}a", f"{DAY + 1}b", f"{DAY + 2}a"]),
-        (exact_mjd(599, DAY + 1), [f"{DAY + 1}a", f"{DAY + 1}b", f"{DAY + 2}a"]),
-        (exact_mjd(600, DAY + 1), [f"{DAY + 1}b", f"{DAY + 2}a", f"{DAY + 2}b"]),
-        (exact_mjd(86_399, DAY + 2), []),
-        (float(DAY - 5), [f"{DAY}a", f"{DAY}b", f"{DAY + 1}a"]),
+        (
+            exact_mjd(0, DATA_DAY + 1),
+            [f"{DATA_DAY + 1}a", f"{DATA_DAY + 1}b", f"{DATA_DAY + 2}a"],
+        ),
+        (
+            exact_mjd(599, DATA_DAY + 1),
+            [f"{DATA_DAY + 1}a", f"{DATA_DAY + 1}b", f"{DATA_DAY + 2}a"],
+        ),
+        (
+            exact_mjd(600, DATA_DAY + 1),
+            [f"{DATA_DAY + 1}b", f"{DATA_DAY + 2}a", f"{DATA_DAY + 2}b"],
+        ),
+        (exact_mjd(86_399, DATA_DAY + 2), []),
+        (float(DATA_DAY - 5), [f"{DATA_DAY}a", f"{DATA_DAY}b", f"{DATA_DAY + 1}a"]),
     ],
 )
 def test_reading_starts_at_the_epoch_holding_the_start(
-    tmp_path: Path, start: float, expected: list[str]
+    tmp_path: Path, start_mjd: float, expected_clocks: list[str]
 ) -> None:
     """Begin at the first block whose epoch is at or after the start's epoch."""
-    three_days(tmp_path)
-    assert clocks_of(reader.read_all_blocks(tmp_path, start))[:3] == expected
+    write_three_days(tmp_path)
+    assert clocks_of(reader.read_all_blocks(tmp_path, start_mjd))[:3] == expected_clocks
 
 
 def test_files_before_the_start_are_not_read(tmp_path: Path) -> None:
     """Skip a day that ends before the start without reading it."""
-    three_days(tmp_path)
-    data_file(tmp_path, ["a line with no newline"], DAY - 1)
+    write_three_days(tmp_path)
+    write_data_file(tmp_path, ["a line with no newline"], DATA_DAY - 1)
     with pytest.raises(DataFileError, match="has no newline"):
         list(reader.read_all_blocks(tmp_path))
-    assert clocks_of(reader.read_all_blocks(tmp_path, float(DAY)))[0] == f"{DAY}a"
+    assert (
+        clocks_of(reader.read_all_blocks(tmp_path, float(DATA_DAY)))[0]
+        == f"{DATA_DAY}a"
+    )
 
 
 # ------------------------------------------------- what a person reads, exactly
 
 
 @pytest.mark.parametrize(
-    ("bad", "reason"),
+    ("refused_line", "refusal_reason"),
     [
         (
             f"60010.000694 {PHASE_MAX + 1} 20 1A01 clka\n",
             f"measured_phase: Input should be less than or equal to {PHASE_MAX}",
         ),
         (
-            line(mjd_at(120, DAY + 1)),
-            f"MJD {mjd_at(120, DAY + 1)} is not in day {DAY}",
+            das_line(mjd_at(120, DATA_DAY + 1)),
+            f"MJD {mjd_at(120, DATA_DAY + 1)} is not in day {DATA_DAY}",
         ),
         (
-            line(mjd_at(30)),
+            das_line(mjd_at(30)),
             f"MJD {mjd_at(30)} is earlier than the preceding {mjd_at(60)}",
         ),
-        (line(mjd_at(90)), "mc1-clka was already measured in this epoch"),
+        (das_line(mjd_at(90)), "mc1-clka was already measured in this epoch"),
     ],
 )
 def test_a_refused_line_gives_its_reason_in_words(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, bad: str, reason: str
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    refused_line: str,
+    refusal_reason: str,
 ) -> None:
     """End the WARNING for a skipped line with the reason, word for word."""
-    path = data_file(tmp_path, [line(mjd_at(60)), bad])
-    list(reader.read_measurements(path))
-    (message,) = skipped(caplog)
-    assert message.endswith(f": {bad.rstrip(chr(10))!r} ({reason})")
+    day_file = write_data_file(tmp_path, [das_line(mjd_at(60)), refused_line])
+    list(reader.read_measurements(day_file))
+    (warning_message,) = skipped_line_warnings(caplog)
+    assert warning_message.endswith(
+        f": {refused_line.rstrip(chr(10))!r} ({refusal_reason})"
+    )
 
 
 def test_a_refused_line_is_shown_with_its_spaces(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Show a skipped line as it is, white space kept, its newline dropped."""
-    bad = line(mjd_at(90)).replace("\n", "  \n")
-    path = data_file(tmp_path, [line(mjd_at(60)), bad])
-    list(reader.read_measurements(path))
-    (message,) = skipped(caplog)
-    assert f"{bad[:-1]!r}" in message
+    refused_line = das_line(mjd_at(90)).replace("\n", "  \n")
+    day_file = write_data_file(tmp_path, [das_line(mjd_at(60)), refused_line])
+    list(reader.read_measurements(day_file))
+    (warning_message,) = skipped_line_warnings(caplog)
+    assert f"{refused_line[:-1]!r}" in warning_message
 
 
 def test_every_reader_error_is_logged_as_raised(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log each DataFileError at ERROR in the words it is raised with."""
-    unended = data_file(tmp_path, [line(mjd_at(60)).rstrip("\n")])
-    calls: list[Callable[[], object]] = [
-        lambda: list(reader.read_measurements(unended)),
-        lambda: list(reader.read_measurements(tmp_path / f"cd5m5m_{DAY + 1}.dat")),
+    unended_file = write_data_file(tmp_path, [das_line(mjd_at(60)).rstrip("\n")])
+    failing_calls: list[Callable[[], object]] = [
+        lambda: list(reader.read_measurements(unended_file)),
+        lambda: list(reader.read_measurements(tmp_path / f"cd5m5m_{DATA_DAY + 1}.dat")),
         lambda: reader._file_mjd(Path("notes.txt")),
         lambda: reader.find_data_files(tmp_path / "missing"),
     ]
-    for call in calls:
+    for failing_call in failing_calls:
         caplog.clear()
         with pytest.raises(DataFileError) as raised:
-            call()
-        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
-        assert [r.getMessage() for r in errors] == [str(raised.value)]
+            failing_call()
+        error_records = [
+            log_record
+            for log_record in caplog.records
+            if log_record.levelno == logging.ERROR
+        ]
+        assert [log_record.getMessage() for log_record in error_records] == [
+            str(raised.value)
+        ]
     assert str(raised.value).startswith("cannot list the DAS directory")
     caplog.clear()
     with pytest.raises(DataFileError) as raised:
-        list(reader.read_measurements(unended))
+        list(reader.read_measurements(unended_file))
     assert str(raised.value) == (
-        f"malformed data file {unended}: line 1 has no newline"
+        f"malformed data file {unended_file}: line 1 has no newline"
     )
 
 
@@ -725,15 +802,19 @@ def test_an_ignored_entry_is_named_at_debug(
 ) -> None:
     """Say at DEBUG which entry is passed over, and why, word for word."""
     caplog.set_level(logging.DEBUG)
-    notes = tmp_path / "notes.txt"
-    notes.write_text("")
-    folder = tmp_path / f"cd5m5m_{DAY}.dat"
-    folder.mkdir()
+    notes_file = tmp_path / "notes.txt"
+    notes_file.write_text("")
+    dated_directory = tmp_path / f"cd5m5m_{DATA_DAY}.dat"
+    dated_directory.mkdir()
     reader.find_data_files(tmp_path)
-    debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
-    assert debug == [
-        f"ignoring {folder}, named as a daily data file but not a file",
-        f"ignoring {notes}, which is not named as a daily data file",
+    debug_messages = [
+        log_record.getMessage()
+        for log_record in caplog.records
+        if log_record.levelno == logging.DEBUG
+    ]
+    assert debug_messages == [
+        f"ignoring {dated_directory}, named as a daily data file but not a file",
+        f"ignoring {notes_file}, which is not named as a daily data file",
     ]
 
 
@@ -741,11 +822,13 @@ def test_a_refused_line_ending_in_any_letter_is_shown_whole(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Drop only the newline from a skipped line, whatever its last letter."""
-    bad = line(mjd_at(90), clock="clkX")
-    path = data_file(tmp_path, [line(mjd_at(60), clock="clkX"), bad])
-    list(reader.read_measurements(path))
-    (message,) = skipped(caplog)
-    assert f"{bad[:-1]!r}" in message
+    refused_line = das_line(mjd_at(90), clock="clkX")
+    day_file = write_data_file(
+        tmp_path, [das_line(mjd_at(60), clock="clkX"), refused_line]
+    )
+    list(reader.read_measurements(day_file))
+    (warning_message,) = skipped_line_warnings(caplog)
+    assert f"{refused_line[:-1]!r}" in warning_message
 
 
 def test_an_rms_past_its_column_is_malformed() -> None:

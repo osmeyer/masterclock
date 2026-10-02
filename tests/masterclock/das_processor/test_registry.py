@@ -30,24 +30,24 @@ from masterclock.domain.series import SeriesKey
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """An invented epoch start."""
 
-NONE: Final = registry.ExistingSeries(pairs=frozenset(), triples=frozenset())
+NO_SERIES: Final = registry.ExistingSeries(pairs=frozenset(), triples=frozenset())
 """No series yet."""
 
 
-def block(pairs: list[tuple[str, str]]) -> DASData:
+def das_block_measuring(measured_pairs: list[tuple[str, str]]) -> DASData:
     """Give a block measuring each (reference, clock) pair once, in order."""
-    start = datetime_to_mjd(E)
-    measurements = tuple(
+    epoch_mjd = datetime_to_mjd(E)
+    das_measurements = tuple(
         DASMeasurement(
-            measurement_mjd=round(start + (index + 1) * 2e-6, 6),
+            measurement_mjd=round(epoch_mjd + (measurement_index + 1) * 2e-6, 6),
             measured_phase=1000,
             rms=3,
-            switch=f"{reference[-1]}A{index % 100:02d}",
+            switch=f"{reference[-1]}A{measurement_index % 100:02d}",
             clock=clock,
         )
-        for index, (reference, clock) in enumerate(pairs)
+        for measurement_index, (reference, clock) in enumerate(measured_pairs)
     )
-    return DASData(interpolated_datetime=E, measurements=measurements)
+    return DASData(interpolated_datetime=E, measurements=das_measurements)
 
 
 REFS: Final = ("mc1", "mc2", "mc3")
@@ -56,9 +56,9 @@ REFS: Final = ("mc1", "mc2", "mc3")
 
 def design_example() -> DASData:
     """Give design 3.3's example: three references, twenty clocks, each local."""
-    pairs = [(r, s) for r in REFS for s in REFS]
-    pairs += [(REFS[i % 3], f"hm{i}") for i in range(20)]
-    return block(pairs)
+    measured_pairs = [(r, s) for r in REFS for s in REFS]
+    measured_pairs += [(REFS[i % 3], f"hm{i}") for i in range(20)]
+    return das_block_measuring(measured_pairs)
 
 
 def test_the_references_are_the_clocks_named_as_references() -> None:
@@ -69,8 +69,10 @@ def test_the_references_are_the_clocks_named_as_references() -> None:
 
 def test_the_design_example_gives_29_pairs_and_87_triples() -> None:
     """Give 3 self + 6 link + 20 clock pairs and 3 triples per pair (3.3)."""
-    data = design_example()
-    pairs, triples = registry.build_registry(data, registry.refs_of(data), NONE)
+    das_block = design_example()
+    pairs, triples = registry.build_registry(
+        das_block, registry.refs_of(das_block), NO_SERIES
+    )
     assert len(pairs) == 29
     assert len(triples) == 3 * 29
     assert pairs == tuple(sorted(pairs))
@@ -79,18 +81,24 @@ def test_the_design_example_gives_29_pairs_and_87_triples() -> None:
 
 def test_every_clock_local_to_a_reference_gets_its_local_triple() -> None:
     """Give (r, r, c) for every clock c measured against r (3.3)."""
-    data = design_example()
-    _, triples = registry.build_registry(data, registry.refs_of(data), NONE)
+    das_block = design_example()
+    _, triples = registry.build_registry(
+        das_block, registry.refs_of(das_block), NO_SERIES
+    )
     for i in range(20):
-        local = REFS[i % 3]
-        assert (local, local, f"hm{i}") in triples
-        assert {(r, local, f"hm{i}") for r in REFS} <= set(triples)
+        local_ref = REFS[i % 3]
+        assert (local_ref, local_ref, f"hm{i}") in triples
+        assert {(r, local_ref, f"hm{i}") for r in REFS} <= set(triples)
 
 
 def test_a_link_needs_both_directions() -> None:
     """Give no triple through a link measured one way only."""
-    data = block([("mc1", "mc1"), ("mc2", "mc2"), ("mc1", "mc2"), ("mc2", "hm7")])
-    _, triples = registry.build_registry(data, registry.refs_of(data), NONE)
+    das_block = das_block_measuring(
+        [("mc1", "mc1"), ("mc2", "mc2"), ("mc1", "mc2"), ("mc2", "hm7")]
+    )
+    _, triples = registry.build_registry(
+        das_block, registry.refs_of(das_block), NO_SERIES
+    )
     assert triples == (
         ("mc1", "mc1", "mc1"),
         ("mc1", "mc1", "mc2"),
@@ -101,8 +109,12 @@ def test_a_link_needs_both_directions() -> None:
 
 def test_a_link_or_self_pair_seeds_triples_too() -> None:
     """Seed triples from every pair, a reference's as much as any clock's."""
-    data = block([(r, s) for r, s in permutations(REFS, 2)] + [(r, r) for r in REFS])
-    triples = registry.build_registry(data, registry.refs_of(data), NONE)[1]
+    das_block = das_block_measuring(
+        [(r, s) for r, s in permutations(REFS, 2)] + [(r, r) for r in REFS]
+    )
+    triples = registry.build_registry(
+        das_block, registry.refs_of(das_block), NO_SERIES
+    )[1]
     assert len(triples) == 3 * 9
     assert {("mc1", "mc1", "mc1"), ("mc1", "mc1", "mc2"), ("mc1", "mc2", "mc1")} <= set(
         triples
@@ -111,28 +123,30 @@ def test_a_link_or_self_pair_seeds_triples_too() -> None:
 
 def test_a_local_triple_needs_the_self_pair() -> None:
     """Give (r, r, c) only when r is measured against itself."""
-    data = block([("mc2", "hm7")])
-    assert registry.build_registry(data, frozenset({"mc2"}), NONE)[1] == ()
+    das_block = das_block_measuring([("mc2", "hm7")])
+    assert registry.build_registry(das_block, frozenset({"mc2"}), NO_SERIES)[1] == ()
 
 
 def test_a_series_is_never_removed() -> None:
     """Keep every existing pair and triple, measured this epoch or not (3.4)."""
-    existing = registry.ExistingSeries(
+    earlier_series = registry.ExistingSeries(
         pairs=frozenset({("mc1", "hm9"), ("mc1", "mc1")}),
         triples=frozenset({("mc3", "mc1", "hm9")}),
     )
-    pairs, triples = registry.build_registry(None, frozenset(), existing)
+    pairs, triples = registry.build_registry(None, frozenset(), earlier_series)
     assert pairs == (("mc1", "hm9"), ("mc1", "mc1"))
     assert triples == (("mc3", "mc1", "hm9"),)
 
 
 def test_new_series_join_the_existing_ones() -> None:
     """Add the epoch's new pairs and triples to those that exist."""
-    existing = registry.ExistingSeries(
+    earlier_series = registry.ExistingSeries(
         pairs=frozenset({("mc1", "hm9")}), triples=frozenset()
     )
-    data = block([("mc1", "mc1"), ("mc1", "hm7")])
-    pairs, triples = registry.build_registry(data, registry.refs_of(data), existing)
+    das_block = das_block_measuring([("mc1", "mc1"), ("mc1", "hm7")])
+    pairs, triples = registry.build_registry(
+        das_block, registry.refs_of(das_block), earlier_series
+    )
     assert pairs == (("mc1", "hm7"), ("mc1", "hm9"), ("mc1", "mc1"))
     assert triples == (
         ("mc1", "mc1", "hm7"),
@@ -145,17 +159,17 @@ def test_new_series_join_the_existing_ones() -> None:
 
 
 @pytest.mark.parametrize(
-    ("key", "relative"),
+    ("series_key", "relative_path"),
     [
         (("mc2", "nav23"), "meas/das_a.mc2.nav23.dat"),
         (("mc1", "mc2", "nav23"), "ddiff/das_a.mc1.mc2.nav23.dat"),
     ],
 )
 def test_a_series_file_is_named_for_its_channel_and_key(
-    tmp_path: Path, key: SeriesKey, relative: str
+    tmp_path: Path, series_key: SeriesKey, relative_path: str
 ) -> None:
     """Name a pair's file in meas/ and a triple's in ddiff/ (5.1)."""
-    assert registry.series_file(tmp_path, "a", key) == tmp_path / relative
+    assert registry.series_file(tmp_path, "a", series_key) == tmp_path / relative_path
 
 
 @pytest.mark.parametrize("clock", ["nav.23", "nav/23", "", ".."])
@@ -168,7 +182,7 @@ def test_a_clock_name_that_cannot_name_a_file_is_refused(
 
 
 @pytest.mark.parametrize(
-    ("name", "key"),
+    ("file_name", "series_key"),
     [
         ("das_a.mc2.nav23.dat", ("mc2", "nav23")),
         ("das_a.mc1.mc2.nav23.dat", ("mc1", "mc2", "nav23")),
@@ -180,22 +194,24 @@ def test_a_clock_name_that_cannot_name_a_file_is_refused(
         ("notes.txt", None),
     ],
 )
-def test_a_key_is_read_from_a_file_name(name: str, key: SeriesKey | None) -> None:
+def test_a_key_is_read_from_a_file_name(
+    file_name: str, series_key: SeriesKey | None
+) -> None:
     """Read the key of a channel's file name, and nothing from any other name."""
-    assert registry.series_key_of(name, "a") == key
+    assert registry.series_key_of(file_name, "a") == series_key
 
 
 def test_the_existing_series_are_read_from_the_file_names(tmp_path: Path) -> None:
     """List each archive and take the channel's series files (3.4, 5.1)."""
     (tmp_path / "meas").mkdir()
     (tmp_path / "ddiff").mkdir()
-    for name in (
+    for file_name in (
         "das_a.mc2.nav23.dat",
         "das_a.mc1.mc1.dat",
         "das_b.mc2.nav23.dat",
         "README",
     ):
-        (tmp_path / "meas" / name).write_text("")
+        (tmp_path / "meas" / file_name).write_text("")
     (tmp_path / "meas" / "das_a.mc1.mc2.nav23.dat").write_text("")
     (tmp_path / "meas" / "das_a.mc3.mc3.dat").mkdir()
     (tmp_path / "ddiff" / "das_a.mc1.mc2.nav23.dat").write_text("")
@@ -208,7 +224,7 @@ def test_the_existing_series_are_read_from_the_file_names(tmp_path: Path) -> Non
 
 def test_no_archive_directories_mean_no_series(tmp_path: Path) -> None:
     """Give no series before any file has been written."""
-    assert registry.existing_series(tmp_path, "a") == NONE
+    assert registry.existing_series(tmp_path, "a") == NO_SERIES
 
 
 def test_an_archive_that_cannot_be_listed_is_refused(tmp_path: Path) -> None:
@@ -223,7 +239,9 @@ def test_an_archive_refusal_is_logged_as_raised(
 ) -> None:
     """Log the DataFileError for an archive that cannot be listed, as raised."""
     (tmp_path / "meas").write_text("")
-    with pytest.raises(DataFileError) as raised:
+    with pytest.raises(DataFileError) as refusal:
         registry.existing_series(tmp_path, "a")
-    assert [r.getMessage() for r in caplog.records] == [str(raised.value)]
-    assert str(raised.value).startswith(f"cannot list archive {tmp_path / 'meas'}: ")
+    assert [log_record.getMessage() for log_record in caplog.records] == [
+        str(refusal.value)
+    ]
+    assert str(refusal.value).startswith(f"cannot list archive {tmp_path / 'meas'}: ")

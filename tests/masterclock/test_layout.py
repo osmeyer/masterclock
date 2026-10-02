@@ -26,72 +26,79 @@ import masterclock
 PROJECT: Final = "masterclock"
 APP: Final = "app"
 DOMAIN: Final = "domain"
-LOADERS: Final = frozenset({"import_module", "__import__"})
+IMPORT_LOADERS: Final = frozenset({"import_module", "__import__"})
 
 
-def allowed(part: str) -> frozenset[str]:
-    """Return the parts of the project that the part ``part`` may import."""
-    if part == APP:
+def allowed_parts(part_name: str) -> frozenset[str]:
+    """Return the parts of the project that the part ``part_name`` may import."""
+    if part_name == APP:
         return frozenset({APP})
-    if part == DOMAIN:
+    if part_name == DOMAIN:
         return frozenset({APP, DOMAIN})
-    return frozenset({APP, DOMAIN, part})
+    return frozenset({APP, DOMAIN, part_name})
 
 
-def part_of(name: str) -> str | None:
-    """Return the part of the project ``name`` is in, or None if outside it."""
-    if not name.startswith(f"{PROJECT}."):
+def part_of(module_name: str) -> str | None:
+    """Return the part of the project ``module_name`` is in, or None if outside it."""
+    if not module_name.startswith(f"{PROJECT}."):
         return None
-    return name.split(".")[1]
+    return module_name.split(".")[1]
 
 
-def parts() -> list[str]:
+def project_parts_found() -> list[str]:
     """Return the name of every subpackage of the project."""
     return [
-        found.name
-        for found in pkgutil.iter_modules(masterclock.__path__)
-        if found.ispkg
+        module_info.name
+        for module_info in pkgutil.iter_modules(masterclock.__path__)
+        if module_info.ispkg
     ]
 
 
-def modules_of(part: str) -> dict[str, ModuleType]:
-    """Return the subpackage ``part`` and every module below it, by name."""
-    package = importlib.import_module(f"{PROJECT}.{part}")
-    names = [package.__name__] + [
-        found.name
-        for found in pkgutil.walk_packages(package.__path__, f"{package.__name__}.")
+def modules_of(part_name: str) -> dict[str, ModuleType]:
+    """Return the subpackage ``part_name`` and every module below it, by name."""
+    package = importlib.import_module(f"{PROJECT}.{part_name}")
+    module_names = [package.__name__] + [
+        module_info.name
+        for module_info in pkgutil.walk_packages(
+            package.__path__, f"{package.__name__}."
+        )
     ]
-    return {name: importlib.import_module(name) for name in names}
+    return {
+        module_name: importlib.import_module(module_name)
+        for module_name in module_names
+    }
 
 
-def relative_base(module: str, *, is_package: bool, level: int) -> str:
-    """Return the package a relative import of ``level`` dots starts from."""
-    base = module if is_package else module.rpartition(".")[0]
-    for _ in range(level - 1):
-        base = base.rpartition(".")[0]
-    return base
+def relative_base(module_name: str, *, is_package: bool, dot_count: int) -> str:
+    """Return the package a relative import of ``dot_count`` dots starts from."""
+    base_package = module_name if is_package else module_name.rpartition(".")[0]
+    for _ in range(dot_count - 1):
+        base_package = base_package.rpartition(".")[0]
+    return base_package
 
 
-def imported_names(source: str, module: str, *, is_package: bool) -> list[str]:
+def imported_names(source: str, module_name: str, *, is_package: bool) -> list[str]:
     """Return every module name the source imports, written out in full.
 
     An ``import a.b`` gives ``a.b``; a ``from a import b`` gives ``a`` and
     ``a.b``, since ``b`` may be a module; a relative import is resolved from
-    ``module``; and a call to ``importlib.import_module`` or ``__import__``
+    ``module_name``; and a call to ``importlib.import_module`` or ``__import__``
     with a literal name gives that name.
     """
-    names: list[str] = []
+    imported: list[str] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            names.extend(alias.name for alias in node.names)
+            imported.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level:
-                base = relative_base(module, is_package=is_package, level=node.level)
-                start = f"{base}.{node.module}" if node.module else base
+                base = relative_base(
+                    module_name, is_package=is_package, dot_count=node.level
+                )
+                imported_from = f"{base}.{node.module}" if node.module else base
             else:
-                start = node.module or ""
-            names.append(start)
-            names.extend(f"{start}.{alias.name}" for alias in node.names)
+                imported_from = node.module or ""
+            imported.append(imported_from)
+            imported.extend(f"{imported_from}.{alias.name}" for alias in node.names)
         elif isinstance(node, ast.Call):
             function = node.func
             called = (
@@ -100,26 +107,27 @@ def imported_names(source: str, module: str, *, is_package: bool) -> list[str]:
                 else getattr(function, "id", "")
             )
             if (
-                called in LOADERS
+                called in IMPORT_LOADERS
                 and node.args
                 and isinstance(node.args[0], ast.Constant)
                 and isinstance(node.args[0].value, str)
             ):
-                names.append(node.args[0].value)
-    return names
+                imported.append(node.args[0].value)
+    return imported
 
 
-def refused(names: list[str], part: str) -> list[str]:
-    """Return the names in ``names`` that the part ``part`` may not import."""
+def refused_names(imported: list[str], part_name: str) -> list[str]:
+    """Return the names in ``imported`` that the part ``part_name`` may not import."""
     return [
-        name
-        for name in names
-        if (target := part_of(name)) is not None and target not in allowed(part)
+        module_name
+        for module_name in imported
+        if (target_part := part_of(module_name)) is not None
+        and target_part not in allowed_parts(part_name)
     ]
 
 
 @pytest.mark.parametrize(
-    ("source", "module", "is_package", "wrong"),
+    ("source", "module_name", "is_package", "is_refused"),
     [
         ("import masterclock.domain", "masterclock.app.log", False, True),
         ("import masterclock.app.log", "masterclock.app.lock", False, False),
@@ -174,27 +182,29 @@ def refused(names: list[str], part: str) -> list[str]:
     ],
 )
 def test_every_way_of_writing_an_import_is_judged(
-    source: str, module: str, *, is_package: bool, wrong: bool
+    source: str, module_name: str, *, is_package: bool, is_refused: bool
 ) -> None:
     """Refuse an import from a part the module's part may not use, in any form."""
-    part = module.split(".")[1]
-    names = imported_names(source, module, is_package=is_package)
-    assert bool(refused(names, part)) is wrong
+    part_name = module_name.split(".")[1]
+    imported = imported_names(source, module_name, is_package=is_package)
+    assert bool(refused_names(imported, part_name)) is is_refused
 
 
 def test_every_part_imports_only_what_it_may() -> None:
     """Import, in every module of every part, only the parts that one may use."""
-    found = parts()
-    assert {APP, DOMAIN, "das_processor"} <= set(found)
-    seen: dict[str, int] = {}
-    outside: dict[str, list[str]] = {}
-    for part in found:
-        seen[part] = 0
-        for name, module in modules_of(part).items():
-            names = imported_names(
-                inspect.getsource(module), name, is_package=hasattr(module, "__path__")
+    project_parts = project_parts_found()
+    assert {APP, DOMAIN, "das_processor"} <= set(project_parts)
+    names_seen: dict[str, int] = {}
+    refused_by_module: dict[str, list[str]] = {}
+    for part_name in project_parts:
+        names_seen[part_name] = 0
+        for module_name, module_object in modules_of(part_name).items():
+            imported = imported_names(
+                inspect.getsource(module_object),
+                module_name,
+                is_package=hasattr(module_object, "__path__"),
             )
-            seen[part] += len(names)
-            outside[name] = refused(names, part)
-    assert all(count > 0 for count in seen.values()), seen
-    assert outside == {name: [] for name in outside}
+            names_seen[part_name] += len(imported)
+            refused_by_module[module_name] = refused_names(imported, part_name)
+    assert all(seen_count > 0 for seen_count in names_seen.values()), names_seen
+    assert refused_by_module == {module_name: [] for module_name in refused_by_module}

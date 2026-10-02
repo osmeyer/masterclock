@@ -12,31 +12,31 @@ from masterclock.app.exceptions import MasterClockError
 from masterclock.domain import exceptions
 
 
-def defined_here() -> dict[str, type[BaseException]]:
+def exception_classes_defined_here() -> dict[str, type[BaseException]]:
     """Return every exception class the module itself defines, by name."""
     return {
-        name: value
-        for name, value in vars(exceptions).items()
-        if inspect.isclass(value)
-        and issubclass(value, BaseException)
-        and value.__module__ == exceptions.__name__
+        class_name: exception_class
+        for class_name, exception_class in vars(exceptions).items()
+        if inspect.isclass(exception_class)
+        and issubclass(exception_class, BaseException)
+        and exception_class.__module__ == exceptions.__name__
     }
 
 
 def test_every_exception_descends_from_the_root() -> None:
     """Make every exception defined here a MasterClockError."""
-    classes = defined_here()
-    assert {"PhaseError", "FilterError"} <= classes.keys()
-    outside = [
-        name
-        for name, value in classes.items()
-        if not issubclass(value, MasterClockError)
+    exception_classes = exception_classes_defined_here()
+    assert {"PhaseError", "FilterError"} <= exception_classes.keys()
+    not_descended = [
+        class_name
+        for class_name, exception_class in exception_classes.items()
+        if not issubclass(exception_class, MasterClockError)
     ]
-    assert outside == []
+    assert not_descended == []
 
 
 def test_one_clause_catches_every_one_of_them() -> None:
     """Catch every exception defined here with one MasterClockError clause."""
-    for name, value in defined_here().items():
-        with pytest.raises(MasterClockError, match=name):
-            raise value(name)
+    for class_name, exception_class in exception_classes_defined_here().items():
+        with pytest.raises(MasterClockError, match=class_name):
+            raise exception_class(class_name)

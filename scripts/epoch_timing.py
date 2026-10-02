@@ -33,10 +33,10 @@ from masterclock.domain.phase import PHASE_PERIOD
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-DAY: Final = datetime(2025, 9, 23, tzinfo=UTC)
+DATA_START: Final = datetime(2025, 9, 23, tzinfo=UTC)
 """The invented day the data cover, from its first epoch."""
 
-EPOCH: Final = timedelta(minutes=10)
+EPOCH_LENGTH: Final = timedelta(minutes=10)
 """One epoch."""
 
 EPOCH_SECONDS: Final = 600.0
@@ -55,7 +55,7 @@ ten seconds, where the DAS reader refuses a measurement.
 MAX_REFERENCES: Final = 10
 """How many references a switch position can name: one digit."""
 
-COMMAND: Final = (sys.executable, "-m", "masterclock.das_processor")
+DAS_PROCESSOR_COMMAND: Final = (sys.executable, "-m", "masterclock.das_processor")
 """The program timed."""
 
 CLOCK_TYPES: Final = (
@@ -71,7 +71,7 @@ CLOCK_TYPES: Final = (
 """The invented clock configuration, before its list of clocks."""
 
 
-def pairs_of(references: int, clocks: int) -> list[tuple[str, str]]:
+def measured_pairs_for(references: int, clocks: int) -> list[tuple[str, str]]:
     """Give every pair measured, references first, each clock after its reference's.
 
     Parameters
@@ -87,13 +87,18 @@ def pairs_of(references: int, clocks: int) -> list[tuple[str, str]]:
         Each (reference, clock): ``mc<i>`` against every reference, then
         ``hm<n>`` against reference ``n mod references``.
     """
-    names = [f"mc{i}" for i in range(references)]
-    pairs = [(r, s) for r in names for s in names]
-    pairs += [(names[n % references], f"hm{n:04d}") for n in range(clocks)]
-    return pairs
+    reference_names = [f"mc{i}" for i in range(references)]
+    measured_pairs = [(r, s) for r in reference_names for s in reference_names]
+    measured_pairs += [
+        (reference_names[clock_index % references], f"hm{clock_index:04d}")
+        for clock_index in range(clocks)
+    ]
+    return measured_pairs
 
 
-def build(folder: Path, references: int, clocks: int, epochs: int) -> list[str]:
+def build_deployment(
+    folder: Path, references: int, clocks: int, epochs: int
+) -> list[str]:
     """Write a deployment's input files in a new folder, and give its arguments.
 
     Parameters
@@ -105,49 +110,59 @@ def build(folder: Path, references: int, clocks: int, epochs: int) -> list[str]:
     clocks : int
         How many other clocks.
     epochs : int
-        How many epochs of data, from the start of :data:`DAY`.
+        How many epochs of data, from the start of :data:`DATA_START`.
 
     Returns
     -------
     list of str
         The das_processor arguments for the deployment, with logging off.
     """
-    for name in ("das", "steering", "processed"):
-        (folder / name).mkdir(parents=True)
-    pairs = pairs_of(references, clocks)
-    entries = sorted({clock for _, clock in pairs})
+    for subfolder in ("das", "steering", "processed"):
+        (folder / subfolder).mkdir(parents=True)
+    measured_pairs = measured_pairs_for(references, clocks)
+    clock_names = sorted({clock for _, clock in measured_pairs})
     (folder / "clock_config.yaml").write_text(
         CLOCK_TYPES
         + "".join(
-            f"  {name}: [{{type: {'mc' if name.startswith('mc') else 'maser'}}}]\n"
-            for name in entries
+            f"  {clock}: [{{type: {'mc' if clock.startswith('mc') else 'maser'}}}]\n"
+            for clock in clock_names
         ),
         encoding="utf-8",
     )
-    days: dict[int, list[str]] = {}
-    for index in range(epochs):
-        mark = DAY + index * EPOCH
-        for slot, (reference, clock) in enumerate(pairs):
-            offset = timedelta(seconds=1 + SPAN * slot / len(pairs))
-            seconds = int((mark + offset - DAY).total_seconds())
-            line = DASMeasurement(
-                measurement_mjd=round(datetime_to_mjd(mark + offset), 6),
-                measured_phase=(1_000 * slot + (slot % 7 - 3) * seconds // 100)
+    day_lines: dict[int, list[str]] = {}
+    for epoch_index in range(epochs):
+        epoch_start = DATA_START + epoch_index * EPOCH_LENGTH
+        for pair_slot, (reference, clock) in enumerate(measured_pairs):
+            measurement_offset = timedelta(
+                seconds=1 + SPAN * pair_slot / len(measured_pairs)
+            )
+            seconds_into_day = int(
+                (epoch_start + measurement_offset - DATA_START).total_seconds()
+            )
+            das_measurement = DASMeasurement(
+                measurement_mjd=round(
+                    datetime_to_mjd(epoch_start + measurement_offset), 6
+                ),
+                measured_phase=(
+                    1_000 * pair_slot + (pair_slot % 7 - 3) * seconds_into_day // 100
+                )
                 % PHASE_PERIOD,
                 rms=3,
-                switch=f"{reference[-1]}A{slot % 100:02d}",
+                switch=f"{reference[-1]}A{pair_slot % 100:02d}",
                 clock=clock,
             )
-            days.setdefault(int(datetime_to_mjd(mark)), []).append(f"{line}\n")
-    for day, lines in days.items():
-        (folder / "das" / f"cd5m5m_{day}.dat").write_text("".join(lines))
+            day_lines.setdefault(int(datetime_to_mjd(epoch_start)), []).append(
+                f"{das_measurement}\n"
+            )
+    for mjd_day, day_file_lines in day_lines.items():
+        (folder / "das" / f"cd5m5m_{mjd_day}.dat").write_text("".join(day_file_lines))
     return [
         "--rf", "a",
         "--cd5m5m-path", str(folder / "das"),
         "--steering-path", str(folder / "steering"),
         "--processed-path", str(folder / "processed"),
         "--clock-config-file", str(folder / "clock_config.yaml"),
-        "--start-from-mjd", f"{datetime_to_mjd(DAY):.6f}",
+        "--start-from-mjd", f"{datetime_to_mjd(DATA_START):.6f}",
         "--log-file", "None",
         "--log-level", "None",
         "--backup-count", "None",
@@ -158,12 +173,12 @@ class RunFailedError(Exception):
     """A timed run of das_processor exited with a failure."""
 
 
-def timed(arguments: Sequence[str]) -> float:
+def timed_run(das_arguments: Sequence[str]) -> float:
     """Run das_processor once and give how long it took.
 
     Parameters
     ----------
-    arguments : Sequence of str
+    das_arguments : Sequence of str
         Its arguments.
 
     Returns
@@ -176,24 +191,29 @@ def timed(arguments: Sequence[str]) -> float:
     RunFailedError
         If it exits with a failure; the message holds its error output.
     """
-    began = time.perf_counter()
+    started = time.perf_counter()
     # The command is das_processor itself, with arguments this script made.
-    done = subprocess.run(  # noqa: S603  # nosec B603
-        [*COMMAND, *arguments], capture_output=True, text=True, check=False
+    finished_run = subprocess.run(  # noqa: S603  # nosec B603
+        [*DAS_PROCESSOR_COMMAND, *das_arguments],
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    took = time.perf_counter() - began
-    if done.returncode != 0:
-        message = f"exit status {done.returncode}: {done.stderr.strip()}"
-        raise RunFailedError(message)
-    return took
+    run_seconds = time.perf_counter() - started
+    if finished_run.returncode != 0:
+        failure = (
+            f"exit status {finished_run.returncode}: {finished_run.stderr.strip()}"
+        )
+        raise RunFailedError(failure)
+    return run_seconds
 
 
-def share(seconds: float) -> str:
+def with_epoch_share(run_seconds: float) -> str:
     """Give a time with its share of an epoch.
 
     Parameters
     ----------
-    seconds : float
+    run_seconds : float
         The time, in s.
 
     Returns
@@ -201,15 +221,15 @@ def share(seconds: float) -> str:
     str
         For example ``"0.512 s, 0.085% of 600 s"``.
     """
-    return f"{seconds:.3f} s, {100 * seconds / EPOCH_SECONDS:.3f}% of 600 s"
+    return f"{run_seconds:.3f} s, {100 * run_seconds / EPOCH_SECONDS:.3f}% of 600 s"
 
 
-def report(options: argparse.Namespace) -> list[str]:
+def timing_report(cli_options: argparse.Namespace) -> list[str]:
     """Build both deployments, time their runs, and give the lines to print.
 
     Parameters
     ----------
-    options : argparse.Namespace
+    cli_options : argparse.Namespace
         The parsed command line.
 
     Returns
@@ -222,53 +242,74 @@ def report(options: argparse.Namespace) -> list[str]:
     RunFailedError
         If a run fails.
     """
-    references, clocks, epochs = options.references, options.clocks, options.epochs
-    stepped = build(options.folder / "stepped", references, clocks, epochs)
-    batch = build(options.folder / "batch", references, clocks, epochs)
-    lines = [
+    references, clocks, epochs = (
+        cli_options.references,
+        cli_options.clocks,
+        cli_options.epochs,
+    )
+    stepped_arguments = build_deployment(
+        cli_options.folder / "stepped", references, clocks, epochs
+    )
+    batch_arguments = build_deployment(
+        cli_options.folder / "batch", references, clocks, epochs
+    )
+    report_lines = [
         f"deployment: {references} references, {clocks} clocks, {epochs} epochs:"
         f" {references * references + clocks} pair files,"
         f" {references * (references * references + clocks)} triple files"
     ]
-    runs = [timed([*stepped, "--steps", "1"]) for _ in range(options.runs)]
-    lines.append(f"run of one epoch, first, which creates the files: {share(runs[0])}")
-    if len(runs) > 1:
-        rest = runs[1:]
-        lines.append(f"run of one epoch, median of the next {len(rest)}:"
-                     f" {share(statistics.median(rest))}")  # fmt: skip
-        lines.append(f"run of one epoch, longest of the next {len(rest)}:"
-                     f" {share(max(rest))}")  # fmt: skip
-    whole = timed(batch)
-    lines.append(f"batch run of {epochs} epochs: {whole:.3f} s")
-    lines.append(f"batch run, per epoch: {share(whole / epochs)}")
-    return lines
+    one_epoch_times = [
+        timed_run([*stepped_arguments, "--steps", "1"]) for _ in range(cli_options.runs)
+    ]
+    report_lines.append(
+        "run of one epoch, first, which creates the files:"
+        f" {with_epoch_share(one_epoch_times[0])}"
+    )
+    if len(one_epoch_times) > 1:
+        later_times = one_epoch_times[1:]
+        report_lines.append(
+            f"run of one epoch, median of the next {len(later_times)}:"
+            f" {with_epoch_share(statistics.median(later_times))}"
+        )
+        report_lines.append(
+            f"run of one epoch, longest of the next {len(later_times)}:"
+            f" {with_epoch_share(max(later_times))}"
+        )
+    batch_seconds = timed_run(batch_arguments)
+    report_lines.append(f"batch run of {epochs} epochs: {batch_seconds:.3f} s")
+    report_lines.append(
+        f"batch run, per epoch: {with_epoch_share(batch_seconds / epochs)}"
+    )
+    return report_lines
 
 
-def _new_folder(text: str) -> Path:
+def _new_folder(cli_argument: str) -> Path:
     """Convert a command-line argument to a folder that is missing or empty."""
-    path = Path(text)
-    if path.exists() and (not path.is_dir() or any(path.iterdir())):
-        message = f"not a new or empty folder: {text}"
-        raise argparse.ArgumentTypeError(message)
-    return path
+    new_folder = Path(cli_argument)
+    if new_folder.exists() and (not new_folder.is_dir() or any(new_folder.iterdir())):
+        refusal = f"not a new or empty folder: {cli_argument}"
+        raise argparse.ArgumentTypeError(refusal)
+    return new_folder
 
 
-def _count(low: int, high: int | None = None) -> Callable[[str], int]:
-    """Give an argument type for a whole number from ``low`` to ``high``."""
+def _count(lowest: int, highest: int | None = None) -> Callable[[str], int]:
+    """Give an argument type for a whole number from ``lowest`` to ``highest``."""
 
-    def check(text: str) -> int:
+    def read_count(cli_argument: str) -> int:
         """Convert the argument, refusing a number out of range."""
         try:
-            number = int(text)
+            count = int(cli_argument)
         except ValueError:
-            number = low - 1
-        if number < low or (high is not None and number > high):
-            limit = f"from {low}" + ("" if high is None else f" to {high}")
-            message = f"not a whole number {limit}: {text}"
-            raise argparse.ArgumentTypeError(message)
-        return number
+            count = lowest - 1
+        if count < lowest or (highest is not None and count > highest):
+            range_text = f"from {lowest}" + (
+                "" if highest is None else f" to {highest}"
+            )
+            refusal = f"not a whole number {range_text}: {cli_argument}"
+            raise argparse.ArgumentTypeError(refusal)
+        return count
 
-    return check
+    return read_count
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -300,16 +341,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--runs", type=_count(1), default=6, help="runs of one epoch to time"
     )
-    options = parser.parse_args(argv)
-    if options.runs > options.epochs:
+    cli_options = parser.parse_args(argv)
+    if cli_options.runs > cli_options.epochs:
         parser.error("--runs may not be more than --epochs")
     try:
-        lines = report(options)
+        report_lines = timing_report(cli_options)
     except RunFailedError as exc:
         print(f"epoch_timing: a run failed: {exc}", file=sys.stderr)
         return 1
-    for line in lines:
-        print(line)
+    for report_line in report_lines:
+        print(report_line)
     return 0
 
 

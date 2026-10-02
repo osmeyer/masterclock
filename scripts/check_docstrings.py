@@ -30,13 +30,13 @@ FAILED: Final = 1
 type Definition = ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
 
 
-def _directory(text: str) -> Path:
+def _directory(cli_argument: str) -> Path:
     """Convert a command-line argument to the path of an existing folder."""
-    path = Path(text)
-    if not path.is_dir():
-        message = f"not a directory: {text}"
-        raise argparse.ArgumentTypeError(message)
-    return path
+    folder = Path(cli_argument)
+    if not folder.is_dir():
+        refusal = f"not a directory: {cli_argument}"
+        raise argparse.ArgumentTypeError(refusal)
+    return folder
 
 
 def python_files(directories: Sequence[Path]) -> list[Path]:
@@ -45,10 +45,10 @@ def python_files(directories: Sequence[Path]) -> list[Path]:
     A folder whose name ends in ``.py`` is not a file and is left out.
     """
     return sorted(
-        path
-        for directory in directories
-        for path in directory.rglob("*.py")
-        if path.is_file()
+        python_file
+        for folder in directories
+        for python_file in folder.rglob("*.py")
+        if python_file.is_file()
     )
 
 
@@ -64,29 +64,29 @@ def _describe(node: Definition) -> str:
     """Give the line number and name of a definition for the report."""
     if isinstance(node, ast.Module):
         return "1: module"
-    kind = "class" if isinstance(node, ast.ClassDef) else "function"
-    return f"{node.lineno}: {kind} {node.name}"
+    definition_kind = "class" if isinstance(node, ast.ClassDef) else "function"
+    return f"{node.lineno}: {definition_kind} {node.name}"
 
 
-def check_files(files: Sequence[Path]) -> tuple[int, list[str]]:
+def check_files(checked_files: Sequence[Path]) -> tuple[int, list[str]]:
     """Check each file and return the definitions examined and the problems found."""
     examined = 0
     problems: list[str] = []
-    for path in files:
+    for python_file in checked_files:
         try:
-            source = path.read_bytes()
-        except OSError as error:
-            problems.append(f"{path}: cannot be read: {error}")
+            source = python_file.read_bytes()
+        except OSError as read_error:
+            problems.append(f"{python_file}: cannot be read: {read_error}")
             continue
         try:
-            tree = ast.parse(source, filename=str(path))
-        except SyntaxError as error:
-            problems.append(f"{path}: cannot be parsed: {error}")
+            tree = ast.parse(source, filename=str(python_file))
+        except SyntaxError as parse_error:
+            problems.append(f"{python_file}: cannot be parsed: {parse_error}")
             continue
         for node in _definitions(tree):
             examined += 1
             if not ast.get_docstring(node):
-                problems.append(f"{path}:{_describe(node)} has no docstring")
+                problems.append(f"{python_file}:{_describe(node)} has no docstring")
     return examined, problems
 
 
@@ -99,15 +99,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         "directories", nargs="+", type=_directory, help="folders to search"
     )
     directories: list[Path] = parser.parse_args(argv).directories
-    files = python_files(directories)
-    examined, problems = check_files(files)
-    for problem in problems:
-        print(problem)
+    found_files = python_files(directories)
+    examined, problems = check_files(found_files)
+    for problem_line in problems:
+        print(problem_line)
     print(
-        f"check_docstrings: files examined: {len(files)}, "
+        f"check_docstrings: files examined: {len(found_files)}, "
         f"definitions examined: {examined}, problems: {len(problems)}"
     )
-    if not files:
+    if not found_files:
         print("check_docstrings: no Python files found, so nothing was checked")
         return FAILED
     return FAILED if problems else PASSED

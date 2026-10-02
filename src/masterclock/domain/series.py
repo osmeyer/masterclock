@@ -75,6 +75,15 @@ While a series is tracked, the value is a rejected innovation. While it is
 dormant, it is a measurement kept to acquire from.
 """
 
+type PairKey = tuple[str, str]
+"""A pair (a, b): reference a measured against clock or reference b."""
+
+type TripleKey = tuple[str, str, str]
+"""A triple (r, s, c): clock c against remote reference r, through s."""
+
+type SeriesKey = PairKey | TripleKey
+"""Either kind of series."""
+
 FLAG_ORDER: Final[str] = "ARXPDSNU"
 """Every flag a row can carry, in the order a row writes them."""
 

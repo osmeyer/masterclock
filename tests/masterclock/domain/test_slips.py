@@ -14,7 +14,8 @@ not used; and each correction or undecided case gives an event.
 
 The D scale combines as the design writes it and a slip lies strictly inside
 five of them; a D that cannot be worked out does not stop the rest; and
-every undecided clock's pairs are excluded.
+every undecided clock's pairs are excluded. A reference measured as a
+clock by the other references is checked as any clock is.
 """
 
 from fractions import Fraction
@@ -53,6 +54,15 @@ def epoch(
     for r, value in clocks.items():
         innovations[(r, "ox1")] = Fraction(value)
     return innovations
+
+
+def of_ox1(found: slips.Slips) -> slips.Slips:
+    """Keep only what the slip check found for the clock ox1."""
+    return slips.Slips(
+        corrections={p: k for p, k in found.corrections.items() if p[1] == "ox1"},
+        excluded=frozenset(p for p in found.excluded if p[1] == "ox1"),
+        events=tuple(e for e in found.events if e.clock == "ox1"),
+    )
 
 
 def check(
@@ -114,7 +124,7 @@ def test_the_link_s_two_way_value_is_taken_off() -> None:
 def test_a_pair_in_a_clean_d_is_not_corrected() -> None:
     """Leave undecided a slip whose candidates both sit in an unflagged D."""
     innovations = epoch(THREE, {"mc1": P, "mc2": 0, "mc3": 0}, {("mc1", "mc3"): P})
-    result = check(innovations, THREE)
+    result = of_ox1(check(innovations, THREE))
     assert result.corrections == {}
     assert result.excluded == frozenset({("mc1", "ox1"), ("mc2", "ox1")})
     assert [(e.kind, e.pairs, e.cycles) for e in result.events] == [
@@ -127,7 +137,7 @@ def test_the_one_common_pair_in_a_clean_d_is_not_corrected() -> None:
     four = (*THREE, "mc4")
     clocks = {"mc1": P, "mc2": 0, "mc3": 0, "mc4": 0}
     innovations = epoch(four, clocks, {("mc1", "mc4"): P})
-    result = check(innovations, four)
+    result = of_ox1(check(innovations, four))
     assert result.corrections == {}
     assert result.excluded == frozenset(
         {("mc1", "ox1"), ("mc2", "ox1"), ("mc3", "ox1")}
@@ -138,7 +148,7 @@ def test_corrections_that_disagree_are_undecided() -> None:
     """Correct nothing when the flagged Ds give the common pair two corrections."""
     clocks = {"mc1": P, "mc2": 0, "mc3": 2 * P}
     innovations = epoch(THREE, clocks, {("mc2", "mc3"): -2 * P})
-    result = check(innovations, THREE)
+    result = of_ox1(check(innovations, THREE))
     assert result.corrections == {}
     assert result.excluded == frozenset((r, "ox1") for r in THREE)
 
@@ -216,13 +226,14 @@ def test_a_link_not_usable_both_ways_gives_no_d() -> None:
     assert check(innovations, TWO, flags, excluded).corrections == {}
 
 
-def test_only_clock_pairs_are_checked() -> None:
-    """Check clocks, never a reference measured as a clock."""
-    innovations = epoch(THREE, {})
-    innovations[("mc1", "mc2")] += P
-    assert check(innovations, THREE) == slips.Slips(
-        corrections={}, excluded=frozenset(), events=()
-    )
+def test_a_reference_measured_as_a_clock_is_checked_too() -> None:
+    """Correct a link that slipped, the reference at its far end checked as a clock."""
+    four = (*THREE, "mc4")
+    innovations = epoch(four, {})
+    innovations[("mc1", "mc4")] += P
+    result = check(innovations, four)
+    assert result.corrections == {("mc1", "mc4"): -1}
+    assert [(e.kind, e.clock) for e in result.events] == [("slip_corrected", "mc4")]
 
 
 def test_the_tolerance_is_five_combined_scales() -> None:

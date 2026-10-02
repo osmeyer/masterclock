@@ -108,6 +108,7 @@ def test_a_run_exits_zero_and_writes_the_archives(tmp_path: Path) -> None:
     assert das_processor.main(argv) == 0
     assert sorted(archive(tmp_path)) == [
         "das_a.mc1.mc1.dat",
+        "das_a.mc1.mc1.mc1.dat",
         "das_a.mc1.mc1.ox23.dat",
         "das_a.mc1.ox23.dat",
     ]

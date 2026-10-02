@@ -148,7 +148,9 @@ def test_an_epoch_holds_its_references_and_series(tmp_path: Path) -> None:
     assert epoch.interpolated_datetime == E
     assert epoch.refs == frozenset({"mc1", "mc2"})
     assert epoch.pairs == tuple(sorted(MEASURED))
-    assert epoch.triples == (("mc1", "mc2", "ox23"), ("mc2", "mc2", "ox23"))
+    assert epoch.triples == tuple(
+        sorted((r, s, c) for r in ("mc1", "mc2") for s, c in MEASURED)
+    )
 
 
 def test_a_series_takes_the_entry_of_its_clock_side(tmp_path: Path) -> None:
@@ -595,7 +597,7 @@ def test_a_triple_without_its_clock_pair_holds(tmp_path: Path) -> None:
     epoch = epoch_of(REFERENCE_MEASURED, last, tmp_path)
     done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
     assert done.results[("mc2", "mc2", "ox23")].row.flags == "P"
-    assert done.measurements == {}
+    assert ("mc2", "mc2", "ox23") not in done.measurements
 
 
 def test_the_local_triple_is_checked_every_epoch(
@@ -606,7 +608,7 @@ def test_the_local_triple_is_checked_every_epoch(
 
     def spy(triple: TripleKey, sc: Component, rs: Component, sr: Component) -> object:
         """Record the links a local triple is given."""
-        if triple[0] == triple[1]:
+        if triple == ("mc2", "mc2", "ox23"):
             seen.append((rs, sr))
         return double_difference(triple, sc, rs, sr)
 
@@ -694,6 +696,7 @@ def rows_of(config: AppConfig, key: SeriesKey) -> list[Row]:
 SERIES: Final[tuple[SeriesKey, ...]] = (
     ("mc1", "mc1"),
     ("mc1", "ox23"),
+    ("mc1", "mc1", "mc1"),
     ("mc1", "mc1", "ox23"),
 )
 """The series of the loop's deployment."""
@@ -952,7 +955,7 @@ def test_an_epoch_is_logged_with_its_counts(
         caplog, epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path), last
     )
     assert at(records, "INFO") == [
-        "epoch 2025-09-23 06:00:00+00:00: 5 pairs, 2 triples, 5 accepted, 2 held"
+        "epoch 2025-09-23 06:00:00+00:00: 5 pairs, 10 triples, 5 accepted, 10 held"
     ]
 
 
@@ -965,11 +968,11 @@ def test_each_series_outcome_and_update_are_logged(
         caplog, epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path), last
     )
     debug = at(records, "DEBUG")
-    assert len(debug) == 7
+    assert len(debug) == 5 + 10
     assert "das_a.mc2.ox23: A" in debug
     assert "das_a.mc1.mc2.ox23: RD" in debug
     trace = at(records, "TRACE")
-    assert len(trace) == 7
+    assert len(trace) == 5 + 10
     assert any(
         line.startswith("das_a.mc2.ox23: prediction 1234574.38")
         and "x 1234574.457" in line

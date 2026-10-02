@@ -3,9 +3,10 @@
 The rules covered: the references of an epoch are the clocks of its block
 whose names start with the reference prefix; a pair exists for every
 reference and clock measured together, and is never removed once it
-exists; a triple (r, s, c) exists for every clock pair (s, c) and every
-reference r whose link with s is measured both ways, the self pair standing
-for both ways when r = s, so every clock local to r gets (r, r, c); the
+exists; a triple (r, s, c) exists for every pair (s, c), its c a reference
+or not, and every reference r whose link with s is measured both ways, the
+self pair standing for both ways when r = s, so every clock local to r gets
+(r, r, c); the
 keys come out sorted; a series' file is named for its channel and key, in
 the measurement or double-difference directory; and the existing series are
 read back from the names of a channel's files, other names ignored.
@@ -66,12 +67,12 @@ def test_the_references_are_the_clocks_named_as_references() -> None:
     assert registry.refs_of(None) == frozenset()
 
 
-def test_the_design_example_gives_29_pairs_and_60_triples() -> None:
-    """Give 3 self + 6 link + 20 clock pairs and 3 triples per clock (3.3)."""
+def test_the_design_example_gives_29_pairs_and_87_triples() -> None:
+    """Give 3 self + 6 link + 20 clock pairs and 3 triples per pair (3.3)."""
     data = design_example()
     pairs, triples = registry.build_registry(data, registry.refs_of(data), NONE)
     assert len(pairs) == 29
-    assert len(triples) == 60
+    assert len(triples) == 3 * 29
     assert pairs == tuple(sorted(pairs))
     assert triples == tuple(sorted(triples))
 
@@ -90,13 +91,22 @@ def test_a_link_needs_both_directions() -> None:
     """Give no triple through a link measured one way only."""
     data = block([("mc1", "mc1"), ("mc2", "mc2"), ("mc1", "mc2"), ("mc2", "hm7")])
     _, triples = registry.build_registry(data, registry.refs_of(data), NONE)
-    assert triples == (("mc2", "mc2", "hm7"),)
+    assert triples == (
+        ("mc1", "mc1", "mc1"),
+        ("mc1", "mc1", "mc2"),
+        ("mc2", "mc2", "hm7"),
+        ("mc2", "mc2", "mc2"),
+    )
 
 
-def test_a_reference_pair_seeds_no_triple() -> None:
-    """Seed triples from clock pairs only, never from a link pair."""
+def test_a_link_or_self_pair_seeds_triples_too() -> None:
+    """Seed triples from every pair, a reference's as much as any clock's."""
     data = block([(r, s) for r, s in permutations(REFS, 2)] + [(r, r) for r in REFS])
-    assert registry.build_registry(data, registry.refs_of(data), NONE)[1] == ()
+    triples = registry.build_registry(data, registry.refs_of(data), NONE)[1]
+    assert len(triples) == 3 * 9
+    assert {("mc1", "mc1", "mc1"), ("mc1", "mc1", "mc2"), ("mc1", "mc2", "mc1")} <= set(
+        triples
+    )
 
 
 def test_a_local_triple_needs_the_self_pair() -> None:
@@ -122,7 +132,11 @@ def test_new_series_join_the_existing_ones() -> None:
     data = block([("mc1", "mc1"), ("mc1", "hm7")])
     pairs, triples = registry.build_registry(data, registry.refs_of(data), existing)
     assert pairs == (("mc1", "hm7"), ("mc1", "hm9"), ("mc1", "mc1"))
-    assert triples == (("mc1", "mc1", "hm7"), ("mc1", "mc1", "hm9"))
+    assert triples == (
+        ("mc1", "mc1", "hm7"),
+        ("mc1", "mc1", "hm9"),
+        ("mc1", "mc1", "mc1"),
+    )
 
 
 # ---------------------------------------------------------------- file names

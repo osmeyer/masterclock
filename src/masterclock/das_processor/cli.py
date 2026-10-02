@@ -131,6 +131,10 @@ class CliOptions(BaseModel):
     cd5m5m_path : Path or Unset
         Absolute path to the DAS 5 MHz phase measurement data, or :data:`UNSET` when
         the option was omitted (defer to the config file).
+    steering_path : Path or Unset
+        Absolute path of the directory holding the steering file of each
+        reference clock, or :data:`UNSET` when the option was omitted (defer
+        to the config file).
     processed_path : Path or Unset
         Absolute path under which processed results are written, each kind of file in
         a subdirectory of its own, or :data:`UNSET` when the option was
@@ -144,15 +148,10 @@ class CliOptions(BaseModel):
         read a previous measurement from, or :data:`UNSET` when the option
         was omitted (defer to the config file, and failing that
         :data:`START_FROM_MJD`).
-    clock_config_file : Path, None, or Unset
-        Absolute path to the YAML file saying how each reference-clock pair is carried
-        across a gap and what it is corrected by, ``None`` when nothing is
-        said about any pair, or :data:`UNSET` when the option was omitted
-        (defer to the config file).
-    time_constants_file : Path, None, or Unset
-        Absolute path to the YAML file of per-clock filter time constants, ``None``
-        when nothing is filtered, or :data:`UNSET` when the option was
-        omitted (defer to the config file).
+    clock_config_file : Path or Unset
+        Absolute path to the YAML file giving each clock's estimator
+        parameters and each pair's RMS limit, or :data:`UNSET` when the
+        option was omitted (defer to the config file).
     log_file : Path, None, or Unset
         Absolute path to the log file, ``None`` when file logging is explicitly
         disabled, or :data:`UNSET` when the option was omitted (defer to the
@@ -177,11 +176,11 @@ class CliOptions(BaseModel):
     config_file: AbsolutePath | None = None
     rf: RfChannel | Unset = UNSET
     cd5m5m_path: AbsolutePath | Unset = UNSET
+    steering_path: AbsolutePath | Unset = UNSET
     processed_path: AbsolutePath | Unset = UNSET
     redo_from_mjd: DataMjd | Unset | None = UNSET
     start_from_mjd: DataMjd | Unset = UNSET
-    clock_config_file: AbsolutePath | Unset | None = UNSET
-    time_constants_file: AbsolutePath | Unset | None = UNSET
+    clock_config_file: AbsolutePath | Unset = UNSET
     log_file: AbsolutePath | Unset | None = UNSET
     log_level: LogLevelName | Unset | None = UNSET
     backup_count: PositiveInt | Unset | None = UNSET
@@ -239,6 +238,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--steering-path",
+        type=absolute_path,
+        default=UNSET,
+        metavar="PATH",
+        help=(
+            "path to the directory of steering files, one per reference clock, "
+            "overriding the config file's [DAS] steering_path (default: use "
+            "the config file)"
+        ),
+    )
+    parser.add_argument(
         "--processed-path",
         type=absolute_path,
         default=UNSET,
@@ -274,27 +284,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--clock-config-file",
-        type=optional_path,
+        type=absolute_path,
         default=UNSET,
         metavar="PATH",
         help=(
-            "path to the YAML file saying how each reference-clock pair is "
-            "carried across a gap and what it is corrected by, overriding the "
-            f"config file's [PROCESSED] clock_config_file; pass {NONE_LITERAL} "
-            "to say nothing about any pair, leaving every rule off (default: "
-            "use the config file, else say nothing)"
-        ),
-    )
-    parser.add_argument(
-        "--time-constants-file",
-        type=optional_path,
-        default=UNSET,
-        metavar="PATH",
-        help=(
-            "path to the YAML file of per-clock filter time constants, "
-            "overriding the config file's [PROCESSED] time_constants_file; "
-            f"pass {NONE_LITERAL} to filter nothing (default: use the config "
-            "file, else filter nothing)"
+            "path to the YAML file giving each clock's estimator parameters "
+            "and each pair's RMS limit, overriding the config file's "
+            "[PROCESSED] clock_config_file (default: use the config file)"
         ),
     )
     parser.add_argument(
@@ -408,11 +404,11 @@ def parse_args(argv: Sequence[str] | None = None) -> CliOptions:
         config_file=namespace.config_file,
         rf=namespace.rf,
         cd5m5m_path=namespace.cd5m5m_path,
+        steering_path=namespace.steering_path,
         processed_path=namespace.processed_path,
         redo_from_mjd=namespace.redo_from_mjd,
         start_from_mjd=namespace.start_from_mjd,
         clock_config_file=namespace.clock_config_file,
-        time_constants_file=namespace.time_constants_file,
         log_file=namespace.log_file,
         log_level=None if namespace.log_level == NONE_LITERAL else namespace.log_level,
         backup_count=namespace.backup_count,

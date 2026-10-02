@@ -60,11 +60,29 @@ SETTINGS: Final[tuple[Setting, ...]] = (
         required=True,
     ),
     Setting(
+        "steering_path",
+        "das",
+        "DAS",
+        "steering_path",
+        "--steering-path",
+        allow_none=False,
+        required=True,
+    ),
+    Setting(
         "processed_path",
         "processed",
         "PROCESSED",
         "processed_path",
         "--processed-path",
+        allow_none=False,
+        required=True,
+    ),
+    Setting(
+        "clock_config_file",
+        "processed",
+        "PROCESSED",
+        "clock_config_file",
+        "--clock-config-file",
         allow_none=False,
         required=True,
     ),
@@ -103,22 +121,6 @@ SETTINGS: Final[tuple[Setting, ...]] = (
         allow_none=False,
     ),
     Setting(
-        "clock_config_file",
-        "processed",
-        "PROCESSED",
-        "clock_config_file",
-        "--clock-config-file",
-        allow_none=True,
-    ),
-    Setting(
-        "time_constants_file",
-        "processed",
-        "PROCESSED",
-        "time_constants_file",
-        "--time-constants-file",
-        allow_none=True,
-    ),
-    Setting(
         "backup_count",
         "logging",
         "LOGGING",
@@ -143,13 +145,10 @@ KNOWN_ENTRIES: Final[dict[str, frozenset[str]]] = known_entries(SETTINGS)
 """Every INI entry the program reads, by section, from :data:`SETTINGS`."""
 
 MEAS_SUBDIRECTORY: Final[str] = "meas"
-"""The ``processed_path`` subdirectory holding the processed measurement files."""
+"""The ``processed_path`` subdirectory holding the measurement files."""
 
-DD_SUBDIRECTORY: Final[str] = "dd"
+DDIFF_SUBDIRECTORY: Final[str] = "ddiff"
 """The ``processed_path`` subdirectory holding the double-difference files."""
-
-FILT_SUBDIRECTORY: Final[str] = "filt"
-"""The ``processed_path`` subdirectory holding the filtered-state files."""
 
 LOCK_FILE_TEMPLATE: Final[str] = "das_processor_{rf}.lock"
 """Name of the run lock file, directly in ``processed_path``.
@@ -191,12 +190,16 @@ class DasConfig(BaseModel):
         Which RF channel to process.
     cd5m5m_path : Path
         Absolute path of the directory holding the DAS 5 MHz phase data.
+    steering_path : Path
+        Absolute path of the directory holding the steering file of each
+        reference clock.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     rf: RfChannel
     cd5m5m_path: AbsolutePath
+    steering_path: AbsolutePath
 
 
 class ProcessedConfig(BaseModel):
@@ -207,8 +210,7 @@ class ProcessedConfig(BaseModel):
     processed_path : Path
         Absolute path under which processed results are written: each kind
         of file in a subdirectory of its own (:attr:`meas_path`,
-        :attr:`dd_path`, :attr:`filt_path`), with the run lock directly in
-        it beside them.
+        :attr:`ddiff_path`), with the run lock directly in it beside them.
     redo_from_mjd : DataMjd or None
         Reprocess data starting from this MJD; ``None`` means no
         reprocessing.
@@ -216,15 +218,9 @@ class ProcessedConfig(BaseModel):
         MJD to start processing from when there are no processed files to
         read a previous measurement from; once there are, it has no effect.
         ``None`` becomes :data:`~masterclock.das_processor.cli.START_FROM_MJD`.
-    clock_config_file : Path or None
-        Absolute path of the YAML file saying how each reference-clock pair
-        is carried across a gap and what it is corrected by; ``None`` says
-        nothing about any pair, so every rule is off and no pair is
-        corrected.
-    time_constants_file : Path or None
-        Absolute path of the YAML file naming each clock's filter model, gap
-        limit and time constants, and whether its filter runs; ``None``
-        filters nothing.
+    clock_config_file : Path
+        Absolute path of the YAML file giving each clock's estimator
+        parameters and each pair's RMS limit.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -232,23 +228,17 @@ class ProcessedConfig(BaseModel):
     processed_path: AbsolutePath
     redo_from_mjd: DayMjd | None
     start_from_mjd: Annotated[DayMjd, BeforeValidator(_start_when_not_given)]
-    clock_config_file: AbsolutePath | None
-    time_constants_file: AbsolutePath | None
+    clock_config_file: AbsolutePath
 
     @property
     def meas_path(self) -> Path:
-        """Path: The directory holding the processed measurement files."""
+        """Path: The directory holding the measurement files."""
         return self.processed_path / MEAS_SUBDIRECTORY
 
     @property
-    def dd_path(self) -> Path:
+    def ddiff_path(self) -> Path:
         """Path: The directory holding the double-difference files."""
-        return self.processed_path / DD_SUBDIRECTORY
-
-    @property
-    def filt_path(self) -> Path:
-        """Path: The directory holding the filtered-state files."""
-        return self.processed_path / FILT_SUBDIRECTORY
+        return self.processed_path / DDIFF_SUBDIRECTORY
 
 
 class AppConfig(BaseModel):
@@ -271,13 +261,15 @@ class AppConfig(BaseModel):
     logging: LoggingConfig
 
 
-def _check_data_directory(path: Path) -> None:
-    """Refuse a data directory a run could not read.
+def _check_input_directory(path: Path, setting: str) -> None:
+    """Refuse an input directory a run could not read.
 
     Parameters
     ----------
     path : Path
-        The configured ``cd5m5m_path``.
+        The configured directory.
+    setting : str
+        The setting that names it, as ``[SECTION] entry``, for the message.
 
     Raises
     ------
@@ -290,13 +282,41 @@ def _check_data_directory(path: Path) -> None:
     stop the run from listing it, stops it here.
     """
     if not path.is_dir():
-        raise ConfigError(
-            f"[DAS] cd5m5m_path: {path} is not a directory to read DAS data from"
-        )
+        raise ConfigError(f"{setting}: {path} is not a directory to read from")
     try:
         next(path.iterdir(), None)
     except OSError as exc:
-        raise ConfigError(f"[DAS] cd5m5m_path: {path} cannot be listed: {exc}") from exc
+        raise ConfigError(f"{setting}: {path} cannot be listed: {exc}") from exc
+
+
+def _check_input_file(path: Path, setting: str) -> None:
+    """Refuse an input file a run could not read.
+
+    Parameters
+    ----------
+    path : Path
+        The configured file.
+    setting : str
+        The setting that names it, as ``[SECTION] entry``, for the message.
+
+    Raises
+    ------
+    ConfigError
+        If ``path`` is not a regular file, or a link to one, or cannot be
+        opened for reading.
+
+    Notes
+    -----
+    Opened rather than judged by its permission bits, so whatever would
+    stop the run from reading it, stops it here.
+    """
+    if not path.is_file():
+        raise ConfigError(f"{setting}: {path} is not a file to read from")
+    try:
+        with path.open("rb"):
+            pass
+    except OSError as exc:
+        raise ConfigError(f"{setting}: {path} cannot be read: {exc}") from exc
 
 
 def _check_processed_directory(path: Path) -> None:
@@ -343,9 +363,10 @@ def check_paths(config: AppConfig) -> None:
     Raises
     ------
     ConfigError
-        Naming the setting whose path cannot be used: a data directory that
-        is not one or cannot be listed, or a processed directory that is
-        something else or cannot be written into.
+        Naming the setting whose path cannot be used: a data or steering
+        directory that is not one or cannot be listed, a clock configuration
+        file that is not a regular file or cannot be read, or a processed
+        directory that is something else or cannot be written into.
 
     Notes
     -----
@@ -355,7 +376,11 @@ def check_paths(config: AppConfig) -> None:
     run could use, so a run is refused before it starts rather than failing
     part way through.
     """
-    _check_data_directory(config.das.cd5m5m_path)
+    _check_input_directory(config.das.cd5m5m_path, "[DAS] cd5m5m_path")
+    _check_input_directory(config.das.steering_path, "[DAS] steering_path")
+    _check_input_file(
+        config.processed.clock_config_file, "[PROCESSED] clock_config_file"
+    )
     _check_processed_directory(config.processed.processed_path)
 
 

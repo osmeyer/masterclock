@@ -1,7 +1,9 @@
 """Tests for src/masterclock/das_processor/cli.py.
 
 The rules covered: every setting option is read as given, None or left out,
-and validated into CliOptions; paths are absolute and refuse None; an MJD
+and validated into CliOptions; paths are absolute, and refuse None except
+the log file's; the steering directory and the clock configuration file are
+options and take no None; there is no option for a time-constants file; an MJD
 falls on a day a data file can cover; the count of epochs is command line
 only and takes no None; the RF channel is one of the channels; the MJD to
 start from when none is given is 59500 and the help says so; no arguments,
@@ -24,17 +26,17 @@ EVERY_OPTION: list[str] = [
     "--config-file", "/etc/das.ini",
     "--rf", "b",
     "--cd5m5m-path", "/data/cd5m5m",
+    "--steering-path", "/data/steering",
     "--processed-path", "/data/processed",
     "--redo-from-mjd", "60010.5",
     "--start-from-mjd", "59600",
     "--clock-config-file", "/etc/clocks.yaml",
-    "--time-constants-file", "None",
     "--steps", "6",
     "--log-file", "/logs/das.log",
     "--log-level", "DEBUG",
     "--backup-count", "None",
 ]  # fmt: skip
-"""One command line giving every option, two of them the literal None."""
+"""One command line giving every option, one of them the literal None."""
 
 
 @pytest.fixture
@@ -52,11 +54,11 @@ def test_every_option_is_read_as_given() -> None:
         config_file=Path("/etc/das.ini"),
         rf="b",
         cd5m5m_path=Path("/data/cd5m5m"),
+        steering_path=Path("/data/steering"),
         processed_path=Path("/data/processed"),
         redo_from_mjd=60010.5,
         start_from_mjd=59600.0,
         clock_config_file=Path("/etc/clocks.yaml"),
-        time_constants_file=None,
         steps=6,
         log_file=Path("/logs/das.log"),
         log_level="DEBUG",
@@ -71,11 +73,11 @@ def test_an_option_left_out_defers_to_the_config_file() -> None:
         "config_file": None,
         "rf": "a",
         "cd5m5m_path": UNSET,
+        "steering_path": UNSET,
         "processed_path": UNSET,
         "redo_from_mjd": UNSET,
         "start_from_mjd": UNSET,
         "clock_config_file": UNSET,
-        "time_constants_file": UNSET,
         "log_file": UNSET,
         "log_level": UNSET,
         "backup_count": UNSET,
@@ -87,7 +89,6 @@ def test_an_option_left_out_defers_to_the_config_file() -> None:
     ("option", "value", "field"),
     [
         ("--redo-from-mjd", "None", "redo_from_mjd"),
-        ("--clock-config-file", "None", "clock_config_file"),
         ("--log-file", "None", "log_file"),
         ("--log-level", "None", "log_level"),
     ],
@@ -104,6 +105,26 @@ def test_none_sets_no_value_where_accepted(option: str, value: str, field: str) 
         (["--config-file", "das.ini"], "argument --config-file: path must be absolute"),
         (["--cd5m5m-path", ""], "argument --cd5m5m-path: path must be absolute"),
         (["--cd5m5m-path", "None"], "argument --cd5m5m-path: path must be absolute"),
+        (
+            ["--steering-path", "steer"],
+            "argument --steering-path: path must be absolute",
+        ),
+        (
+            ["--steering-path", "None"],
+            "argument --steering-path: path must be absolute",
+        ),
+        (
+            ["--clock-config-file", "clocks.yaml"],
+            "argument --clock-config-file: path must be absolute",
+        ),
+        (
+            ["--clock-config-file", "None"],
+            "argument --clock-config-file: path must be absolute",
+        ),
+        (
+            ["--time-constants-file", "/etc/tc.yaml"],
+            "unrecognized arguments: --time-constants-file /etc/tc.yaml",
+        ),
         (
             ["--processed-path", "out"],
             "argument --processed-path: path must be absolute",
@@ -176,9 +197,9 @@ def test_the_model_also_holds_an_mjd_to_the_days(field: str) -> None:
 PATH_FIELDS: list[str] = [
     "config_file",
     "cd5m5m_path",
+    "steering_path",
     "processed_path",
     "clock_config_file",
-    "time_constants_file",
     "log_file",
 ]
 """Every field of CliOptions that holds a path."""

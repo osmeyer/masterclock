@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 from collections.abc import Callable, Iterable
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO, Final, Literal, NamedTuple, NoReturn, Self
@@ -211,6 +212,11 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 
+_QUIET: Final[ContextVar[bool]] = ContextVar("_QUIET", default=False)
+"""Whether a refusal goes unlogged: while the file check reads a line, so the
+check gives one explanation for a damaged file, not one per rule broken."""
+
+
 def _fail(message: str, cause: Exception | None = None) -> NoReturn:
     """Log and raise a data file error.
 
@@ -226,7 +232,8 @@ def _fail(message: str, cause: Exception | None = None) -> NoReturn:
     DataFileError
         Always.
     """
-    _log.error(message)
+    if not _QUIET.get():
+        _log.error(message)
     raise DataFileError(message) from cause
 
 
@@ -881,9 +888,10 @@ def _attempt[RecordT: (MeasRecord, DdiffRecord)](
     -------
     tuple of (record or None, str, Exception or None)
         The record, or ``None`` with what is wrong with the line and the
-        error that showed it. Nothing is logged here; a record's own
-        check logs the rule a line breaks.
+        error that showed it. Nothing is logged, a record's own check
+        included: the caller says what is wrong.
     """
+    token = _QUIET.set(True)
     try:
         record = build()
     except (
@@ -893,6 +901,8 @@ def _attempt[RecordT: (MeasRecord, DdiffRecord)](
         DataFileError,
     ) as exc:
         return None, f"row {line[:25]!r} does not parse: {describe_error(exc)}", exc
+    finally:
+        _QUIET.reset(token)
     if again(record) != line:
         return (
             None,
@@ -1073,23 +1083,44 @@ def row_epoch(line: bytes, kind: FileKind) -> datetime | None:
     datetime or None
         The row's epoch when the slot is a whole line, ending in its
         newline, that is ASCII and parses as a row of the file; otherwise
-        ``None``. A header line never parses as a row. A damaged line is
-        reported by the roll-back that removes it; only a line that parses
-        but breaks a record's rules, such as a measurement on a P row, is
-        also logged, by the record's check.
+        ``None``. A header line never parses as a row. Nothing is logged.
+    """
+    epoch, _ = _examined(line, kind)
+    return epoch
+
+
+def _examined(line: bytes, kind: FileKind) -> tuple[datetime | None, str]:
+    """Give a line slot's epoch, or what is wrong with it.
+
+    Parameters
+    ----------
+    line : bytes
+        One line slot of a file.
+    kind : {'meas', 'ddiff'}
+        The kind of file.
+
+    Returns
+    -------
+    tuple of (datetime or None, str)
+        The row's epoch and ``""`` for a good row; otherwise ``None`` and
+        the reason, in words. Nothing is logged.
     """
     if not line.endswith(b"\n"):
-        return None
+        return None, "the line is cut short, with no newline"
     try:
         text = line[:-1].decode("ascii")
     except UnicodeDecodeError:
-        return None
+        return None, "the line is not ASCII text"
     record: MeasRecord | DdiffRecord | None
     if kind == "meas":
-        record = _attempt(text, lambda: _meas_record(text), format_meas_row)[0]
+        record, problem, _ = _attempt(text, lambda: _meas_record(text), format_meas_row)
     else:
-        record = _attempt(text, lambda: _ddiff_record(text), format_ddiff_row)[0]
-    return None if record is None else record.row.interpolated_datetime
+        record, problem, _ = _attempt(
+            text, lambda: _ddiff_record(text), format_ddiff_row
+        )
+    if record is None:
+        return None, problem
+    return record.row.interpolated_datetime, ""
 
 
 def _slot(file: BinaryIO, index: int, size: int) -> bytes:
@@ -1113,10 +1144,51 @@ def _slot(file: BinaryIO, index: int, size: int) -> bytes:
     return file.read(size)
 
 
+class FileCheck(NamedTuple):
+    """What the file check found in one file.
+
+    Parameters
+    ----------
+    through : datetime or None
+        The epoch of its last good row; ``None`` when it holds none.
+    damaged : bool
+        Whether it holds anything but its header and good whole rows.
+    """
+
+    through: datetime | None
+    damaged: bool
+
+
 def good_through(
     path: Path, kind: FileKind, *, stopped_write: bool = False
 ) -> datetime | None:
     """Give the epoch of a file's last good row (design 5.2, 5.7).
+
+    Parameters
+    ----------
+    path : Path
+        The file.
+    kind : {'meas', 'ddiff'}
+        The kind of file.
+    stopped_write : bool, optional
+        Whether a write stopped part way, as its journal shows (see
+        :func:`check_file`).
+
+    Returns
+    -------
+    datetime or None
+        As :func:`check_file` gives it.
+
+    Raises
+    ------
+    DataFileError
+        As :func:`check_file` raises it.
+    """
+    return check_file(path, kind, stopped_write=stopped_write).through
+
+
+def check_file(path: Path, kind: FileKind, *, stopped_write: bool = False) -> FileCheck:
+    """Check a file, and say how far it is good (design 5.2, 5.7).
 
     Parameters
     ----------
@@ -1130,12 +1202,13 @@ def good_through(
 
     Returns
     -------
-    datetime or None
+    FileCheck
         For a sound file, its length its header plus whole rows and its
         last row good, that row's epoch, from one short read. Otherwise the
-        epoch of the row before its first line that is not a good row.
-        ``None`` when it holds no whole row, or, after a stopped write,
-        when its first row is not good.
+        epoch of the row before its first line that is not a good row, or
+        ``None`` when it holds no whole row or, after a stopped write, when
+        its first row is not good; a damaged file is logged once at ERROR,
+        naming where it is damaged and why.
 
     Raises
     ------
@@ -1149,22 +1222,57 @@ def good_through(
             length = file.seek(0, os.SEEK_END)
             rows = length // size - header_lines
             if rows < 1:
-                return None
-            if length % size == 0:
-                last = row_epoch(_slot(file, header_lines + rows - 1, size), kind)
-                if last is not None:
-                    return last
-            good = None
-            for index in range(rows):
-                epoch = row_epoch(_slot(file, header_lines + index, size), kind)
-                if epoch is None:
-                    break
-                good = epoch
+                good, problem = None, "it holds no whole row"
+            elif length % size == 0 and (
+                last := row_epoch(_slot(file, header_lines + rows - 1, size), kind)
+            ):
+                return FileCheck(through=last, damaged=False)
+            else:
+                good, problem = _first_damage(file, rows, header_lines, size, kind)
     except OSError as exc:
         _fail(f"cannot read data file {path}: {exc}", exc)
-    if good is None and not stopped_write:
-        _fail(f"{path} has a damaged first row, so its rows cannot be placed in time")
-    return good
+    if good is None and rows >= 1 and not stopped_write:
+        _fail(
+            f"{path} has a damaged first row, so its rows cannot be placed in"
+            f" time: {problem}"
+        )
+    where = "from its first row" if good is None else f"after its row of {good}"
+    _log.error("data file %s is damaged %s: %s", path, where, problem)
+    return FileCheck(through=good, damaged=True)
+
+
+def _first_damage(
+    file: BinaryIO, rows: int, header_lines: int, size: int, kind: FileKind
+) -> tuple[datetime | None, str]:
+    """Find a damaged file's first line that is not a good row.
+
+    Parameters
+    ----------
+    file : BinaryIO
+        The file, open.
+    rows : int
+        Its whole line slots after the header.
+    header_lines : int
+        Its header's lines.
+    size : int
+        Its line width, newline included.
+    kind : {'meas', 'ddiff'}
+        Its kind.
+
+    Returns
+    -------
+    tuple of (datetime or None, str)
+        The epoch of the last good row before it, ``None`` when there is
+        none, and what is wrong: with every whole row good, the last line,
+        cut short.
+    """
+    good = None
+    for index in range(rows):
+        epoch, problem = _examined(_slot(file, header_lines + index, size), kind)
+        if epoch is None:
+            return good, problem
+        good = epoch
+    return good, "its last line is cut short"
 
 
 def read_last_row(path: Path, kind: FileKind) -> Row:
@@ -1575,11 +1683,11 @@ def _sync_directory(directory: Path) -> None:
 _EPOCH: Final[timedelta] = timedelta(seconds=EPOCH_SECONDS)
 """One epoch, T."""
 
-type _Cut = Literal["kept", "cut", "deleted"]
+type Cut = Literal["kept", "cut", "deleted"]
 """What keeping a file's rows through an epoch did to it."""
 
 
-def _keep_through(path: Path, kind: FileKind, through: datetime | None) -> _Cut:
+def _keep_through(path: Path, kind: FileKind, through: datetime | None) -> Cut:
     """Keep a file's rows up to and including an epoch, and remove the rest.
 
     Parameters
@@ -1679,7 +1787,7 @@ def _truncate(path: Path, end: int) -> None:
         _fail(f"cannot cut data file {path}: {exc}", exc)
 
 
-def roll_back(path: Path, kind: FileKind, common: datetime | None) -> None:
+def roll_back(path: Path, kind: FileKind, common: datetime | None) -> Cut:
     """Roll a file back to the epoch every file holds (design 6.7).
 
     Parameters
@@ -1692,6 +1800,12 @@ def roll_back(path: Path, kind: FileKind, common: datetime | None) -> None:
         L, the oldest epoch any file of the channel is good through;
         ``None`` when no file holds a whole row.
 
+    Returns
+    -------
+    {'kept', 'cut', 'deleted'}
+        What was done to the file; nothing is logged here, since the run
+        logs the whole roll-back once.
+
     Raises
     ------
     DataFileError
@@ -1703,17 +1817,14 @@ def roll_back(path: Path, kind: FileKind, common: datetime | None) -> None:
     The file is truncated just after its row for ``common``, which also
     removes any damaged or torn line after it, or deleted when it has no
     row at or before ``common``. A file that already ends there is left as
-    it is. Each file changed is logged at WARNING with its path and the
-    epoch.
+    it is.
     """
-    done = _keep_through(path, kind, common)
-    if done == "cut":
-        _log.warning("data file %s rolled back to %s", path, common)
-    elif done == "deleted":
-        _log.warning("data file %s deleted: no row at or before %s", path, common)
+    return _keep_through(path, kind, common)
 
 
-def redo_from(series: Iterable[tuple[Path, FileKind]], mark: datetime) -> None:
+def redo_from(
+    series: Iterable[tuple[Path, FileKind]], mark: datetime, channel: RfChannel
+) -> None:
     """Delete every row at or after an epoch from every file (design 6.5).
 
     Parameters
@@ -1723,6 +1834,8 @@ def redo_from(series: Iterable[tuple[Path, FileKind]], mark: datetime) -> None:
         its kind.
     mark : datetime
         The epoch to reprocess from.
+    channel : {'a', 'b'}
+        The RF channel, for the log.
 
     Raises
     ------
@@ -1737,14 +1850,23 @@ def redo_from(series: Iterable[tuple[Path, FileKind]], mark: datetime) -> None:
     last good row, so a damaged one is cut there instead, and the roll-back
     that follows (see :func:`roll_back`) brings every file to one epoch.
     Running it again after an interruption finishes the deletion: a file
-    already cut is left as it is.
+    already cut is left as it is. The redo is logged once at INFO, with how
+    many files it cut, deleted and left.
     """
+    done: list[Cut] = []
     for path, kind in series:
         good = good_through(path, kind)
         through = mark - _EPOCH if good is None else min(mark - _EPOCH, good)
-        done = _keep_through(path, kind, None if good is None else through)
-        if done != "kept":
-            _log.info("data file %s %s for a redo from %s", path, done, mark)
+        done.append(_keep_through(path, kind, None if good is None else through))
+    _log.info(
+        "redo of channel %s from %s: %d files cut, %d deleted,"
+        " %d with no row at or after it",
+        channel,
+        mark,
+        done.count("cut"),
+        done.count("deleted"),
+        done.count("kept"),
+    )
 
 
 def ensure_archives(processed_path: Path) -> None:

@@ -134,6 +134,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 redo_from(
                     [(path, kind) for path, kind, _ in data_series(config)],
                     floor_to_ten_minutes(mjd_to_datetime(redo_mjd)),
+                    config.das.rf,
                 )
             run_channel(config, clock_config, options.steps, shutdown)
     except MasterClockError:

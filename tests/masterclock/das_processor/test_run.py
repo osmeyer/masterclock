@@ -25,7 +25,9 @@ The next epoch is one after the oldest epoch every file is good through,
 every file rolled back to it, or one before the epoch a write journal
 names, the journal then deleted, and a file whose first row is damaged,
 refused without a journal, deleted with one, to be made again; with no
-file, the epoch containing start_from_mjd.
+file, the epoch containing start_from_mjd. A roll-back is logged once at
+WARNING, with the epoch, its reason and what it did, and nothing is logged
+when nothing was rolled back.
 
 Each series takes the settings in force at its epoch; a link not accepted
 does not make its triple cold; the TRACE lines and steps with a settings
@@ -827,7 +829,15 @@ def test_a_damaged_line_found_at_the_start_redoes_every_file_from_its_epoch(
     data[(files.MEAS_HEADER_LINES + 2) * size + 3] = ord("x")
     path.write_bytes(bytes(data[: -size // 2]))
     assert run.next_epoch(damaged) == LATE + 2 * T
-    assert {r.levelname for r in caplog.records} == {"WARNING"}
+    logged_here = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert [level for level, _ in logged_here] == ["ERROR", "WARNING"]
+    assert logged_here[0][1].startswith(
+        f"data file {path} is damaged after its row of {LATE + T}: "
+    )
+    assert logged_here[1][1] == (
+        f"rolled back every file of channel a to {LATE + T}, after damaged files,"
+        f" each logged at ERROR: {len(SERIES)} files cut, 0 deleted, 0 already there"
+    )
     run.run(damaged, clocks, None, ShutdownHandler())
     for key in SERIES:
         one = registry.series_file(clean.processed.processed_path, "a", key)
@@ -836,7 +846,7 @@ def test_a_damaged_line_found_at_the_start_redoes_every_file_from_its_epoch(
 
 
 def test_a_journal_found_at_the_start_rolls_every_file_back_before_its_epoch(
-    tmp_path: Path,
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Roll every file back to before a stopped write's first epoch, then redo (6.7)."""
     clean, clocks = loop_deployment(tmp_path / "clean")
@@ -847,7 +857,15 @@ def test_a_journal_found_at_the_start_rolls_every_file_back_before_its_epoch(
     run.run(stopped, clocks, None, ShutdownHandler())
     journal = stopped.processed.processed_path / JOURNAL_FILE_TEMPLATE.format(rf="a")
     journal.write_text(f"{(LATE + 3 * T).isoformat()}\n", encoding="ascii")
+    caplog.clear()
     assert run.next_epoch(stopped) == LATE + 3 * T
+    assert [r.getMessage() for r in caplog.records] == [
+        f"rolled back every file of channel a to {LATE + 2 * T}, after a write that"
+        f" stopped part way: {len(SERIES)} files cut, 0 deleted, 0 already there"
+    ]
+    caplog.clear()
+    assert run.next_epoch(stopped) == LATE + 3 * T
+    assert not caplog.records
     assert not journal.exists()
     series = run.data_series(stopped)
     assert len(series) == len(SERIES)
@@ -1486,3 +1504,24 @@ def test_a_new_file_left_without_its_rows_by_a_stopped_write_is_made_again(
         one = registry.series_file(clean.processed.processed_path, "a", key)
         other = registry.series_file(processed, "a", key)
         assert one.read_bytes() == other.read_bytes(), key
+
+
+def test_files_ending_apart_are_rolled_back_with_that_reason(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log the roll-back once, naming files that ended at different epochs."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE + i * T for i in range(3)])
+    run.run(config, clocks, None, ShutdownHandler())
+    path = registry.series_file(config.processed.processed_path, "a", ("mc1", "ox23"))
+    path.write_bytes(path.read_bytes()[: -(files.MEAS_WIDTH + 1)])
+    caplog.clear()
+    assert run.next_epoch(config) == LATE + 2 * T
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+        (
+            "WARNING",
+            f"rolled back every file of channel a to {LATE + T}, after files that"
+            f" ended at different epochs: {len(SERIES) - 1} files cut, 0 deleted,"
+            " 1 already there",
+        )
+    ]

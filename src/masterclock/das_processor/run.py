@@ -23,13 +23,15 @@ from masterclock.das_processor.clock_config import ClockConfig
 from masterclock.das_processor.config import JOURNAL_FILE_TEMPLATE, AppConfig
 from masterclock.das_processor.epochs import floor_to_ten_minutes
 from masterclock.das_processor.files import (
+    Cut,
     DayBuffer,
     DdiffRecord,
+    FileCheck,
     FileKind,
     MeasRecord,
+    check_file,
     clear_journal,
     ensure_archives,
-    good_through,
     read_journal,
     read_last_row,
     roll_back,
@@ -556,24 +558,106 @@ def next_epoch(config: AppConfig) -> datetime:
     The journal is read before any file is checked. When it is there, a
     file whose first row is damaged is one the stopped write was creating,
     its length on the device but not its rows, and the roll-back deletes
-    it, to be made again.
+    it, to be made again. Each damaged file is logged once at ERROR by the
+    file check, and a roll-back that changed anything, or followed a
+    stopped write, is logged once at WARNING, with the epoch, why, and how
+    many files it cut, deleted and left.
     """
     journal = config.processed.processed_path / JOURNAL_FILE_TEMPLATE.format(
         rf=config.das.rf
     )
-    series = data_series(config)
-    begun = read_journal(journal)
-    stopped = begun is not None
-    good = [good_through(path, kind, stopped_write=stopped) for path, kind, _ in series]
-    if begun is not None:
-        good.append(begun - _EPOCH)
-    common = min((mark for mark in good if mark is not None), default=None)
-    for path, kind, _ in series:
-        roll_back(path, kind, common)
+    common = _roll_back_all(config, read_journal(journal))
     clear_journal(journal)
     if common is None:
         return floor_to_ten_minutes(mjd_to_datetime(config.processed.start_from_mjd))
     return common + _EPOCH
+
+
+def _roll_back_all(config: AppConfig, begun: datetime | None) -> datetime | None:
+    """Check every file, roll them all back to one epoch, and log it once.
+
+    Parameters
+    ----------
+    config : AppConfig
+        The run's settings.
+    begun : datetime or None
+        The first epoch of a write that stopped part way, from its journal;
+        ``None`` when there was none.
+
+    Returns
+    -------
+    datetime or None
+        L, the epoch every file now ends at; ``None`` when none holds a
+        whole row.
+
+    Raises
+    ------
+    DataFileError
+        If a file cannot be read, changed or deleted, or, with no stopped
+        write, its first row is damaged.
+    """
+    series = data_series(config)
+    stopped = begun is not None
+    checks = [check_file(path, kind, stopped_write=stopped) for path, kind, _ in series]
+    good = [check.through for check in checks]
+    if begun is not None:
+        good.append(begun - _EPOCH)
+    common = min((mark for mark in good if mark is not None), default=None)
+    done = [roll_back(path, kind, common) for path, kind, _ in series]
+    if stopped or any(cut != "kept" for cut in done):
+        _log_roll_back(config.das.rf, common, _roll_back_reason(checks, stopped), done)
+    return common
+
+
+def _roll_back_reason(checks: list[FileCheck], stopped: bool) -> str:
+    """Say why a roll-back happened, for its log entry.
+
+    Parameters
+    ----------
+    checks : list of FileCheck
+        What the file check found in each file.
+    stopped : bool
+        Whether the write journal was there.
+
+    Returns
+    -------
+    str
+        A write that stopped part way, damaged files, or files that ended
+        at different epochs, in that order of precedence.
+    """
+    if stopped:
+        return "a write that stopped part way"
+    if any(check.damaged for check in checks):
+        return "damaged files, each logged at ERROR"
+    return "files that ended at different epochs"
+
+
+def _log_roll_back(
+    channel: RfChannel, common: datetime | None, reason: str, done: list[Cut]
+) -> None:
+    """Log a roll-back once, at WARNING (design 6.7, 16.2).
+
+    Parameters
+    ----------
+    channel : {'a', 'b'}
+        The RF channel.
+    common : datetime or None
+        The epoch every file was rolled back to; ``None`` for no row.
+    reason : str
+        Why, in words.
+    done : list of {'kept', 'cut', 'deleted'}
+        What the roll-back did to each file.
+    """
+    _log.warning(
+        "rolled back every file of channel %s to %s, after %s:"
+        " %d files cut, %d deleted, %d already there",
+        channel,
+        "no row" if common is None else common,
+        reason,
+        done.count("cut"),
+        done.count("deleted"),
+        done.count("kept"),
+    )
 
 
 def read_last_state(config: AppConfig) -> dict[SeriesKey, Row]:

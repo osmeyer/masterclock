@@ -1,7 +1,8 @@
 """Tests for src/masterclock/das_processor/read_cd5m5m.py.
 
 The rules covered: a line is five columns, its numbers written in their
-plain form and each column valid, or it is refused as malformed; a record
+plain form, the MJD as five digits, a point and six decimals, and each
+column valid, or it is refused as malformed; a record
 works out its reference, instants and epoch from its columns, and none of
 them may be passed in; a file's lines that are malformed, on another day,
 late in their epoch, backwards in time or a repeated pair are logged under
@@ -128,6 +129,10 @@ def test_a_line_without_five_columns_is_malformed(text: str, count: int) -> None
         (0, "inf"),
         (0, "nan"),
         (0, ".5"),
+        (0, "60010.00069"),
+        (0, "60010.0006940"),
+        (0, "060010.000694"),
+        (0, "6001.000694"),
         (1, "+5"),
         (1, "-5"),
         (1, "1_000"),
@@ -141,7 +146,7 @@ def test_a_line_without_five_columns_is_malformed(text: str, count: int) -> None
     ],
 )
 def test_a_number_not_in_its_plain_form_is_malformed(column: int, text: str) -> None:
-    """Refuse a sign, exponent, underscore, point or non-ASCII digit."""
+    """Refuse a sign, exponent, underscore, point, non-ASCII digit or other MJD form."""
     fields = ["60010.000694", "1000", "20", "1A01", "clka"]
     fields[column] = text
     with pytest.raises(MalformedLineError, match="is not a plain number"):

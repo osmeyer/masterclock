@@ -31,14 +31,9 @@ from masterclock.das_processor.files import (
     ensure_archives,
     good_through,
     read_journal,
-    read_last_record,
+    read_last_row,
     roll_back,
     write_buffer,
-)
-from masterclock.das_processor.measurements import (
-    PairMeasurement,
-    TripleMeasurement,
-    measure_pair,
 )
 from masterclock.das_processor.read_cd5m5m import DASData, read_all_blocks
 from masterclock.das_processor.read_steering import read_steering
@@ -51,6 +46,11 @@ from masterclock.das_processor.registry import (
 )
 from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.filter import StepResult, anchor_of, filter_step, predict
+from masterclock.domain.measurements import (
+    PairMeasurement,
+    TripleMeasurement,
+    measure_pair,
+)
 from masterclock.domain.phase import EPOCH_SECONDS, FS_PER_PS
 from masterclock.domain.screening import Screening, screen_references
 from masterclock.domain.series import (
@@ -259,7 +259,14 @@ def _measured_pairs(
         pair = (raw.reference, raw.clock)
         w = steer_w(pair, mark, epoch.steering, raw.measurement_datetime)
         anchor = anchor_of(last.get(pair))
-        measurements[pair] = measure_pair(raw, predictions[pair], w, anchor)
+        measurements[pair] = measure_pair(
+            measurement_mjd=raw.measurement_mjd,
+            measured_phase=raw.measured_phase,
+            rms=raw.rms,
+            prediction=predictions[pair],
+            w=w,
+            anchor=anchor,
+        )
     return measurements
 
 
@@ -403,7 +410,7 @@ def _component(pairs: PairStep, pair: PairKey) -> Component:
     return Component(
         accepted=True,
         z=measurement.z,
-        rms=measurement.measurement.rms,
+        rms=measurement.rms,
         predicted=predicted,
         cold=result.cold,
     )
@@ -547,23 +554,21 @@ def next_epoch(config: AppConfig) -> datetime:
         rf=config.das.rf
     )
     series = data_series(config)
-    good = [good_through(path, kind, key) for path, kind, key in series]
+    good = [good_through(path, kind) for path, kind, _ in series]
     begun = read_journal(journal)
     if begun is not None:
         good.append(begun - _EPOCH)
     common = min((mark for mark in good if mark is not None), default=None)
-    for path, kind, key in series:
-        roll_back(path, kind, key, common)
+    for path, kind, _ in series:
+        roll_back(path, kind, common)
     clear_journal(journal)
     if common is None:
         return floor_to_ten_minutes(mjd_to_datetime(config.processed.start_from_mjd))
     return common + _EPOCH
 
 
-def read_last_state(
-    config: AppConfig,
-) -> tuple[dict[SeriesKey, Row], dict[PairKey, str]]:
-    """Read every series' last row from its file, and each pair's switch (I4).
+def read_last_state(config: AppConfig) -> dict[SeriesKey, Row]:
+    """Read every series' last row from its file (I4).
 
     Parameters
     ----------
@@ -572,23 +577,15 @@ def read_last_state(
 
     Returns
     -------
-    tuple of (dict, dict)
-        Each series' last row, and the switch of each pair whose last row
-        holds a measurement.
+    dict of series key to Row
+        Each series' last row.
 
     Raises
     ------
     DataFileError
         If a file cannot be read or is not sound.
     """
-    rows: dict[SeriesKey, Row] = {}
-    switches: dict[PairKey, str] = {}
-    for path, kind, key in data_series(config):
-        record = read_last_record(path, kind, key)
-        rows[key] = record.row
-        if isinstance(record, MeasRecord) and record.measurement is not None:
-            switches[(key[0], key[1])] = record.measurement.measurement.switch
-    return rows, switches
+    return {key: read_last_row(path, kind) for path, kind, key in data_series(config)}
 
 
 def process_epoch(
@@ -625,10 +622,7 @@ def process_epoch(
         If anything about the epoch cannot be read, worked out or
         formatted; the buffer then holds none of the epoch's rows.
     """
-    if buffer.last:
-        last, switches = dict(buffer.last), dict(buffer.switches)
-    else:
-        last, switches = read_last_state(config)
+    last = dict(buffer.last) if buffer.last else read_last_state(config)
     existing = Existing(
         pairs=frozenset((key[0], key[1]) for key in last if len(key) == _PAIR),
         triples=frozenset(
@@ -663,7 +657,7 @@ def process_epoch(
         staged.add(series_file(processed, config.das.rf, key), key, record)
     buffer.take(staged)
     done = EpochDone(epoch=epoch, pairs=pairs, triples=triples)
-    log_epoch(done, last, switches, config.das.rf)
+    log_epoch(done, last, config.das.rf)
     return done
 
 
@@ -922,7 +916,6 @@ def _log_trace(name: str, row: Row, prediction: State | None) -> None:
 def log_epoch(
     done: EpochDone,
     last: Mapping[SeriesKey, Row],
-    switches: Mapping[PairKey, str],
     channel: RfChannel,
 ) -> None:
     """Log everything an epoch did, at the design's levels (design 16.2).
@@ -933,14 +926,12 @@ def log_epoch(
         The epoch and what its pairs and triples gave.
     last : Mapping of series key to Row
         Each series' last row.
-    switches : Mapping of (str, str) to str
-        Each pair's switch at its last measurement, where known.
     channel : {'a', 'b'}
         The RF channel.
 
     Notes
     -----
-    Screening, slip, reject and switch-change events go at WARNING except
+    Screening, slip and reject events go at WARNING except
     corrected slips; steps, cold starts, dormancy, configuration changes
     and the epoch's counts at INFO; each series' outcome at DEBUG and its
     prediction and update at TRACE. Series are logged in key order, pairs
@@ -948,16 +939,6 @@ def log_epoch(
     """
     pairs, triples = done.pairs, done.triples
     _log_screening(pairs, channel)
-    for pair, measurement in sorted(pairs.measurements.items()):
-        before = switches.get(pair)
-        now = measurement.measurement.switch
-        if before is not None and before != now:
-            _log.warning(
-                "%s switch changed from %s to %s",
-                series_name(channel, pair),
-                before,
-                now,
-            )
     results: list[tuple[SeriesKey, StepResult, State | None]] = [
         (pair, result, pairs.predictions[pair])
         for pair, result in pairs.results.items()

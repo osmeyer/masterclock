@@ -131,7 +131,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             redo_mjd = config.processed.redo_from_mjd
             if redo_mjd is not None:
                 redo_from(
-                    data_series(config), floor_to_ten_minutes(mjd_to_datetime(redo_mjd))
+                    [(path, kind) for path, kind, _ in data_series(config)],
+                    floor_to_ten_minutes(mjd_to_datetime(redo_mjd)),
                 )
             run_channel(config, clock_config, steps, shutdown)
     except MasterClockError:

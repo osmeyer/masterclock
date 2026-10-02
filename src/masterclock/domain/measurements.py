@@ -1,41 +1,62 @@
 """What each series measured at an epoch, as the two output files record it.
 
-A pair measurement is one DAS measurement decycled and referred to its epoch
+A pair measurement is one DAS reading decycled and referred to its epoch
 start (:func:`measure_pair`): the whole periods put back and the motion and
-steering since the epoch start taken off. A triple measurement is a double
-difference built from its pairs' accepted measurements.
+steering since the epoch start taken off. It holds the plain values it was
+made from, the measurement's MJD, its phase and its rms, not the DAS's line;
+its measurement time and epoch start are worked out from the MJD. A triple
+measurement is a double difference built from its pairs' accepted
+measurements.
 
 Both give the filter step their plain values (:meth:`PairMeasurement.measured`,
-:meth:`TripleMeasurement.measured`), since the domain takes no program types.
+:meth:`TripleMeasurement.measured`).
 """
 
+from datetime import datetime, timedelta
 from fractions import Fraction
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from masterclock.das_processor.read_cd5m5m import DASMeasurement
+from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.domain.double_difference import TripleValue
 from masterclock.domain.filter import Measured
-from masterclock.domain.phase import PHASE_PERIOD, decycle, seconds
+from masterclock.domain.phase import (
+    EPOCH_SECONDS,
+    PHASE_MAX,
+    PHASE_PERIOD,
+    decycle,
+    seconds,
+)
 from masterclock.domain.series import State
 
+_EPOCH: Final[timedelta] = timedelta(seconds=EPOCH_SECONDS)
+"""One epoch."""
 
-def _offset(measurement: DASMeasurement) -> Fraction:
-    """Give a measurement's time after its epoch start, exactly.
+
+def epoch_start(moment: datetime) -> datetime:
+    """Give the start of the epoch an instant falls in.
 
     Parameters
     ----------
-    measurement : DASMeasurement
-        The raw measurement.
+    moment : datetime
+        The instant, with its timezone.
 
     Returns
     -------
-    Fraction
-        delta, s, from the datetimes as a whole number of microseconds; the
-        float MJDs would not give it exactly.
+    datetime
+        The latest epoch start at or before ``moment``: epochs start at
+        midnight and every :data:`~masterclock.domain.phase.EPOCH_SECONDS`
+        after.
+
+    Examples
+    --------
+    >>> from datetime import UTC
+    >>> epoch_start(datetime(2025, 9, 23, 6, 2, 17, 203200, tzinfo=UTC))
+    datetime.datetime(2025, 9, 23, 6, 0, tzinfo=datetime.timezone.utc)
     """
-    return seconds(measurement.measurement_datetime, measurement.interpolated_datetime)
+    midnight = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight + (moment - midnight) // _EPOCH * _EPOCH
 
 
 class PairMeasurement(BaseModel):
@@ -43,8 +64,13 @@ class PairMeasurement(BaseModel):
 
     Parameters
     ----------
-    measurement : DASMeasurement
-        The raw measurement.
+    measurement_mjd : float
+        The measurement time as the DAS gave it, MJD.
+    measured_phase : int
+        The DAS reading, ps, from 0 to
+        :data:`~masterclock.domain.phase.PHASE_MAX`.
+    rms : int
+        Its rms, ps, at least 0.
     cycle_count : int
         The whole periods added to the reading.
     z : int
@@ -55,27 +81,43 @@ class PairMeasurement(BaseModel):
 
     Attributes
     ----------
+    measurement_datetime : datetime
+        The measurement time, from the MJD.
+    interpolated_datetime : datetime
+        The start of the epoch the measurement falls in.
     delta : Fraction
-        The measurement time after the epoch start, s, exactly: worked out
-        from the measurement's datetimes, never passed in.
+        The measurement time after the epoch start, s, exactly.
 
     Raises
     ------
     pydantic.ValidationError
-        If a field is of the wrong kind or unknown.
+        If a value is out of range, or a field is of the wrong kind or
+        unknown.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    measurement: DASMeasurement
+    measurement_mjd: Annotated[float, Field(allow_inf_nan=False)]
+    measured_phase: Annotated[int, Field(ge=0, le=PHASE_MAX)]
+    rms: Annotated[int, Field(ge=0)]
     cycle_count: int
     z: int
     slip: bool = False
 
     @property
+    def measurement_datetime(self) -> datetime:
+        """The measurement time, from the MJD."""
+        return mjd_to_datetime(self.measurement_mjd)
+
+    @property
+    def interpolated_datetime(self) -> datetime:
+        """The start of the epoch the measurement falls in."""
+        return epoch_start(self.measurement_datetime)
+
+    @property
     def delta(self) -> Fraction:
         """The measurement time after the epoch start, s, exactly."""
-        return _offset(self.measurement)
+        return seconds(self.measurement_datetime, self.interpolated_datetime)
 
     def corrected(self, cycles: int) -> PairMeasurement:
         """Give the measurement with a slip check's correction made (design 11.3).
@@ -91,11 +133,12 @@ class PairMeasurement(BaseModel):
             The cycle count and z moved by ``cycles`` periods, marked as
             slip corrected.
         """
-        return PairMeasurement(
-            measurement=self.measurement,
-            cycle_count=self.cycle_count + cycles,
-            z=self.z + cycles * PHASE_PERIOD,
-            slip=True,
+        return self.model_copy(
+            update={
+                "cycle_count": self.cycle_count + cycles,
+                "z": self.z + cycles * PHASE_PERIOD,
+                "slip": True,
+            }
         )
 
     def measured(self) -> Measured:
@@ -106,7 +149,7 @@ class PairMeasurement(BaseModel):
         Measured
             z, the rms and the slip mark.
         """
-        return Measured(z=self.z, rms=self.measurement.rms, slip=self.slip)
+        return Measured(z=self.z, rms=self.rms, slip=self.slip)
 
 
 class TripleMeasurement(BaseModel):
@@ -170,17 +213,24 @@ class TripleMeasurement(BaseModel):
 
 
 def measure_pair(
-    measurement: DASMeasurement,
+    *,
+    measurement_mjd: float,
+    measured_phase: int,
+    rms: int,
     prediction: State | None,
     w: Fraction,
     anchor: int | None,
 ) -> PairMeasurement:
-    """Decycle a DAS measurement and refer it to its epoch start (design 7).
+    """Decycle a reading and refer it to its epoch start (design 7).
 
     Parameters
     ----------
-    measurement : DASMeasurement
-        The raw measurement.
+    measurement_mjd : float
+        The measurement time as the DAS gave it, MJD.
+    measured_phase : int
+        The DAS reading, ps.
+    rms : int
+        Its rms, ps.
     prediction : State or None
         The pair's prediction at the epoch start, or ``None`` when it has
         none.
@@ -208,16 +258,20 @@ def measure_pair(
     The worked epoch of the design:
 
     >>> from masterclock.domain.phase import exact
-    >>> raw = DASMeasurement(
-    ...     measurement_mjd=60941.251588, measured_phase=34579, rms=3,
-    ...     switch="2B07", clock="ox23",
-    ... )
     >>> prediction = State(x=1_234_567 + exact(0.0123) * 600, y=0.0123)
-    >>> measure_pair(raw, prediction, Fraction(0), None).z
+    >>> measure_pair(
+    ...     measurement_mjd=60941.251588, measured_phase=34579, rms=3,
+    ...     prediction=prediction, w=Fraction(0), anchor=None,
+    ... ).z
     1234577
     """
-    delta = _offset(measurement)
-    decycled = decycle(measurement.measured_phase, delta, w, prediction, anchor)
+    moment = mjd_to_datetime(measurement_mjd)
+    delta = seconds(moment, epoch_start(moment))
+    decycled = decycle(measured_phase, delta, w, prediction, anchor)
     return PairMeasurement(
-        measurement=measurement, cycle_count=decycled.cycle_count, z=decycled.z
+        measurement_mjd=measurement_mjd,
+        measured_phase=measured_phase,
+        rms=rms,
+        cycle_count=decycled.cycle_count,
+        z=decycled.z,
     )

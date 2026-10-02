@@ -17,8 +17,8 @@ both links, marked cold when a pair cold-started, and filtered.
 
 The run's events are logged at the design's levels: each epoch with its
 counts at INFO; steps, cold starts, dormancy, configuration changes and
-corrected slips at INFO; rejects, screening failures, a missing self pair,
-undecided slips and switch changes at WARNING; each series' outcome at
+corrected slips at INFO; rejects, screening failures, a missing self pair
+and undecided slips at WARNING; each series' outcome at
 DEBUG and its prediction and update at TRACE.
 
 The next epoch is one after the oldest epoch every file is good through,
@@ -27,8 +27,9 @@ names, the journal then deleted; with no file, the epoch containing
 start_from_mjd.
 
 Each series takes the settings in force at its epoch; a link not accepted
-does not make its triple cold; the TRACE lines, steps with a settings
-change, and the switch read from a file are logged as they are; a remote
+does not make its triple cold; the TRACE lines and steps with a settings
+change are logged as they are; each series' last row is read from its
+file; a remote
 triple goes on when its reference is missing; a run with no data and no
 files does nothing; and a gap at the start of a run is predicted.
 """
@@ -59,7 +60,7 @@ from masterclock.das_processor.read_steering import STEERING_FILE_TEMPLATE
 from masterclock.das_processor.registry import Existing
 from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.phase import PHASE_PERIOD
-from masterclock.domain.series import PairKey, Row, SeriesKey, TripleKey
+from masterclock.domain.series import Row, SeriesKey, TripleKey
 
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """An invented epoch start."""
@@ -686,7 +687,7 @@ def rows_of(config: AppConfig, key: SeriesKey) -> list[Row]:
     data = path.read_bytes()[files.HEADER_LINES[kind] * size :]
     lines = [data[i : i + size - 1].decode() for i in range(0, len(data), size)]
     if kind == "meas":
-        return [files.parse_meas_row(line, (key[0], key[1])).row for line in lines]
+        return [files.parse_meas_row(line).row for line in lines]
     return [files.parse_ddiff_row(line).row for line in lines]
 
 
@@ -848,7 +849,7 @@ def test_a_journal_found_at_the_start_rolls_every_file_back_before_its_epoch(
     series = run.data_series(stopped)
     assert len(series) == len(SERIES)
     for path, kind, key in series:
-        assert files.good_through(path, kind, key) == LATE + 2 * T, key
+        assert files.good_through(path, kind) == LATE + 2 * T, key
     run.run(stopped, clocks, None, ShutdownHandler())
     for key in SERIES:
         one = registry.series_file(clean.processed.processed_path, "a", key)
@@ -924,7 +925,6 @@ def logged(
     caplog: pytest.LogCaptureFixture,
     epoch: run.Epoch,
     last: dict[SeriesKey, Row],
-    switches: dict[PairKey, str] | None = None,
 ) -> list[tuple[str, str]]:
     """Process ``epoch`` and give the run's log records as (level, message)."""
     pairs = run.process_pairs(epoch, last)
@@ -932,7 +932,7 @@ def logged(
     done = run.EpochDone(epoch=epoch, pairs=pairs, triples=triples)
     caplog.clear()
     with caplog.at_level(TRACE, logger=RUN_LOGGER):
-        run.log_epoch(done, last, switches or {}, "a")
+        run.log_epoch(done, last, "a")
     return [
         (r.levelname, r.getMessage()) for r in caplog.records if r.name == RUN_LOGGER
     ]
@@ -1182,18 +1182,6 @@ def test_slips_corrected_and_undecided_are_logged(
     )
 
 
-def test_a_switch_change_for_a_pair_is_logged(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Log a pair measured through another switch port than before (5.4)."""
-    last = {**REFERENCE_LAST, ("mc2", "ox23"): WORKED_LAST}
-    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
-    records = logged(
-        caplog, epoch, last, {("mc2", "ox23"): "2B06", ("mc1", "mc1"): "1A01"}
-    )
-    assert at(records, "WARNING") == ["das_a.mc2.ox23 switch changed from 2B06 to 2B07"]
-
-
 def test_a_closure_failure_is_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1384,13 +1372,15 @@ def test_an_epoch_s_log_names_the_series_of_its_channel(
     assert "das_a.mc1.mc1: RD" in debug
 
 
-def test_the_last_switch_of_each_pair_is_read_from_its_file(tmp_path: Path) -> None:
-    """Give each pair's switch at its last measurement, as the file holds it."""
+def test_each_series_last_row_is_read_from_its_file(tmp_path: Path) -> None:
+    """Give each series' last row, as its file holds it, for every series."""
     config, clocks = loop_deployment(tmp_path)
-    das_files(tmp_path, [LATE])
+    das_files(tmp_path, [LATE, LATE + T])
     run.run(config, clocks, None, ShutdownHandler())
-    _, switches = run.read_last_state(config)
-    assert switches == {("mc1", "mc1"): "1A01", ("mc1", "ox23"): "1A02"}
+    last = run.read_last_state(config)
+    assert sorted(last) == sorted(SERIES)
+    for key in SERIES:
+        assert last[key] == rows_of(config, key)[-1], key
 
 
 def das_lines(tmp_path: Path, epochs: list[list[tuple[str, str, int]]]) -> None:

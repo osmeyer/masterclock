@@ -1113,7 +1113,9 @@ def _slot(file: BinaryIO, index: int, size: int) -> bytes:
     return file.read(size)
 
 
-def good_through(path: Path, kind: FileKind) -> datetime | None:
+def good_through(
+    path: Path, kind: FileKind, *, stopped_write: bool = False
+) -> datetime | None:
     """Give the epoch of a file's last good row (design 5.2, 5.7).
 
     Parameters
@@ -1122,6 +1124,9 @@ def good_through(path: Path, kind: FileKind) -> datetime | None:
         The file.
     kind : {'meas', 'ddiff'}
         The kind of file.
+    stopped_write : bool, optional
+        Whether a write stopped part way, as its journal shows; a file it
+        was creating may then hold its length but not its rows.
 
     Returns
     -------
@@ -1129,13 +1134,14 @@ def good_through(path: Path, kind: FileKind) -> datetime | None:
         For a sound file, its length its header plus whole rows and its
         last row good, that row's epoch, from one short read. Otherwise the
         epoch of the row before its first line that is not a good row.
-        ``None`` when it holds no whole row.
+        ``None`` when it holds no whole row, or, after a stopped write,
+        when its first row is not good.
 
     Raises
     ------
     DataFileError
-        If the file cannot be read, or its first row is not good, so its
-        rows cannot be placed in time.
+        If the file cannot be read, or, unless a write stopped part way,
+        its first row is not good, so its rows cannot be placed in time.
     """
     size, header_lines = WIDTHS[kind] + 1, HEADER_LINES[kind]
     try:
@@ -1156,7 +1162,7 @@ def good_through(path: Path, kind: FileKind) -> datetime | None:
                 good = epoch
     except OSError as exc:
         _fail(f"cannot read data file {path}: {exc}", exc)
-    if good is None:
+    if good is None and not stopped_write:
         _fail(f"{path} has a damaged first row, so its rows cannot be placed in time")
     return good
 

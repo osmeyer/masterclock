@@ -49,7 +49,7 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 
-class Existing(BaseModel):
+class ExistingSeries(BaseModel):
     """The series that exist before an epoch.
 
     Parameters
@@ -85,12 +85,12 @@ def _fail(message: str, cause: Exception | None = None) -> NoReturn:
     raise DataFileError(message) from cause
 
 
-def refs_of(block: DASData | None) -> frozenset[str]:
+def refs_of(das_block: DASData | None) -> frozenset[str]:
     """Give an epoch's references: REFS(e) (design 3.1).
 
     Parameters
     ----------
-    block : DASData or None
+    das_block : DASData or None
         The epoch's DAS block, or ``None`` when the DAS measured nothing.
 
     Returns
@@ -99,25 +99,27 @@ def refs_of(block: DASData | None) -> frozenset[str]:
         Every clock of the block whose name starts with the reference
         prefix; none without a block.
     """
-    if block is None:
+    if das_block is None:
         return frozenset()
     return frozenset(
-        m.clock for m in block.measurements if m.clock.startswith(REFERENCE_PREFIX)
+        das_measurement.clock
+        for das_measurement in das_block.measurements
+        if das_measurement.clock.startswith(REFERENCE_PREFIX)
     )
 
 
 def build_registry(
-    block: DASData | None, refs: frozenset[str], existing: Existing
+    das_block: DASData | None, refs: frozenset[str], earlier_series: ExistingSeries
 ) -> tuple[tuple[PairKey, ...], tuple[TripleKey, ...]]:
     """Give every pair and triple that exists at an epoch (design 3.4).
 
     Parameters
     ----------
-    block : DASData or None
+    das_block : DASData or None
         The epoch's DAS block, or ``None``.
     refs : frozenset of str
         The epoch's references.
-    existing : Existing
+    earlier_series : ExistingSeries
         The series that existed before the epoch.
 
     Returns
@@ -128,10 +130,13 @@ def build_registry(
         pair (s, c), its clock c a reference or not, and a reference r
         whose link with s is a pair both ways.
     """
-    pairs = set(existing.pairs)
-    if block is not None:
-        pairs |= {(m.reference, m.clock) for m in block.measurements}
-    triples = set(existing.triples)
+    pairs = set(earlier_series.pairs)
+    if das_block is not None:
+        pairs |= {
+            (das_measurement.reference, das_measurement.clock)
+            for das_measurement in das_block.measurements
+        }
+    triples = set(earlier_series.triples)
     for s, c in pairs:
         for r in refs:
             if (r, s) in pairs and (s, r) in pairs:
@@ -139,7 +144,9 @@ def build_registry(
     return tuple(sorted(pairs)), tuple(sorted(triples))
 
 
-def series_file(processed_path: Path, channel: RfChannel, key: SeriesKey) -> Path:
+def series_file(
+    processed_path: Path, channel: RfChannel, series_key: SeriesKey
+) -> Path:
     """Give the path of a series' file (design 5.1).
 
     Parameters
@@ -148,7 +155,7 @@ def series_file(processed_path: Path, channel: RfChannel, key: SeriesKey) -> Pat
         The directory holding the two archives.
     channel : {'a', 'b'}
         The RF channel.
-    key : (str, str) or (str, str, str)
+    series_key : (str, str) or (str, str, str)
         The series.
 
     Returns
@@ -160,23 +167,25 @@ def series_file(processed_path: Path, channel: RfChannel, key: SeriesKey) -> Pat
     Raises
     ------
     DataFileError
-        If a name in ``key`` is empty or holds a dot or a slash, and so
+        If a name in ``series_key`` is empty or holds a dot or a slash, and so
         cannot name a file that reads back as the same key.
     """
-    for name in key:
-        if _NAME.fullmatch(name) is None:
-            _fail(f"clock name {name!r} of {key} cannot name a series file")
-    directory = MEAS_SUBDIRECTORY if len(key) == _PAIR else DDIFF_SUBDIRECTORY
-    name = f"{_PREFIX}{channel}{_SEPARATOR}{_SEPARATOR.join(key)}{_SUFFIX}"
-    return processed_path / directory / name
+    for clock_name in series_key:
+        if _NAME.fullmatch(clock_name) is None:
+            _fail(
+                f"clock name {clock_name!r} of {series_key} cannot name a series file"
+            )
+    archive_name = MEAS_SUBDIRECTORY if len(series_key) == _PAIR else DDIFF_SUBDIRECTORY
+    file_name = f"{_PREFIX}{channel}{_SEPARATOR}{_SEPARATOR.join(series_key)}{_SUFFIX}"
+    return processed_path / archive_name / file_name
 
 
-def key_of(name: str, channel: RfChannel) -> SeriesKey | None:
+def series_key_of(file_name: str, channel: RfChannel) -> SeriesKey | None:
     """Read a series' key from its file's name.
 
     Parameters
     ----------
-    name : str
+    file_name : str
         A file name.
     channel : {'a', 'b'}
         The RF channel.
@@ -189,30 +198,30 @@ def key_of(name: str, channel: RfChannel) -> SeriesKey | None:
 
     Examples
     --------
-    >>> key_of("das_a.mc2.nav23.dat", "a")
+    >>> series_key_of("das_a.mc2.nav23.dat", "a")
     ('mc2', 'nav23')
-    >>> key_of("das_b.mc2.nav23.dat", "a") is None
+    >>> series_key_of("das_b.mc2.nav23.dat", "a") is None
     True
     """
-    start = f"{_PREFIX}{channel}{_SEPARATOR}"
-    if not (name.startswith(start) and name.endswith(_SUFFIX)):
+    name_start = f"{_PREFIX}{channel}{_SEPARATOR}"
+    if not (file_name.startswith(name_start) and file_name.endswith(_SUFFIX)):
         return None
-    names = tuple(name[len(start) : -len(_SUFFIX)].split(_SEPARATOR))
-    if not all(names):
+    clock_names = tuple(file_name[len(name_start) : -len(_SUFFIX)].split(_SEPARATOR))
+    if not all(clock_names):
         return None
-    if len(names) == _PAIR:
-        return (names[0], names[1])
-    if len(names) == _TRIPLE:
-        return (names[0], names[1], names[2])
+    if len(clock_names) == _PAIR:
+        return (clock_names[0], clock_names[1])
+    if len(clock_names) == _TRIPLE:
+        return (clock_names[0], clock_names[1], clock_names[2])
     return None
 
 
-def _keys(directory: Path, channel: RfChannel) -> list[SeriesKey]:
+def _series_keys(archive: Path, channel: RfChannel) -> list[SeriesKey]:
     """Give the keys of an archive's series files.
 
     Parameters
     ----------
-    directory : Path
+    archive : Path
         The archive's directory.
     channel : {'a', 'b'}
         The RF channel.
@@ -228,17 +237,21 @@ def _keys(directory: Path, channel: RfChannel) -> list[SeriesKey]:
     DataFileError
         If the directory is there but cannot be listed.
     """
-    if not directory.exists():
+    if not archive.exists():
         return []
     try:
-        entries = sorted(directory.iterdir())
+        archive_entries = sorted(archive.iterdir())
     except OSError as exc:
-        _fail(f"cannot list archive {directory}: {exc}", exc)
-    keys = [key_of(entry.name, channel) for entry in entries if entry.is_file()]
-    return [key for key in keys if key is not None]
+        _fail(f"cannot list archive {archive}: {exc}", exc)
+    series_keys = [
+        series_key_of(archive_entry.name, channel)
+        for archive_entry in archive_entries
+        if archive_entry.is_file()
+    ]
+    return [series_key for series_key in series_keys if series_key is not None]
 
 
-def existing_series(processed_path: Path, channel: RfChannel) -> Existing:
+def existing_series(processed_path: Path, channel: RfChannel) -> ExistingSeries:
     """Give the series a channel's files hold (design 3.4, 5.1).
 
     Parameters
@@ -250,7 +263,7 @@ def existing_series(processed_path: Path, channel: RfChannel) -> Existing:
 
     Returns
     -------
-    Existing
+    ExistingSeries
         The pairs of the measurement archive's files and the triples of the
         double-difference archive's; other channels' files and other names
         are left out.
@@ -261,11 +274,11 @@ def existing_series(processed_path: Path, channel: RfChannel) -> Existing:
         If an archive's directory is there but cannot be listed.
     """
     pairs: set[PairKey] = set()
-    for key in _keys(processed_path / MEAS_SUBDIRECTORY, channel):
-        if len(key) == _PAIR:
-            pairs.add((key[0], key[1]))
+    for series_key in _series_keys(processed_path / MEAS_SUBDIRECTORY, channel):
+        if len(series_key) == _PAIR:
+            pairs.add((series_key[0], series_key[1]))
     triples: set[TripleKey] = set()
-    for key in _keys(processed_path / DDIFF_SUBDIRECTORY, channel):
-        if len(key) == _TRIPLE:
-            triples.add((key[0], key[1], key[-1]))
-    return Existing(pairs=frozenset(pairs), triples=frozenset(triples))
+    for series_key in _series_keys(processed_path / DDIFF_SUBDIRECTORY, channel):
+        if len(series_key) == _TRIPLE:
+            triples.add((series_key[0], series_key[1], series_key[-1]))
+    return ExistingSeries(pairs=frozenset(pairs), triples=frozenset(triples))

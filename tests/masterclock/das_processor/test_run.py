@@ -60,7 +60,7 @@ from masterclock.das_processor.read_cd5m5m import (
     read_all_blocks,
 )
 from masterclock.das_processor.read_steering import STEERING_FILE_TEMPLATE
-from masterclock.das_processor.registry import Existing
+from masterclock.das_processor.registry import ExistingSeries
 from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.phase import PHASE_PERIOD
 from masterclock.domain.series import Row, SeriesKey, TripleKey
@@ -71,7 +71,7 @@ E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 T: Final = timedelta(minutes=10)
 """One epoch."""
 
-NONE: Final = Existing(pairs=frozenset(), triples=frozenset())
+NONE: Final = ExistingSeries(pairs=frozenset(), triples=frozenset())
 """No series yet."""
 
 CLOCKS: Final = (
@@ -159,13 +159,13 @@ def test_a_series_takes_the_entry_of_its_clock_side(tmp_path: Path) -> None:
     """Give a pair its second clock's entry and a triple its clock c's (8.1)."""
     config, clocks = deployment(tmp_path)
     epoch = run.build_epoch(E, block(MEASURED), NONE, config, clocks)
-    pair = epoch.params[("mc2", "nav23")]
-    assert (pair.model, pair.M, pair.rms_max) == (3, 100.0, 80)
-    link = epoch.params[("mc1", "mc2")]
-    assert (link.model, link.M, link.sigma0, link.rms_max) == (1, None, 2.0, 50)
-    triple = epoch.params[("mc1", "mc2", "nav23")]
-    assert (triple.model, triple.M, triple.rms_max) == (3, 100.0, None)
-    assert set(epoch.params) == set(epoch.pairs) | set(epoch.triples)
+    pair = epoch.series_params[("mc2", "nav23")]
+    assert (pair.filter_states, pair.M, pair.rms_max) == (3, 100.0, 80)
+    link = epoch.series_params[("mc1", "mc2")]
+    assert (link.filter_states, link.M, link.sigma0, link.rms_max) == (1, None, 2.0, 50)
+    triple = epoch.series_params[("mc1", "mc2", "nav23")]
+    assert (triple.filter_states, triple.M, triple.rms_max) == (3, 100.0, None)
+    assert set(epoch.series_params) == set(epoch.pairs) | set(epoch.triples)
 
 
 def test_steering_is_read_for_every_reference_over_the_epoch_either_side(
@@ -189,12 +189,12 @@ def test_steering_is_read_for_every_reference_over_the_epoch_either_side(
 def test_an_epoch_with_no_block_has_the_existing_series_only(tmp_path: Path) -> None:
     """Give no references and every existing series when the DAS measured nothing."""
     config, clocks = deployment(tmp_path)
-    existing = Existing(
+    existing = ExistingSeries(
         pairs=frozenset({("mc2", "nav23"), ("mc2", "mc2")}),
         triples=frozenset({("mc2", "mc2", "nav23")}),
     )
     epoch = run.build_epoch(E, None, existing, config, clocks)
-    assert (epoch.block, epoch.refs) == (None, frozenset())
+    assert (epoch.das_block, epoch.refs) == (None, frozenset())
     assert epoch.pairs == (("mc2", "mc2"), ("mc2", "nav23"))
     assert epoch.triples == (("mc2", "mc2", "nav23"),)
     assert sorted(epoch.steering) == ["mc2"]
@@ -212,7 +212,9 @@ def test_an_epoch_holds_settings_for_exactly_its_series(tmp_path: Path) -> None:
     config, clocks = deployment(tmp_path)
     epoch = run.build_epoch(E, block(MEASURED), NONE, config, clocks)
     values = dict(epoch)
-    values["params"] = {k: v for k, v in epoch.params.items() if k != ("mc1", "mc1")}
+    values["series_params"] = {
+        k: v for k, v in epoch.series_params.items() if k != ("mc1", "mc1")
+    }
     with pytest.raises(ValidationError, match="settings"):
         run.Epoch.model_validate(values)
 
@@ -312,7 +314,7 @@ def epoch_of(
         path = tmp_path / "steering" / STEERING_FILE_TEMPLATE.format(mc=mc)
         path.write_text(text, encoding="ascii")
     data = DASData(interpolated_datetime=E, measurements=tuple(measurements))
-    existing = Existing(
+    existing = ExistingSeries(
         pairs=frozenset((k[0], k[1]) for k in last if len(k) == 2),
         triples=frozenset((k[0], k[1], k[-1]) for k in last if len(k) == 3),
     )
@@ -331,7 +333,7 @@ def test_the_worked_epoch_s_pairs_are_processed_end_to_end(tmp_path: Path) -> No
     )
     epoch = epoch_of([*REFERENCE_MEASURED, raw], last, tmp_path)
     done = run.process_pairs(epoch, last)
-    worked = done.results[("mc2", "nav23")].row
+    worked = done.step_results[("mc2", "nav23")].row
     assert (worked.flags, worked.x_fs, worked.y, worked.d) == (
         "A",
         1_234_574_457,
@@ -340,7 +342,7 @@ def test_the_worked_epoch_s_pairs_are_processed_end_to_end(tmp_path: Path) -> No
     )
     assert done.measurements[("mc2", "nav23")].z == 1_234_577
     for key, row in REFERENCE_LAST.items():
-        result = done.results[(key[0], key[1])].row
+        result = done.step_results[(key[0], key[1])].row
         assert (result.flags, result.x_fs) == ("A", row.x_fs), key
     assert done.screening.events == ()
     assert done.slips.events == ()
@@ -378,7 +380,7 @@ def test_a_slip_correction_is_made_before_filtering(tmp_path: Path) -> None:
     assert done.slips.corrections == {("mc1", "nav23"): 1}
     assert done.measurements[("mc1", "nav23")].z == truth[("mc1", "nav23")]
     assert done.measurements[("mc1", "nav23")].slip is True
-    corrected = done.results[("mc1", "nav23")].row
+    corrected = done.step_results[("mc1", "nav23")].row
     assert "S" in corrected.flags
     assert corrected.innovation == float(jump)
 
@@ -392,8 +394,8 @@ def test_a_reference_missing_from_the_block_leaves_its_pairs_predicted(
     assert epoch.refs == frozenset({"mc2"})
     done = run.process_pairs(epoch, last)
     for key in (("mc1", "mc1"), ("mc1", "mc2"), ("mc2", "mc1")):
-        assert done.results[key].row.flags == "P"
-    assert done.results[("mc2", "mc2")].row.flags == "A"
+        assert done.step_results[key].row.flags == "P"
+    assert done.step_results[("mc2", "mc2")].row.flags == "A"
     assert done.screening.events == ()
 
 
@@ -402,7 +404,7 @@ def test_a_new_pair_starts_acquiring(tmp_path: Path) -> None:
     epoch = epoch_of(REFERENCE_MEASURED, {}, tmp_path)
     done = run.process_pairs(epoch, {})
     for key in REFERENCE_LAST:
-        row = done.results[(key[0], key[1])].row
+        row = done.step_results[(key[0], key[1])].row
         assert (row.flags, len(row.rejects), row.segment) == ("RD", 1, 0)
     assert done.predictions[("mc1", "mc1")] is None
 
@@ -426,21 +428,21 @@ def test_screening_excludes_and_the_filter_holds(tmp_path: Path) -> None:
     ]
     epoch = epoch_of(shifted, last, tmp_path)
     done = run.process_pairs(epoch, last)
-    assert [event.kind for event in done.screening.events] == ["self_fail"]
+    assert [event.finding for event in done.screening.events] == ["self_fail"]
     assert done.screening.excluded == frozenset({("mc2", "nav23")})
-    assert done.results[("mc2", "nav23")].row.flags == "X"
-    assert done.results[("mc2", "mc2")].row.flags == "R"
+    assert done.step_results[("mc2", "nav23")].row.flags == "X"
+    assert done.step_results[("mc2", "mc2")].row.flags == "R"
 
 
 def test_an_epoch_with_no_block_predicts_every_pair(tmp_path: Path) -> None:
     """Give every existing pair a predicted row when the DAS measured nothing (6.2)."""
     config, clocks = deployment(tmp_path)
-    existing = Existing(
+    existing = ExistingSeries(
         pairs=frozenset(k for k in REFERENCE_LAST if len(k) == 2), triples=frozenset()
     )
     epoch = run.build_epoch(E, None, existing, config, clocks)
     done = run.process_pairs(epoch, REFERENCE_LAST)
-    assert {result.row.flags for result in done.results.values()} == {"P"}
+    assert {result.row.flags for result in done.step_results.values()} == {"P"}
     assert done.measurements == {}
 
 
@@ -464,9 +466,9 @@ def test_an_undecided_slip_excludes_both_clock_pairs(tmp_path: Path) -> None:
     ]
     epoch = epoch_of([*REFERENCE_MEASURED, *clocks], last, tmp_path)
     done = run.process_pairs(epoch, last)
-    assert [event.kind for event in done.slips.events] == ["slip_undecided"]
-    assert done.results[("mc1", "nav23")].row.flags == "X"
-    assert done.results[("mc2", "nav23")].row.flags == "X"
+    assert [event.finding for event in done.slips.events] == ["slip_undecided"]
+    assert done.step_results[("mc1", "nav23")].row.flags == "X"
+    assert done.step_results[("mc2", "nav23")].row.flags == "X"
 
 
 def test_a_dormant_pair_is_decycled_against_its_anchor(tmp_path: Path) -> None:
@@ -497,7 +499,7 @@ def test_steering_inside_the_epoch_is_taken_off(tmp_path: Path) -> None:
     epoch = epoch_of(moved, last, tmp_path, {"mc1": event})
     done = run.process_pairs(epoch, last)
     assert done.measurements[("mc1", "mc2")].z == 5000
-    assert done.results[("mc1", "mc2")].row.flags == "A"
+    assert done.step_results[("mc1", "mc2")].row.flags == "A"
 
 
 # ---------------------------------------------------------- triples of an epoch
@@ -536,7 +538,7 @@ def test_triples_are_built_from_the_pairs_measurements(tmp_path: Path) -> None:
     assert remote.double_difference_sigma == math.sqrt(9 + 0.25 * (9 + 9))
     local = done.measurements[("mc2", "mc2", "nav23")]
     assert (local.z, local.double_difference_sigma) == (1_234_577, 3.0)
-    assert {r.row.flags for r in done.results.values()} == {"RD"}
+    assert {r.row.flags for r in done.step_results.values()} == {"RD"}
 
 
 def test_a_tracked_triple_is_filtered_on_its_double_difference(tmp_path: Path) -> None:
@@ -548,7 +550,7 @@ def test_a_tracked_triple_is_filtered_on_its_double_difference(tmp_path: Path) -
     }
     epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
     done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
-    row = done.results[("mc1", "mc2", "nav23")].row
+    row = done.step_results[("mc1", "mc2", "nav23")].row
     assert (row.flags, row.innovation) == ("A", 0.0)
     assert row.x_fs == 1_239_577_000
 
@@ -582,10 +584,10 @@ def test_a_component_cold_start_makes_the_triple_dormant(tmp_path: Path) -> None
     }
     epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
     pairs = run.process_pairs(epoch, last)
-    assert pairs.results[("mc2", "nav23")].cold is True
+    assert pairs.step_results[("mc2", "nav23")].cold_started is True
     done = run.process_triples(epoch, last, pairs)
-    assert done.measurements[("mc2", "mc2", "nav23")].cold is True
-    row = done.results[("mc2", "mc2", "nav23")].row
+    assert done.measurements[("mc2", "mc2", "nav23")].pair_cold_started is True
+    row = done.step_results[("mc2", "mc2", "nav23")].row
     assert (row.flags, row.rejects) == ("RD", ((E, 1_234_579.0),))
 
 
@@ -598,7 +600,7 @@ def test_a_triple_without_its_clock_pair_holds(tmp_path: Path) -> None:
     }
     epoch = epoch_of(REFERENCE_MEASURED, last, tmp_path)
     done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
-    assert done.results[("mc2", "mc2", "nav23")].row.flags == "P"
+    assert done.step_results[("mc2", "mc2", "nav23")].row.flags == "P"
     assert ("mc2", "mc2", "nav23") not in done.measurements
 
 
@@ -640,10 +642,10 @@ def test_a_rejected_pair_gives_its_triple_no_value(tmp_path: Path) -> None:
     )
     epoch = epoch_of([*REFERENCE_MEASURED, outlier], last, tmp_path)
     pairs = run.process_pairs(epoch, last)
-    assert pairs.results[("mc2", "nav23")].row.flags == "R"
+    assert pairs.step_results[("mc2", "nav23")].row.flags == "R"
     done = run.process_triples(epoch, last, pairs)
     assert ("mc2", "mc2", "nav23") not in done.measurements
-    assert done.results[("mc2", "mc2", "nav23")].row.flags == "P"
+    assert done.step_results[("mc2", "mc2", "nav23")].row.flags == "P"
 
 
 # ---------------------------------------------------------------- the epoch loop
@@ -712,8 +714,8 @@ def recorded_writes(monkeypatch: pytest.MonkeyPatch) -> list[datetime | None]:
     def spy(buffer: files.DayBuffer) -> None:
         """Record the newest buffered epoch, then write."""
         newest = (
-            [buffer.last[key].interpolated_datetime for key in buffer.last]
-            if buffer.texts
+            [buffer.last_rows[key].interpolated_datetime for key in buffer.last_rows]
+            if buffer.file_texts
             else []
         )
         marks.append(max(newest, default=None))
@@ -913,7 +915,7 @@ def test_an_epoch_that_fails_adds_none_of_its_rows(
     blocks = list(read_all_blocks(tmp_path / "das", datetime_to_mjd(LATE)))
     files.ensure_archives(config.processed.processed_path)
     run.process_epoch(LATE, blocks[0], buffer, config, clocks)
-    before = dict(buffer.texts), dict(buffer.last)
+    before = dict(buffer.file_texts), dict(buffer.last_rows)
     real = files.DayBuffer.add
     calls: list[SeriesKey] = []
 
@@ -933,7 +935,7 @@ def test_an_epoch_that_fails_adds_none_of_its_rows(
     monkeypatch.setattr(files.DayBuffer, "add", failing)
     with pytest.raises(DataFileError, match="injected"):
         run.process_epoch(LATE + T, blocks[1], buffer, config, clocks)
-    assert (dict(buffer.texts), dict(buffer.last)) == before
+    assert (dict(buffer.file_texts), dict(buffer.last_rows)) == before
 
 
 # --------------------------------------------------------------- log events
@@ -950,7 +952,7 @@ def logged(
     """Process ``epoch`` and give the run's log records as (level, message)."""
     pairs = run.process_pairs(epoch, last)
     triples = run.process_triples(epoch, last, pairs)
-    done = run.EpochDone(epoch=epoch, pairs=pairs, triples=triples)
+    done = run.EpochDone(epoch=epoch, pair_step=pairs, triple_step=triples)
     caplog.clear()
     with caplog.at_level(TRACE, logger=RUN_LOGGER):
         run.log_epoch(done, last, "a")
@@ -1256,11 +1258,11 @@ def test_a_link_not_accepted_does_not_make_the_triple_cold(tmp_path: Path) -> No
     )
     epoch = epoch_of([*REFERENCE_MEASURED[:3], noisy, WORKED_RAW], last, tmp_path)
     pairs = run.process_pairs(epoch, last)
-    assert "A" not in pairs.results[("mc2", "mc1")].row.flags
+    assert "A" not in pairs.step_results[("mc2", "mc1")].row.flags
     done = run.process_triples(epoch, last, pairs)
     remote = done.measurements[("mc1", "mc2", "nav23")]
-    assert (remote.components_used, remote.cold) == ("110", False)
-    assert done.results[("mc1", "mc2", "nav23")].row.flags == "A"
+    assert (remote.components_used, remote.pair_cold_started) == ("110", False)
+    assert done.step_results[("mc1", "mc2", "nav23")].row.flags == "A"
 
 
 def test_each_series_takes_the_settings_in_force_at_its_epoch(tmp_path: Path) -> None:
@@ -1275,7 +1277,7 @@ def test_each_series_takes_the_settings_in_force_at_its_epoch(tmp_path: Path) ->
     path = tmp_path / "dated.yaml"
     path.write_text(dated, encoding="utf-8")
     epoch = run.build_epoch(E, block(MEASURED), NONE, config, read_clock_config(path))
-    assert epoch.params[("mc2", "nav23")].M == 150.0
+    assert epoch.series_params[("mc2", "nav23")].M == 150.0
 
 
 def test_the_prediction_and_update_are_logged_in_full(

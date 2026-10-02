@@ -55,7 +55,7 @@ UNSET: Final[Unset] = Unset.UNSET
 """The one value of :class:`Unset`."""
 
 
-def absolute_path(text: str) -> Path:
+def absolute_path(cli_token: str) -> Path:
     """Convert a command-line token to an absolute path.
 
     A relative path, the empty token included, is refused, since it would
@@ -64,7 +64,7 @@ def absolute_path(text: str) -> Path:
 
     Parameters
     ----------
-    text : str
+    cli_token : str
         The raw command-line token.
 
     Returns
@@ -75,15 +75,15 @@ def absolute_path(text: str) -> Path:
     Raises
     ------
     argparse.ArgumentTypeError
-        If ``text`` is not an absolute path.
+        If ``cli_token`` is not an absolute path.
     """
-    path = Path(text)
-    if not path.is_absolute():
-        raise argparse.ArgumentTypeError(f"path must be absolute: {text!r}")
-    return path
+    token_path = Path(cli_token)
+    if not token_path.is_absolute():
+        raise argparse.ArgumentTypeError(f"path must be absolute: {cli_token!r}")
+    return token_path
 
 
-def optional_path(text: str) -> Path | None:
+def optional_path(cli_token: str) -> Path | None:
     """Convert a command-line token to an absolute path, treating ``"None"`` as no path.
 
     A relative path, the empty token included, is refused, since it would
@@ -91,47 +91,47 @@ def optional_path(text: str) -> Path | None:
 
     Parameters
     ----------
-    text : str
+    cli_token : str
         The raw command-line token.
 
     Returns
     -------
     Path or None
-        ``None`` if ``text`` is the literal token ``"None"``, otherwise the
+        ``None`` if ``cli_token`` is the literal token ``"None"``, otherwise the
         token as a :class:`~pathlib.Path`.
 
     Raises
     ------
     argparse.ArgumentTypeError
-        If ``text`` is neither the token ``"None"`` nor an absolute path.
+        If ``cli_token`` is neither the token ``"None"`` nor an absolute path.
     """
-    return None if text == NONE_LITERAL else absolute_path(text)
+    return None if cli_token == NONE_LITERAL else absolute_path(cli_token)
 
 
-def positive_mjd_or_none(text: str) -> float | None:
+def positive_mjd_or_none(cli_token: str) -> float | None:
     """Convert a command-line token to a positive MJD, treating ``"None"`` as no value.
 
     Parameters
     ----------
-    text : str
+    cli_token : str
         The raw command-line token.
 
     Returns
     -------
     float or None
-        ``None`` if ``text`` is the literal token ``"None"``, otherwise the
+        ``None`` if ``cli_token`` is the literal token ``"None"``, otherwise the
         token read as :func:`positive_mjd` reads it.
 
     Raises
     ------
     argparse.ArgumentTypeError
-        If ``text`` is neither the token ``"None"`` nor a finite number
+        If ``cli_token`` is neither the token ``"None"`` nor a finite number
         above zero.
     """
-    return None if text == NONE_LITERAL else positive_mjd(text)
+    return None if cli_token == NONE_LITERAL else positive_mjd(cli_token)
 
 
-def positive_mjd(text: str) -> float:
+def positive_mjd(cli_token: str) -> float:
     """Convert a command-line token to a positive MJD.
 
     The token is read as :class:`float` reads it, so surrounding white
@@ -143,7 +143,7 @@ def positive_mjd(text: str) -> float:
 
     Parameters
     ----------
-    text : str
+    cli_token : str
         The raw command-line token.
 
     Returns
@@ -154,22 +154,22 @@ def positive_mjd(text: str) -> float:
     Raises
     ------
     argparse.ArgumentTypeError
-        If ``text`` is not a finite number above zero.
+        If ``cli_token`` is not a finite number above zero.
     """
     try:
-        value = float(text)
+        parsed_mjd = float(cli_token)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            f"invalid positive float value: {text!r}"
+            f"invalid positive float value: {cli_token!r}"
         ) from exc
-    if not math.isfinite(value):
-        raise argparse.ArgumentTypeError(f"MJD must be finite: {text!r}")
-    if value <= 0:
-        raise argparse.ArgumentTypeError(f"MJD must be positive: {text!r}")
-    return value
+    if not math.isfinite(parsed_mjd):
+        raise argparse.ArgumentTypeError(f"MJD must be finite: {cli_token!r}")
+    if parsed_mjd <= 0:
+        raise argparse.ArgumentTypeError(f"MJD must be positive: {cli_token!r}")
+    return parsed_mjd
 
 
-def positive_int_or_none(text: str) -> int | None:
+def positive_int_or_none(cli_token: str) -> int | None:
     """Convert a command-line token to a positive int, treating ``"None"`` as no value.
 
     What no value means is up to the option; for a limit it means there is
@@ -177,24 +177,24 @@ def positive_int_or_none(text: str) -> int | None:
 
     Parameters
     ----------
-    text : str
+    cli_token : str
         The raw command-line token.
 
     Returns
     -------
     int or None
-        ``None`` if ``text`` is the literal token ``"None"``, otherwise the
+        ``None`` if ``cli_token`` is the literal token ``"None"``, otherwise the
         token read as :func:`positive_int` reads it.
 
     Raises
     ------
     argparse.ArgumentTypeError
-        If ``text`` is neither the token ``"None"`` nor a positive integer.
+        If ``cli_token`` is neither the token ``"None"`` nor a positive integer.
     """
-    return None if text == NONE_LITERAL else positive_int(text)
+    return None if cli_token == NONE_LITERAL else positive_int(cli_token)
 
 
-def positive_int(text: str) -> int:
+def positive_int(cli_token: str) -> int:
     """Convert a command-line token to a positive int.
 
     The token is read as :class:`int` reads it, so surrounding white space,
@@ -205,7 +205,7 @@ def positive_int(text: str) -> int:
 
     Parameters
     ----------
-    text : str
+    cli_token : str
         The raw command-line token.
 
     Returns
@@ -216,17 +216,19 @@ def positive_int(text: str) -> int:
     Raises
     ------
     argparse.ArgumentTypeError
-        If ``text`` is not a positive integer.
+        If ``cli_token`` is not a positive integer.
     """
     try:
-        value = int(text)
+        parsed_int = int(cli_token)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
-            f"invalid positive int value: {text!r}"
+            f"invalid positive int value: {cli_token!r}"
         ) from exc
-    if value <= 0:
-        raise argparse.ArgumentTypeError(f"value must be a positive integer: {text!r}")
-    return value
+    if parsed_int <= 0:
+        raise argparse.ArgumentTypeError(
+            f"value must be a positive integer: {cli_token!r}"
+        )
+    return parsed_int
 
 
 class StoreOnce(argparse.Action):

@@ -30,7 +30,7 @@ from masterclock.domain.series import SeriesKey
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """An invented epoch start."""
 
-NONE: Final = registry.Existing(pairs=frozenset(), triples=frozenset())
+NONE: Final = registry.ExistingSeries(pairs=frozenset(), triples=frozenset())
 """No series yet."""
 
 
@@ -117,7 +117,7 @@ def test_a_local_triple_needs_the_self_pair() -> None:
 
 def test_a_series_is_never_removed() -> None:
     """Keep every existing pair and triple, measured this epoch or not (3.4)."""
-    existing = registry.Existing(
+    existing = registry.ExistingSeries(
         pairs=frozenset({("mc1", "hm9"), ("mc1", "mc1")}),
         triples=frozenset({("mc3", "mc1", "hm9")}),
     )
@@ -128,7 +128,9 @@ def test_a_series_is_never_removed() -> None:
 
 def test_new_series_join_the_existing_ones() -> None:
     """Add the epoch's new pairs and triples to those that exist."""
-    existing = registry.Existing(pairs=frozenset({("mc1", "hm9")}), triples=frozenset())
+    existing = registry.ExistingSeries(
+        pairs=frozenset({("mc1", "hm9")}), triples=frozenset()
+    )
     data = block([("mc1", "mc1"), ("mc1", "hm7")])
     pairs, triples = registry.build_registry(data, registry.refs_of(data), existing)
     assert pairs == (("mc1", "hm7"), ("mc1", "hm9"), ("mc1", "mc1"))
@@ -180,7 +182,7 @@ def test_a_clock_name_that_cannot_name_a_file_is_refused(
 )
 def test_a_key_is_read_from_a_file_name(name: str, key: SeriesKey | None) -> None:
     """Read the key of a channel's file name, and nothing from any other name."""
-    assert registry.key_of(name, "a") == key
+    assert registry.series_key_of(name, "a") == key
 
 
 def test_the_existing_series_are_read_from_the_file_names(tmp_path: Path) -> None:
@@ -198,7 +200,7 @@ def test_the_existing_series_are_read_from_the_file_names(tmp_path: Path) -> Non
     (tmp_path / "meas" / "das_a.mc3.mc3.dat").mkdir()
     (tmp_path / "ddiff" / "das_a.mc1.mc2.nav23.dat").write_text("")
     (tmp_path / "ddiff" / "das_a.mc2.nav23.dat").write_text("")
-    assert registry.existing_series(tmp_path, "a") == registry.Existing(
+    assert registry.existing_series(tmp_path, "a") == registry.ExistingSeries(
         pairs=frozenset({("mc2", "nav23"), ("mc1", "mc1")}),
         triples=frozenset({("mc1", "mc2", "nav23")}),
     )

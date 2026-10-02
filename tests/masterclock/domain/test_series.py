@@ -108,7 +108,7 @@ def test_a_state_refuses_a_rate_or_drift_that_is_not_finite(
 def params(**changes: object) -> series.SeriesParams:
     """Build valid 3-state settings, with ``changes`` applied."""
     values: dict[str, object] = {
-        "model": 3,
+        "filter_states": 3,
         "M": 100.0,
         "M_sigma": 50.0,
         "sigma0": 5.0,
@@ -124,8 +124,8 @@ def params(**changes: object) -> series.SeriesParams:
     "changes",
     [
         {},
-        {"model": 2, "M": 30.0},
-        {"model": 1, "M": None},
+        {"filter_states": 2, "M": 30.0},
+        {"filter_states": 1, "M": None},
         {"rms_max": None},
         {"n_break": 3, "gmax": 3},
         {"M": 1.0, "M_sigma": 1.0, "gmax": 3, "n_break": 3},
@@ -133,15 +133,15 @@ def params(**changes: object) -> series.SeriesParams:
 )
 def test_valid_settings_build(changes: dict[str, object]) -> None:
     """Build settings for each model, with and without an RMS limit."""
-    assert params(**changes).model == changes.get("model", 3)
+    assert params(**changes).filter_states == changes.get("filter_states", 3)
 
 
 @pytest.mark.parametrize(
     ("changes", "reason"),
     [
-        ({"model": 4}, "model"),
-        ({"model": 0}, "model"),
-        ({"model": 1}, "time constant"),
+        ({"filter_states": 4}, "filter_states"),
+        ({"filter_states": 0}, "filter_states"),
+        ({"filter_states": 1}, "time constant"),
         ({"M": None}, "time constant"),
         ({"M": 0.5}, "M"),
         ({"M_sigma": 0.5}, "M_sigma"),
@@ -152,7 +152,7 @@ def test_valid_settings_build(changes: dict[str, object]) -> None:
         ({"n_break": 433}, "n_break"),
         ({"rms_max": 0}, "rms_max"),
         ({"M": float("inf")}, "M"),
-        ({"model": True}, "not a bool"),
+        ({"filter_states": True}, "not a bool"),
     ],
 )
 def test_invalid_settings_are_refused(changes: dict[str, object], reason: str) -> None:

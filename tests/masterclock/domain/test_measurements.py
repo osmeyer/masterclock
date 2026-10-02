@@ -20,7 +20,7 @@ from pydantic import ValidationError
 
 from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.domain.double_difference import TripleValue
-from masterclock.domain.filter import Measured
+from masterclock.domain.filter import FilterInput
 from masterclock.domain.measurements import (
     PairMeasurement,
     TripleMeasurement,
@@ -155,19 +155,28 @@ def test_a_slip_correction_moves_whole_periods() -> None:
 
 
 def test_a_pair_measurement_gives_the_filter_its_values() -> None:
-    """Give z, the rms and the slip mark as a Measured."""
+    """Give z, the rms and the slip mark as a FilterInput."""
     pair = measure(PREDICTION, Fraction(0), None).corrected(1)
-    assert pair.measured() == Measured(z=1_234_577 + PHASE_PERIOD, rms=3, slip=True)
+    assert pair.filter_input() == FilterInput(
+        z=1_234_577 + PHASE_PERIOD, rms=3, slip=True
+    )
 
 
 def test_a_triple_measurement_comes_from_its_value() -> None:
     """Build the file's triple measurement from the double difference."""
-    value = TripleValue(z=6_666_667, sigma=3.3166, components_used="110", cold=True)
-    triple = TripleMeasurement.from_value(value)
-    assert triple == TripleMeasurement(
-        z=6_666_667, double_difference_sigma=3.3166, components_used="110", cold=True
+    value = TripleValue(
+        z=6_666_667, sigma=3.3166, components_used="110", pair_cold_started=True
     )
-    assert triple.measured() == Measured(z=6_666_667, sigma_dd=3.3166, cold=True)
+    triple = TripleMeasurement.from_triple_value(value)
+    assert triple == TripleMeasurement(
+        z=6_666_667,
+        double_difference_sigma=3.3166,
+        components_used="110",
+        pair_cold_started=True,
+    )
+    assert triple.filter_input() == FilterInput(
+        z=6_666_667, sigma_dd=3.3166, pair_cold_started=True
+    )
 
 
 @pytest.mark.parametrize("used", ["011", "100", "1", "", "111 "])
@@ -179,7 +188,7 @@ def test_a_triple_names_only_the_components_it_can_use(used: str) -> None:
                 "z": 1,
                 "double_difference_sigma": 1.0,
                 "components_used": used,
-                "cold": False,
+                "pair_cold_started": False,
             }
         )
 
@@ -189,13 +198,16 @@ def test_a_triple_sigma_is_finite_and_not_negative(sigma: float) -> None:
     """Refuse a double-difference sigma below zero or not finite."""
     with pytest.raises(ValidationError):
         TripleMeasurement(
-            z=1, double_difference_sigma=sigma, components_used="111", cold=False
+            z=1,
+            double_difference_sigma=sigma,
+            components_used="111",
+            pair_cold_started=False,
         )
 
 
 def test_a_triple_sigma_may_be_zero() -> None:
     """Take a sigma of 0, as a pair's rms of 0 is taken, as the scale's floor."""
     triple = TripleMeasurement(
-        z=1, double_difference_sigma=0.0, components_used="111", cold=False
+        z=1, double_difference_sigma=0.0, components_used="111", pair_cold_started=False
     )
-    assert triple.measured().floor == 0.0
+    assert triple.filter_input().scale_floor == 0.0

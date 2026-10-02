@@ -406,7 +406,7 @@ def test_a_parabola_stored_in_femtoseconds_is_followed_within_a_picosecond(
 def params(**changes: object) -> SeriesParams:
     """Build the worked epoch's settings, with ``changes`` applied."""
     values: dict[str, object] = {
-        "model": 3,
+        "filter_states": 3,
         "M": 100.0,
         "M_sigma": 50.0,
         "sigma0": 5.0,
@@ -455,7 +455,7 @@ def test_a_draft_has_the_fields_of_a_row() -> None:
 
 def test_a_new_series_starts_dormant_in_segment_zero() -> None:
     """Start a series with no last row with no state and every counter at 0."""
-    draft = estimator.carry(NEXT, None, params(model=2, M=30.0, M_sigma=40.0))
+    draft = estimator.carry(NEXT, None, params(filter_states=2, M=30.0, M_sigma=40.0))
     assert draft == estimator.RowDraft(
         interpolated_datetime=NEXT,
         innovation=None,
@@ -708,7 +708,7 @@ def test_a_cold_start_begins_a_segment_from_the_measurement(
     model: Literal[1, 2, 3], M: float | None, flags: str
 ) -> None:
     """Start segment + 1 at [z, 0, 0] with sigma0 and step_offset 0 (8.6, 13.4)."""
-    settings = params(model=model, M=M, M_sigma=40.0, sigma0=6.5)
+    settings = params(filter_states=model, M=M, M_sigma=40.0, sigma0=6.5)
     last = last_row(
         filter_states=model,
         time_constant=M,
@@ -783,7 +783,7 @@ def test_a_segment_keeps_its_model() -> None:
     """Raise FilterError for a segment whose settings name another model."""
     with pytest.raises(FilterError, match="model"):
         estimator.start_segment(
-            moved_on(last_row()), params(model=2, M=30.0), keep_offset=True
+            moved_on(last_row()), params(filter_states=2, M=30.0), keep_offset=True
         )
 
 
@@ -828,7 +828,7 @@ def test_finish_refuses_a_row_that_breaks_a_rule() -> None:
 
 def test_a_one_state_series_passes_its_measurements_through() -> None:
     """Make x = z exactly on every accepted row, y and d 0.0, never U (U24)."""
-    settings = params(model=1, M=None)
+    settings = params(filter_states=1, M=None)
     last = last_row(epochs_in_segment=0, **ONE_STATE)
     measurements = [2**60 + 7, 2**60 + 7, None, 2**60 - 200_001, 5]
     for z in measurements:
@@ -874,7 +874,7 @@ def test_classify_tells_a_phase_step_from_a_frequency_step(
     values: tuple[float, float, float], sigma: float, kind: str | None
 ) -> None:
     """Find a phase step within 3 sigma of the mean, else a line within 3 sigma."""
-    assert estimator.classify(buffer(*values), sigma).kind == kind
+    assert estimator.classify(buffer(*values), sigma).step_kind == kind
 
 
 def test_classify_fits_the_line_of_a_frequency_step() -> None:
@@ -894,7 +894,7 @@ def test_classify_uses_the_epochs_of_the_rejects() -> None:
     """Fit against the epochs as they are, so a gap between rejects counts."""
     rejects = ((MARK, 30.0), (MARK + EPOCH, 60.0), (MARK + 3 * EPOCH, 120.0))
     classified = estimator.classify(rejects, 3.0)
-    assert classified.kind == "frequency"
+    assert classified.step_kind == "frequency"
     assert classified.s == pytest.approx(30.0 / T)
 
 
@@ -948,7 +948,7 @@ def test_a_counted_reject_enters_the_buffer() -> None:
 def run_epoch(last: Row, z: int, settings: SeriesParams, rms: int = 3) -> Row:
     """Process one epoch's pair measurement through the filter step."""
     prediction = estimator.predict(last, NO_INPUT)
-    measured = estimator.Measured(z=z, rms=rms)
+    measured = estimator.FilterInput(z=z, rms=rms)
     mark = last.interpolated_datetime + EPOCH
     return estimator.filter_step(mark, settings, last, prediction, measured).row
 
@@ -987,7 +987,7 @@ def test_an_innovation_in_the_gate_is_accepted_and_one_past_it_rejected() -> Non
 def test_a_phase_step_is_found_on_the_third_reject(model: Literal[1, 2, 3]) -> None:
     """Give R, R, then A with step_offset up by the step, same segment (U9)."""
     M = {3: 100.0, 2: 30.0, 1: None}[model]
-    settings = params(model=model, M=M)
+    settings = params(filter_states=model, M=M)
     if model == 1:
         last = last_row(**ONE_STATE, step_offset=12)
     else:
@@ -1020,7 +1020,7 @@ def test_a_phase_step_rounds_the_mean_half_to_even() -> None:
 def test_a_frequency_step_starts_a_new_segment(model: Literal[2, 3]) -> None:
     """Give R, R, then A N U in segment + 1, the prediction on the line (U10)."""
     M = {3: 100.0, 2: 30.0}[model]
-    settings = params(model=model, M=M)
+    settings = params(filter_states=model, M=M)
     last = last_row(filter_states=model, time_constant=M, step_offset=12)
     measurements = truth(6)
     before = run(measurements[:3], settings, last)
@@ -1049,7 +1049,7 @@ def test_a_frequency_step_moves_the_phase_to_the_line_at_the_third_reject() -> N
 
 def test_a_one_state_series_takes_no_frequency_step() -> None:
     """Keep rejecting a rate step on a 1-state series: it has no rate (9.4)."""
-    settings = params(model=1, M=None)
+    settings = params(filter_states=1, M=None)
     last = last_row(**ONE_STATE)
     ramp = [1_234_567 + 30 * (i + 1) for i in range(4)]
     rows = run(ramp, settings, last)
@@ -1125,7 +1125,7 @@ def test_three_consistent_measurements_cold_start_the_series(
 ) -> None:
     """Cold-start from the third when the second difference passes (13.3)."""
     M = {3: 100.0, 2: 30.0, 1: None}[model]
-    settings = params(model=model, M=M, sigma0=5.0)
+    settings = params(filter_states=model, M=M, sigma0=5.0)
     last = dormant_row(1_000.0, 51_000.0, filter_states=model, time_constant=M)
     edge = round_even(Fraction(101_000) + Fraction(5) * Fraction(math.sqrt(6) * 5))
     row = estimator.acquire(moved_on(last), edge, settings)
@@ -1238,19 +1238,19 @@ def test_no_anchor_without_a_buffered_measurement(last: Row | None) -> None:
 # ------------------------------------------------------------- filter step
 
 
-def pair(z: int, rms: int = 3, *, slip: bool = False) -> estimator.Measured:
+def pair(z: int, rms: int = 3, *, slip: bool = False) -> estimator.FilterInput:
     """Give a pair's measurement at an epoch."""
-    return estimator.Measured(z=z, rms=rms, slip=slip)
+    return estimator.FilterInput(z=z, rms=rms, slip=slip)
 
 
-def triple(z: int, sigma: float = 3.5, *, cold: bool = False) -> estimator.Measured:
+def triple(z: int, sigma: float = 3.5, *, cold: bool = False) -> estimator.FilterInput:
     """Give a triple's measurement at an epoch."""
-    return estimator.Measured(z=z, sigma_dd=sigma, cold=cold)
+    return estimator.FilterInput(z=z, sigma_dd=sigma, pair_cold_started=cold)
 
 
 def step(
     last: Row | None,
-    measured: estimator.Measured | None,
+    measured: estimator.FilterInput | None,
     settings: SeriesParams | None = None,
     *,
     excluded: bool = False,
@@ -1276,7 +1276,7 @@ WORKED: Final = 1_234_577
 def test_the_worked_epoch_is_accepted() -> None:
     """Give the accepted row of design 5.4 for the worked epoch, not cold."""
     result = step(last_row(), pair(WORKED))
-    assert result.cold is False
+    assert result.cold_started is False
     assert result.row.flags == "A"
     assert result.row.x_fs == 1_234_574_457
 
@@ -1284,7 +1284,7 @@ def test_the_worked_epoch_is_accepted() -> None:
 def test_no_measurement_gives_a_predicted_row() -> None:
     """Give P with the prediction when there is no measurement (9.6)."""
     result = step(last_row(), None)
-    assert (result.row.flags, result.cold) == ("P", False)
+    assert (result.row.flags, result.cold_started) == ("P", False)
     assert result.row.epochs_since_accept == 1
 
 
@@ -1297,7 +1297,7 @@ def test_no_measurement_for_a_dormant_series_gives_a_dormant_row() -> None:
 def test_a_new_series_buffers_its_first_measurement() -> None:
     """Give D R, the measurement buffered, for a series with no prediction (9.6)."""
     result = step(None, pair(WORKED))
-    assert (result.row.flags, result.cold) == ("RD", False)
+    assert (result.row.flags, result.cold_started) == ("RD", False)
     assert result.row.rejects == ((NEXT, float(WORKED)),)
     assert result.row.segment == 0
 
@@ -1310,7 +1310,7 @@ def test_a_consistent_third_measurement_cold_starts() -> None:
         **DORMANT,
     )
     result = step(last, pair(WORKED))
-    assert (result.row.flags, result.cold) == ("ANU", True)
+    assert (result.row.flags, result.cold_started) == ("ANU", True)
     assert result.row.segment == 5
 
 
@@ -1410,7 +1410,7 @@ def test_rejects_reaching_n_break_make_the_series_dormant() -> None:
         epochs_since_accept=4,
     )
     result = step(last, pair(WORKED - 500), params(n_break=5))
-    assert (result.row.flags, result.cold) == ("RD", False)
+    assert (result.row.flags, result.cold_started) == ("RD", False)
     assert result.row.rejects == ((NEXT, float(WORKED - 500)),)
     assert result.row.consecutive_rejects == 0
 
@@ -1421,7 +1421,7 @@ def test_a_component_cold_start_makes_a_triple_dormant() -> None:
         rejects=ending(90.0), consecutive_rejects=1, flags="R", innovation=90.0
     )
     result = step(last, triple(WORKED, cold=True), params(rms_max=None))
-    assert (result.row.flags, result.cold) == ("RD", False)
+    assert (result.row.flags, result.cold_started) == ("RD", False)
     assert result.row.rejects == ((NEXT, float(WORKED)),)
 
 
@@ -1471,7 +1471,7 @@ def test_unchanged_settings_start_no_segment() -> None:
         {"z": 1, "rms": 3, "sigma_dd": 3.0},
         {"z": 1},
         {"z": 1, "sigma_dd": 3.0, "slip": True},
-        {"z": 1, "rms": 3, "cold": True},
+        {"z": 1, "rms": 3, "pair_cold_started": True},
         {"z": 1, "rms": -1},
         {"z": 1, "sigma_dd": -1.0},
         {"z": 1, "sigma_dd": float("nan")},
@@ -1481,17 +1481,17 @@ def test_unchanged_settings_start_no_segment() -> None:
 def test_a_measurement_is_a_pair_s_or_a_triple_s(values: dict[str, object]) -> None:
     """Refuse a measurement that is neither a pair's (rms) nor a triple's (sigma_dd)."""
     with pytest.raises((ValidationError, FilterError)):
-        estimator.Measured.model_validate(values)
+        estimator.FilterInput.model_validate(values)
 
 
 @pytest.mark.parametrize(
     ("measured", "floor"), [(pair(5, rms=4), 4.0), (triple(5, sigma=3.25), 3.25)]
 )
 def test_a_measurement_gives_its_floor(
-    measured: estimator.Measured, floor: float
+    measured: estimator.FilterInput, floor: float
 ) -> None:
     """Give the rms of a pair and sigma_dd of a triple as the scale's floor (9.2)."""
-    assert measured.floor == floor
+    assert measured.scale_floor == floor
 
 
 def test_a_prediction_for_a_series_with_no_scale_is_refused() -> None:
@@ -1514,19 +1514,19 @@ def test_classify_fits_the_slope_as_the_design_writes_it() -> None:
     s = sum((t - tbar) * (v - vbar) for t, v in zip(ts, values, strict=True)) / sum(
         (t - tbar) ** 2 for t in ts
     )
-    assert classified.kind == "frequency"
+    assert classified.step_kind == "frequency"
     assert classified.s == s
     assert classified.a == vbar - s * tbar
 
 
 def test_a_phase_step_needs_the_rejects_strictly_within_three_scales() -> None:
     """Give no phase step when the furthest reject is exactly 3 scales from the mean."""
-    assert estimator.classify(buffer(100.0, 100.0, 109.0), 2.0).kind == "frequency"
+    assert estimator.classify(buffer(100.0, 100.0, 109.0), 2.0).step_kind == "frequency"
 
 
 def test_a_frequency_step_needs_the_rejects_strictly_within_three_scales() -> None:
     """Give no step when the furthest reject is exactly 3 scales from the line."""
-    assert estimator.classify(buffer(0.0, 0.0, 18.0), 2.0).kind is None
+    assert estimator.classify(buffer(0.0, 0.0, 18.0), 2.0).step_kind is None
 
 
 def test_acquisition_takes_a_second_difference_at_its_limit() -> None:
@@ -1599,7 +1599,7 @@ def test_a_configuration_change_in_the_filter_step_keeps_the_step_offset() -> No
     last = last_row(step_offset=25)
     prediction = estimator.predict(last, NO_INPUT)
     assert prediction is not None
-    measured = estimator.Measured(z=round_even(prediction.x), rms=3)
+    measured = estimator.FilterInput(z=round_even(prediction.x), rms=3)
     changed = params(M=150.0, M_sigma=60.0)
     row = estimator.filter_step(NEXT, changed, last, prediction, measured).row
     assert (row.segment, row.step_offset) == (5, 25)
@@ -1611,7 +1611,7 @@ def test_an_excluded_measurement_in_the_gate_is_written_x() -> None:
     last = last_row()
     prediction = estimator.predict(last, NO_INPUT)
     assert prediction is not None
-    measured = estimator.Measured(z=round_even(prediction.x), rms=3)
+    measured = estimator.FilterInput(z=round_even(prediction.x), rms=3)
     row = estimator.filter_step(
         NEXT, params(), last, prediction, measured, excluded=True
     ).row
@@ -1638,12 +1638,12 @@ def test_every_filter_error_is_logged_as_raised(
         lambda: estimator._gate(
             no_scale,
             prediction,
-            estimator.Measured(z=0, rms=3),
+            estimator.FilterInput(z=0, rms=3),
             params(),
             excluded=False,
         ),
         lambda: estimator.start_segment(
-            moved_on(last_row()), params(model=2, M=30.0), keep_offset=True
+            moved_on(last_row()), params(filter_states=2, M=30.0), keep_offset=True
         ),
     ]
     for call in calls:

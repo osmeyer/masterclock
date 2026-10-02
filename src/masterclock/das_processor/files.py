@@ -329,12 +329,12 @@ class DdiffRecord(BaseModel):
         return self
 
 
-def _check_measured(measured: bool, row: Row) -> None:
+def _check_measured(has_measurement: bool, row: Row) -> None:
     """Refuse a measurement on a P row, or none on another.
 
     Parameters
     ----------
-    measured : bool
+    has_measurement : bool
         Whether the record has a measurement.
     row : Row
         Its row.
@@ -342,9 +342,9 @@ def _check_measured(measured: bool, row: Row) -> None:
     Raises
     ------
     DataFileError
-        If ``measured`` and the row is P, or neither.
+        If ``has_measurement`` and the row is P, or neither.
     """
-    if measured == ("P" in row.flags):
+    if has_measurement == ("P" in row.flags):
         _fail(
             f"row of {row.interpolated_datetime}: a row has a measurement"
             f" exactly when it is not P; flags {row.flags!r}"
@@ -354,16 +354,16 @@ def _check_measured(measured: bool, row: Row) -> None:
 # ------------------------------------------------------------------ headers
 
 
-def header(kind: FileKind, channel: RfChannel, key: SeriesKey) -> str:
+def header(file_kind: FileKind, channel: RfChannel, series_key: SeriesKey) -> str:
     """Give the header of a series' file (design 5.2, 5.4, 5.5).
 
     Parameters
     ----------
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         The kind of file.
     channel : {'a', 'b'}
         The RF channel.
-    key : (str, str) or (str, str, str)
+    series_key : (str, str) or (str, str, str)
         The pair of a measurement file, the triple of a double-difference
         file.
 
@@ -379,29 +379,31 @@ def header(kind: FileKind, channel: RfChannel, key: SeriesKey) -> str:
     Raises
     ------
     DataFileError
-        If ``key`` is not a pair for a measurement file or a triple for a
+        If ``series_key`` is not a pair for a measurement file or a triple for a
         double-difference file.
     """
-    columns = MEAS_COLUMNS if kind == "meas" else DDIFF_COLUMNS
-    lines = [
-        f"# das_processor {_TITLES[kind]} file, format 1",
+    columns = MEAS_COLUMNS if file_kind == "meas" else DDIFF_COLUMNS
+    header_lines_text = [
+        f"# das_processor {_TITLES[file_kind]} file, format 1",
         _WARNING,
-        f"# RF channel {channel}. {_named(kind, key)}",
-        f"# {_described(kind, key)}",
+        f"# RF channel {channel}. {_named(file_kind, series_key)}",
+        f"# {_described(file_kind, series_key)}",
         f"# One row per 10-minute epoch; '{EMPTY}' marks an empty field.",
         f"# Columns: right-justified, fixed width, separated by '{SEPARATOR}'.",
         *(f"#   {column.name:<24}{column.meaning}" for column in columns),
     ]
-    width = WIDTHS[kind]
-    return "".join(f"{line.ljust(width)}\n" for line in lines)
+    line_width = WIDTHS[file_kind]
+    return "".join(
+        f"{header_line.ljust(line_width)}\n" for header_line in header_lines_text
+    )
 
 
-def _named(kind: FileKind, key: SeriesKey) -> str:
+def _named(file_kind: FileKind, series_key: SeriesKey) -> str:
     """Name a series for the header.
 
     Parameters
     ----------
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         The kind of file.
 
     Returns
@@ -414,20 +416,22 @@ def _named(kind: FileKind, key: SeriesKey) -> str:
     DataFileError
         If the key's length does not fit the kind of file.
     """
-    size, series = (_PAIR, "pair") if kind == "meas" else (_TRIPLE, "triple")
-    if len(key) != size:
-        _fail(f"a {_TITLES[kind]} file is for a {series}: {key}")
-    return f"{series.capitalize()} ({', '.join(key)})."
+    key_length, series_word = (
+        (_PAIR, "pair") if file_kind == "meas" else (_TRIPLE, "triple")
+    )
+    if len(series_key) != key_length:
+        _fail(f"a {_TITLES[file_kind]} file is for a {series_word}: {series_key}")
+    return f"{series_word.capitalize()} ({', '.join(series_key)})."
 
 
-def _described(kind: FileKind, key: SeriesKey) -> str:
+def _described(file_kind: FileKind, series_key: SeriesKey) -> str:
     """Say in words what a series measures.
 
     Parameters
     ----------
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         The kind of file.
-    key : (str, str) or (str, str, str)
+    series_key : (str, str) or (str, str, str)
         The series, of the length the kind needs.
 
     Returns
@@ -437,13 +441,13 @@ def _described(kind: FileKind, key: SeriesKey) -> str:
         a clock; for a triple, the clock against its local reference, or
         against a remote one through its local one.
     """
-    if kind == "meas":
-        a, b = key[0], key[1]
+    if file_kind == "meas":
+        a, b = series_key[0], series_key[1]
         if a == b:
             return f"Reference {a} measured against itself."
-        other = "reference" if re.fullmatch(REFERENCE_PATTERN, b) else "clock"
-        return f"Reference {a} measured against {other} {b}."
-    r, s, c = key[0], key[1], key[-1]
+        b_role = "reference" if re.fullmatch(REFERENCE_PATTERN, b) else "clock"
+        return f"Reference {a} measured against {b_role} {b}."
+    r, s, c = series_key[0], series_key[1], series_key[-1]
     if r == s:
         return f"Clock {c} against its local reference {r}."
     return f"Clock {c} against remote reference {r}, through local reference {s}."
@@ -465,16 +469,16 @@ def _x_text(x_fs: int) -> str:
     str
         The phase, ps, e.g. ``1234574.457`` or ``-0.007``.
     """
-    whole, part = divmod(abs(x_fs), FS_PER_PS)
-    return f"{'-' if x_fs < 0 else ''}{whole}.{part:03d}"
+    whole_ps, fs_digits = divmod(abs(x_fs), FS_PER_PS)
+    return f"{'-' if x_fs < 0 else ''}{whole_ps}.{fs_digits:03d}"
 
 
-def _float_text(value: float | None) -> str | None:
+def _float_text(number: float | None) -> str | None:
     """Write a float column, or nothing.
 
     Parameters
     ----------
-    value : float or None
+    number : float or None
         The value.
 
     Returns
@@ -482,15 +486,15 @@ def _float_text(value: float | None) -> str | None:
     str or None
         ``{:+.16e}``, or ``None`` for an empty field.
     """
-    return None if value is None else f"{value:+.16e}"
+    return None if number is None else f"{number:+.16e}"
 
 
-def _mark_texts(mark: datetime) -> tuple[str, str]:
+def _mark_texts(epoch_start: datetime) -> tuple[str, str]:
     """Write an epoch as its UTC mark and its MJD.
 
     Parameters
     ----------
-    mark : datetime
+    epoch_start : datetime
         The ten-minute mark.
 
     Returns
@@ -498,7 +502,7 @@ def _mark_texts(mark: datetime) -> tuple[str, str]:
     tuple of (str, str)
         The mark and its MJD to six places.
     """
-    return format_epoch(mark, datetime_to_mjd(mark), 0, _MJD_DECIMALS)
+    return format_epoch(epoch_start, datetime_to_mjd(epoch_start), 0, _MJD_DECIMALS)
 
 
 def _state_texts(row: Row) -> list[str | None]:
@@ -514,7 +518,7 @@ def _state_texts(row: Row) -> list[str | None]:
     list of (str or None)
         One text per state column, ``None`` for an empty field.
     """
-    texts: list[str | None] = [
+    state_texts: list[str | None] = [
         None if row.x_fs is None else _x_text(row.x_fs),
         _float_text(row.y),
         _float_text(row.d),
@@ -525,23 +529,26 @@ def _state_texts(row: Row) -> list[str | None]:
         str(row.epochs_since_accept),
         str(row.consecutive_rejects),
     ]
-    for index in range(3):
-        if index < len(row.rejects):
-            when, value = row.rejects[index]
-            texts += [_mark_texts(when)[1], _float_text(value)]
+    for reject_index in range(3):
+        if reject_index < len(row.rejects):
+            reject_epoch, reject_innovation = row.rejects[reject_index]
+            state_texts += [
+                _mark_texts(reject_epoch)[1],
+                _float_text(reject_innovation),
+            ]
         else:
-            texts += [None, None]
-    texts += [
+            state_texts += [None, None]
+    state_texts += [
         str(row.filter_states),
         _float_text(row.time_constant),
         _float_text(row.scale_time_constant),
         row.flags,
     ]
-    return texts
+    return state_texts
 
 
 def _joined(
-    columns: tuple[Column, ...], texts: list[str | None], mark: datetime
+    columns: tuple[Column, ...], column_texts: list[str | None], epoch_start: datetime
 ) -> str:
     """Lay out a row's texts in their columns.
 
@@ -549,9 +556,9 @@ def _joined(
     ----------
     columns : tuple of Column
         The file's columns.
-    texts : list of (str or None)
+    column_texts : list of (str or None)
         One text per column; ``None`` for an empty field.
-    mark : datetime
+    epoch_start : datetime
         The row's epoch, for the message.
 
     Returns
@@ -564,24 +571,24 @@ def _joined(
     DataFileError
         If a value is wider than its column.
     """
-    fields = []
-    for column, text in zip(columns, texts, strict=True):
-        value = EMPTY if text is None else text
-        if len(value) > column.width:
+    padded_fields = []
+    for column, column_text in zip(columns, column_texts, strict=True):
+        field_text = EMPTY if column_text is None else column_text
+        if len(field_text) > column.width:
             _fail(
-                f"row of {mark}: {column.name} {value!r} does not fit"
+                f"row of {epoch_start}: {column.name} {field_text!r} does not fit"
                 f" its {column.width} characters"
             )
-        fields.append(value.rjust(column.width))
-    return SEPARATOR.join(fields)
+        padded_fields.append(field_text.rjust(column.width))
+    return SEPARATOR.join(padded_fields)
 
 
-def format_meas_row(record: MeasRecord) -> str:
+def format_meas_row(meas_record: MeasRecord) -> str:
     """Write a measurement file row (design 5.4).
 
     Parameters
     ----------
-    record : MeasRecord
+    meas_record : MeasRecord
         The pair's measurement and row at an epoch.
 
     Returns
@@ -594,29 +601,33 @@ def format_meas_row(record: MeasRecord) -> str:
     DataFileError
         If a value is wider than its column.
     """
-    row = record.row
-    pair = record.measurement
-    texts: list[str | None] = list(_mark_texts(row.interpolated_datetime))
-    if pair is None:
-        texts += [None] * 6
+    row = meas_record.row
+    pair_measurement = meas_record.measurement
+    column_texts: list[str | None] = list(_mark_texts(row.interpolated_datetime))
+    if pair_measurement is None:
+        column_texts += [None] * 6
     else:
-        texts += [
-            pair.measurement_datetime.isoformat(sep=" ", timespec="microseconds"),
-            f"{pair.measurement_mjd:.{_MJD_DECIMALS}f}",
-            str(pair.measured_phase),
-            str(pair.rms),
-            str(pair.cycle_count),
-            str(pair.z),
+        column_texts += [
+            pair_measurement.measurement_datetime.isoformat(
+                sep=" ", timespec="microseconds"
+            ),
+            f"{pair_measurement.measurement_mjd:.{_MJD_DECIMALS}f}",
+            str(pair_measurement.measured_phase),
+            str(pair_measurement.rms),
+            str(pair_measurement.cycle_count),
+            str(pair_measurement.z),
         ]
-    return _joined(MEAS_COLUMNS, texts + _state_texts(row), row.interpolated_datetime)
+    return _joined(
+        MEAS_COLUMNS, column_texts + _state_texts(row), row.interpolated_datetime
+    )
 
 
-def format_ddiff_row(record: DdiffRecord) -> str:
+def format_ddiff_row(ddiff_record: DdiffRecord) -> str:
     """Write a double-difference file row (design 5.5).
 
     Parameters
     ----------
-    record : DdiffRecord
+    ddiff_record : DdiffRecord
         The triple's measurement and row at an epoch.
 
     Returns
@@ -629,19 +640,21 @@ def format_ddiff_row(record: DdiffRecord) -> str:
     DataFileError
         If a value is wider than its column.
     """
-    row = record.row
-    triple = record.measurement
-    texts: list[str | None] = list(_mark_texts(row.interpolated_datetime))
-    if triple is None:
-        texts += [None, _float_text(row.innovation), None, None]
+    row = ddiff_record.row
+    triple_measurement = ddiff_record.measurement
+    column_texts: list[str | None] = list(_mark_texts(row.interpolated_datetime))
+    if triple_measurement is None:
+        column_texts += [None, _float_text(row.innovation), None, None]
     else:
-        texts += [
-            str(triple.z),
+        column_texts += [
+            str(triple_measurement.z),
             _float_text(row.innovation),
-            _float_text(triple.double_difference_sigma),
-            triple.components_used,
+            _float_text(triple_measurement.double_difference_sigma),
+            triple_measurement.components_used,
         ]
-    return _joined(DDIFF_COLUMNS, texts + _state_texts(row), row.interpolated_datetime)
+    return _joined(
+        DDIFF_COLUMNS, column_texts + _state_texts(row), row.interpolated_datetime
+    )
 
 
 # ---------------------------------------------------------------- parsing
@@ -667,20 +680,20 @@ def _fields(line: str, columns: tuple[Column, ...]) -> list[str | None]:
     ValueError
         If the line does not have one field per column.
     """
-    fields = line.split(SEPARATOR)
-    if len(fields) != len(columns):
-        message = f"{len(fields)} fields, not {len(columns)}"
+    split_fields = line.split(SEPARATOR)
+    if len(split_fields) != len(columns):
+        message = f"{len(split_fields)} fields, not {len(columns)}"
         raise ValueError(message)
-    texts = [field.strip() for field in fields]
-    return [None if text == EMPTY else text for text in texts]
+    field_texts = [split_field.strip() for split_field in split_fields]
+    return [None if field_text == EMPTY else field_text for field_text in field_texts]
 
 
-def _given(text: str | None) -> str:
+def _given(field_text: str | None) -> str:
     """Give a field that must not be empty.
 
     Parameters
     ----------
-    text : str or None
+    field_text : str or None
         The field.
 
     Returns
@@ -693,18 +706,18 @@ def _given(text: str | None) -> str:
     ValueError
         If it is empty.
     """
-    if text is None:
+    if field_text is None:
         message = "a field that is never empty is empty"
         raise ValueError(message)
-    return text
+    return field_text
 
 
-def _x_value(text: str) -> int:
+def _x_value(field_text: str) -> int:
     """Read the estimator's phase, ps with three decimals, as whole fs.
 
     Parameters
     ----------
-    text : str
+    field_text : str
         The field.
 
     Returns
@@ -717,20 +730,20 @@ def _x_value(text: str) -> int:
     ValueError
         If the field is not written as ps with three decimals.
     """
-    if _X_TEXT.fullmatch(text) is None:
-        message = f"phase {text!r} is not ps with three decimals"
+    if _X_TEXT.fullmatch(field_text) is None:
+        message = f"phase {field_text!r} is not ps with three decimals"
         raise ValueError(message)
-    whole, part = text.lstrip("-").split(".")
-    value = int(whole) * FS_PER_PS + int(part)
-    return -value if text.startswith("-") else value
+    whole_ps, fs_digits = field_text.lstrip("-").split(".")
+    magnitude_fs = int(whole_ps) * FS_PER_PS + int(fs_digits)
+    return -magnitude_fs if field_text.startswith("-") else magnitude_fs
 
 
-def _mark_value(text: str) -> datetime:
+def _mark_value(mjd_text: str) -> datetime:
     """Read an MJD column back to the ten-minute mark it was written from.
 
     Parameters
     ----------
-    text : str
+    mjd_text : str
         The field.
 
     Returns
@@ -738,15 +751,15 @@ def _mark_value(text: str) -> datetime:
     datetime
         The nearest mark; formatting it again shows whether it was one.
     """
-    return floor_to_ten_minutes(mjd_to_datetime(float(text)) + _HALF_EPOCH)
+    return floor_to_ten_minutes(mjd_to_datetime(float(mjd_text)) + _HALF_EPOCH)
 
 
-def _float_value(text: str) -> float:
+def _float_value(field_text: str) -> float:
     """Read a float column.
 
     Parameters
     ----------
-    text : str
+    field_text : str
         The field.
 
     Returns
@@ -760,19 +773,19 @@ def _float_value(text: str) -> float:
         If the field is not a number, or not a finite one, which no column
         holds.
     """
-    value = float(text)
-    if not math.isfinite(value):
-        message = f"{text!r} is not a finite number"
+    number = float(field_text)
+    if not math.isfinite(number):
+        message = f"{field_text!r} is not a finite number"
         raise ValueError(message)
-    return value
+    return number
 
 
-def _optional_float(text: str | None) -> float | None:
+def _optional_float(field_text: str | None) -> float | None:
     """Read a float column that may be empty.
 
     Parameters
     ----------
-    text : str or None
+    field_text : str or None
         The field.
 
     Returns
@@ -780,19 +793,21 @@ def _optional_float(text: str | None) -> float | None:
     float or None
         The value, or ``None``.
     """
-    return None if text is None else _float_value(text)
+    return None if field_text is None else _float_value(field_text)
 
 
-def _row(mark: datetime, innovation: float | None, texts: list[str | None]) -> Row:
+def _row(
+    epoch_start: datetime, innovation: float | None, state_texts: list[str | None]
+) -> Row:
     """Build a row from its epoch, its innovation and its state columns.
 
     Parameters
     ----------
-    mark : datetime
+    epoch_start : datetime
         The epoch start.
     innovation : float or None
         The innovation.
-    texts : list of (str or None)
+    state_texts : list of (str or None)
         The state columns' fields.
 
     Returns
@@ -807,41 +822,61 @@ def _row(mark: datetime, innovation: float | None, texts: list[str | None]) -> R
         valid row: a pydantic ValidationError, which is not logged, so a
         file check can read a damaged line quietly.
     """
-    x, y, d, scale, segment, step, in_segment, since, rejected = texts[:9]
+    (
+        x,
+        y,
+        d,
+        innovation_scale,
+        segment,
+        step_offset,
+        epochs_in_segment,
+        epochs_since_accept,
+        consecutive_rejects,
+    ) = state_texts[:9]
     rejects: list[Reject] = []
-    for index in range(3):
-        when, value = texts[9 + 2 * index], texts[10 + 2 * index]
-        if when is not None or value is not None:
-            rejects.append((_mark_value(_given(when)), _float_value(_given(value))))
-    states, time_constant, scale_constant, flags = texts[15:]
+    for reject_index in range(3):
+        reject_mjd_text, reject_innovation_text = (
+            state_texts[9 + 2 * reject_index],
+            state_texts[10 + 2 * reject_index],
+        )
+        if reject_mjd_text is not None or reject_innovation_text is not None:
+            rejects.append(
+                (
+                    _mark_value(_given(reject_mjd_text)),
+                    _float_value(_given(reject_innovation_text)),
+                )
+            )
+    filter_states, time_constant, scale_time_constant, flags = state_texts[15:]
     return Row.model_validate(
         {
-            "interpolated_datetime": mark,
+            "interpolated_datetime": epoch_start,
             "innovation": innovation,
             "x_fs": None if x is None else _x_value(x),
             "y": _optional_float(y),
             "d": _optional_float(d),
-            "innovation_scale": _optional_float(scale),
+            "innovation_scale": _optional_float(innovation_scale),
             "segment": int(_given(segment)),
-            "step_offset": int(_given(step)),
-            "epochs_in_segment": int(_given(in_segment)),
-            "epochs_since_accept": int(_given(since)),
-            "consecutive_rejects": int(_given(rejected)),
+            "step_offset": int(_given(step_offset)),
+            "epochs_in_segment": int(_given(epochs_in_segment)),
+            "epochs_since_accept": int(_given(epochs_since_accept)),
+            "consecutive_rejects": int(_given(consecutive_rejects)),
             "rejects": tuple(rejects),
-            "filter_states": int(_given(states)),
+            "filter_states": int(_given(filter_states)),
             "time_constant": _optional_float(time_constant),
-            "scale_time_constant": _float_value(_given(scale_constant)),
+            "scale_time_constant": _float_value(_given(scale_time_constant)),
             "flags": _given(flags),
         }
     )
 
 
-def _pair_measurement(texts: list[str | None], flags: str) -> PairMeasurement | None:
+def _pair_measurement(
+    measurement_texts: list[str | None], flags: str
+) -> PairMeasurement | None:
     """Build a pair's measurement from its columns.
 
     Parameters
     ----------
-    texts : list of (str or None)
+    measurement_texts : list of (str or None)
         The six measurement columns' fields.
     flags : str
         The row's flags, whose S marks a slip correction.
@@ -857,21 +892,25 @@ def _pair_measurement(texts: list[str | None], flags: str) -> PairMeasurement | 
         If a field is not of its kind, or the fields do not make a
         measurement.
     """
-    if all(text is None for text in texts):
+    if all(field_text is None for field_text in measurement_texts):
         return None
-    _, mjd, phase, rms, cycles, z = (_given(text) for text in texts)
+    _, mjd_text, phase_text, rms_text, cycles_text, z_text = (
+        _given(field_text) for field_text in measurement_texts
+    )
     return PairMeasurement(
-        measurement_mjd=_float_value(mjd),
-        measured_phase=int(phase),
-        rms=int(rms),
-        cycle_count=int(cycles),
-        z=int(z),
+        measurement_mjd=_float_value(mjd_text),
+        measured_phase=int(phase_text),
+        rms=int(rms_text),
+        cycle_count=int(cycles_text),
+        z=int(z_text),
         slip="S" in flags,
     )
 
 
 def _attempt[RecordT: (MeasRecord, DdiffRecord)](
-    line: str, build: Callable[[], RecordT], again: Callable[[RecordT], str]
+    line: str,
+    build_record: Callable[[], RecordT],
+    format_record: Callable[[RecordT], str],
 ) -> tuple[RecordT | None, str, Exception | None]:
     """Build a record from a line, and check it gives the line back.
 
@@ -879,9 +918,9 @@ def _attempt[RecordT: (MeasRecord, DdiffRecord)](
     ----------
     line : str
         The line.
-    build : callable
+    build_record : callable
         Builds the record from the line.
-    again : callable
+    format_record : callable
         Formats a record.
 
     Returns
@@ -891,9 +930,9 @@ def _attempt[RecordT: (MeasRecord, DdiffRecord)](
         error that showed it. Nothing is logged, a record's own check
         included: the caller says what is wrong.
     """
-    token = _QUIET.set(True)
+    quiet_token = _QUIET.set(True)
     try:
-        record = build()
+        parsed_record = build_record()
     except (
         ValueError,
         FilterError,
@@ -902,18 +941,20 @@ def _attempt[RecordT: (MeasRecord, DdiffRecord)](
     ) as exc:
         return None, f"row {line[:25]!r} does not parse: {describe_error(exc)}", exc
     finally:
-        _QUIET.reset(token)
-    if again(record) != line:
+        _QUIET.reset(quiet_token)
+    if format_record(parsed_record) != line:
         return (
             None,
             f"row {line[:25]!r} is not written as das_processor writes it",
             None,
         )
-    return record, "", None
+    return parsed_record, "", None
 
 
 def _parsed[RecordT: (MeasRecord, DdiffRecord)](
-    line: str, build: Callable[[], RecordT], again: Callable[[RecordT], str]
+    line: str,
+    build_record: Callable[[], RecordT],
+    format_record: Callable[[RecordT], str],
 ) -> RecordT:
     """Build a record from a line, and check it gives the line back.
 
@@ -921,9 +962,9 @@ def _parsed[RecordT: (MeasRecord, DdiffRecord)](
     ----------
     line : str
         The line.
-    build : callable
+    build_record : callable
         Builds the record from the line.
-    again : callable
+    format_record : callable
         Formats a record.
 
     Returns
@@ -937,10 +978,12 @@ def _parsed[RecordT: (MeasRecord, DdiffRecord)](
         If the line does not make a record, or the record does not format
         back to exactly the line.
     """
-    record, problem, cause = _attempt(line, build, again)
-    if record is None:
-        _fail(problem, cause)
-    return record
+    parsed_record, parse_problem, parse_error = _attempt(
+        line, build_record, format_record
+    )
+    if parsed_record is None:
+        _fail(parse_problem, parse_error)
+    return parsed_record
 
 
 def _meas_record(line: str) -> MeasRecord:
@@ -956,9 +999,11 @@ def _meas_record(line: str) -> MeasRecord:
     MeasRecord
         The record.
     """
-    texts = _fields(line, MEAS_COLUMNS)
-    row = _row(datetime.fromisoformat(_given(texts[0])), None, texts[8:])
-    return MeasRecord(measurement=_pair_measurement(texts[2:8], row.flags), row=row)
+    field_texts = _fields(line, MEAS_COLUMNS)
+    row = _row(datetime.fromisoformat(_given(field_texts[0])), None, field_texts[8:])
+    return MeasRecord(
+        measurement=_pair_measurement(field_texts[2:8], row.flags), row=row
+    )
 
 
 def _ddiff_record(line: str) -> DdiffRecord:
@@ -974,24 +1019,24 @@ def _ddiff_record(line: str) -> DdiffRecord:
     DdiffRecord
         The record.
     """
-    texts = _fields(line, DDIFF_COLUMNS)
-    z, innovation, sigma, used = texts[2:6]
+    field_texts = _fields(line, DDIFF_COLUMNS)
+    z_text, innovation_text, sigma_text, components_used = field_texts[2:6]
     row = _row(
-        datetime.fromisoformat(_given(texts[0])),
-        _optional_float(innovation),
-        texts[6:],
+        datetime.fromisoformat(_given(field_texts[0])),
+        _optional_float(innovation_text),
+        field_texts[6:],
     )
-    triple = None
-    if z is not None or sigma is not None or used is not None:
-        triple = TripleMeasurement.model_validate(
+    triple_measurement = None
+    if z_text is not None or sigma_text is not None or components_used is not None:
+        triple_measurement = TripleMeasurement.model_validate(
             {
-                "z": int(_given(z)),
-                "double_difference_sigma": _float_value(_given(sigma)),
-                "components_used": _given(used),
-                "cold": False,
+                "z": int(_given(z_text)),
+                "double_difference_sigma": _float_value(_given(sigma_text)),
+                "components_used": _given(components_used),
+                "pair_cold_started": False,
             }
         )
-    return DdiffRecord(measurement=triple, row=row)
+    return DdiffRecord(measurement=triple_measurement, row=row)
 
 
 def parse_meas_row(line: str) -> MeasRecord:
@@ -1043,14 +1088,14 @@ def parse_ddiff_row(line: str) -> DdiffRecord:
 # ------------------------------------------------- file check and last row
 
 
-def _parse_line(text: str, kind: FileKind) -> MeasRecord | DdiffRecord:
+def _parse_line(row_line: str, file_kind: FileKind) -> MeasRecord | DdiffRecord:
     """Read a row of either kind of file.
 
     Parameters
     ----------
-    text : str
+    row_line : str
         The line, without its newline.
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         The kind of file.
 
     Returns
@@ -1063,19 +1108,19 @@ def _parse_line(text: str, kind: FileKind) -> MeasRecord | DdiffRecord:
     DataFileError
         If the line is not a row of that file.
     """
-    if kind == "meas":
-        return parse_meas_row(text)
-    return parse_ddiff_row(text)
+    if file_kind == "meas":
+        return parse_meas_row(row_line)
+    return parse_ddiff_row(row_line)
 
 
-def row_epoch(line: bytes, kind: FileKind) -> datetime | None:
+def row_epoch(slot: bytes, file_kind: FileKind) -> datetime | None:
     """Give the epoch of a good row (design 5.7).
 
     Parameters
     ----------
-    line : bytes
+    slot : bytes
         One line slot of a file, with its newline if it has one.
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         The kind of file.
 
     Returns
@@ -1085,18 +1130,18 @@ def row_epoch(line: bytes, kind: FileKind) -> datetime | None:
         newline, that is ASCII and parses as a row of the file; otherwise
         ``None``. A header line never parses as a row. Nothing is logged.
     """
-    epoch, _ = _examined(line, kind)
+    epoch, _ = _examined(slot, file_kind)
     return epoch
 
 
-def _examined(line: bytes, kind: FileKind) -> tuple[datetime | None, str]:
+def _examined(slot: bytes, file_kind: FileKind) -> tuple[datetime | None, str]:
     """Give a line slot's epoch, or what is wrong with it.
 
     Parameters
     ----------
-    line : bytes
+    slot : bytes
         One line slot of a file.
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         The kind of file.
 
     Returns
@@ -1105,34 +1150,36 @@ def _examined(line: bytes, kind: FileKind) -> tuple[datetime | None, str]:
         The row's epoch and ``""`` for a good row; otherwise ``None`` and
         the reason, in words. Nothing is logged.
     """
-    if not line.endswith(b"\n"):
+    if not slot.endswith(b"\n"):
         return None, "the line is cut short, with no newline"
     try:
-        text = line[:-1].decode("ascii")
+        row_line = slot[:-1].decode("ascii")
     except UnicodeDecodeError:
         return None, "the line is not ASCII text"
-    record: MeasRecord | DdiffRecord | None
-    if kind == "meas":
-        record, problem, _ = _attempt(text, lambda: _meas_record(text), format_meas_row)
-    else:
-        record, problem, _ = _attempt(
-            text, lambda: _ddiff_record(text), format_ddiff_row
+    file_record: MeasRecord | DdiffRecord | None
+    if file_kind == "meas":
+        file_record, damage_reason, _ = _attempt(
+            row_line, lambda: _meas_record(row_line), format_meas_row
         )
-    if record is None:
-        return None, problem
-    return record.row.interpolated_datetime, ""
+    else:
+        file_record, damage_reason, _ = _attempt(
+            row_line, lambda: _ddiff_record(row_line), format_ddiff_row
+        )
+    if file_record is None:
+        return None, damage_reason
+    return file_record.row.interpolated_datetime, ""
 
 
-def _slot(file: BinaryIO, index: int, size: int) -> bytes:
+def _slot(open_file: BinaryIO, slot_index: int, line_size: int) -> bytes:
     """Read one line slot of a file.
 
     Parameters
     ----------
-    file : BinaryIO
+    open_file : BinaryIO
         The open file.
-    index : int
+    slot_index : int
         The slot, from 0 at the first header line.
-    size : int
+    line_size : int
         A line's size, newline included.
 
     Returns
@@ -1140,8 +1187,8 @@ def _slot(file: BinaryIO, index: int, size: int) -> bytes:
     bytes
         The slot's bytes.
     """
-    file.seek(index * size)
-    return file.read(size)
+    open_file.seek(slot_index * line_size)
+    return open_file.read(line_size)
 
 
 class FileCheck(NamedTuple):
@@ -1149,26 +1196,26 @@ class FileCheck(NamedTuple):
 
     Parameters
     ----------
-    through : datetime or None
+    good_through : datetime or None
         The epoch of its last good row; ``None`` when it holds none.
     damaged : bool
         Whether it holds anything but its header and good whole rows.
     """
 
-    through: datetime | None
+    good_through: datetime | None
     damaged: bool
 
 
 def good_through(
-    path: Path, kind: FileKind, *, stopped_write: bool = False
+    data_file: Path, file_kind: FileKind, *, stopped_write: bool = False
 ) -> datetime | None:
     """Give the epoch of a file's last good row (design 5.2, 5.7).
 
     Parameters
     ----------
-    path : Path
+    data_file : Path
         The file.
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         The kind of file.
     stopped_write : bool, optional
         Whether a write stopped part way, as its journal shows (see
@@ -1184,17 +1231,19 @@ def good_through(
     DataFileError
         As :func:`check_file` raises it.
     """
-    return check_file(path, kind, stopped_write=stopped_write).through
+    return check_file(data_file, file_kind, stopped_write=stopped_write).good_through
 
 
-def check_file(path: Path, kind: FileKind, *, stopped_write: bool = False) -> FileCheck:
+def check_file(
+    data_file: Path, file_kind: FileKind, *, stopped_write: bool = False
+) -> FileCheck:
     """Check a file, and say how far it is good (design 5.2, 5.7).
 
     Parameters
     ----------
-    path : Path
+    data_file : Path
         The file.
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         The kind of file.
     stopped_write : bool, optional
         Whether a write stopped part way, as its journal shows; a file it
@@ -1216,47 +1265,57 @@ def check_file(path: Path, kind: FileKind, *, stopped_write: bool = False) -> Fi
         If the file cannot be read, or, unless a write stopped part way,
         its first row is not good, so its rows cannot be placed in time.
     """
-    size, header_lines = WIDTHS[kind] + 1, HEADER_LINES[kind]
+    line_size, header_lines = WIDTHS[file_kind] + 1, HEADER_LINES[file_kind]
     try:
-        with path.open("rb") as file:
-            length = file.seek(0, os.SEEK_END)
-            rows = length // size - header_lines
-            if rows < 1:
-                good, problem = None, "it holds no whole row"
-            elif length % size == 0 and (
-                last := row_epoch(_slot(file, header_lines + rows - 1, size), kind)
+        with data_file.open("rb") as open_file:
+            file_length = open_file.seek(0, os.SEEK_END)
+            row_slots = file_length // line_size - header_lines
+            if row_slots < 1:
+                good_epoch, damage_reason = None, "it holds no whole row"
+            elif file_length % line_size == 0 and (
+                last_epoch := row_epoch(
+                    _slot(open_file, header_lines + row_slots - 1, line_size), file_kind
+                )
             ):
-                return FileCheck(through=last, damaged=False)
+                return FileCheck(good_through=last_epoch, damaged=False)
             else:
-                good, problem = _first_damage(file, rows, header_lines, size, kind)
+                good_epoch, damage_reason = _first_damage(
+                    open_file, row_slots, header_lines, line_size, file_kind
+                )
     except OSError as exc:
-        _fail(f"cannot read data file {path}: {exc}", exc)
-    if good is None and rows >= 1 and not stopped_write:
+        _fail(f"cannot read data file {data_file}: {exc}", exc)
+    if good_epoch is None and row_slots >= 1 and not stopped_write:
         _fail(
-            f"{path} has a damaged first row, so its rows cannot be placed in"
-            f" time: {problem}"
+            f"{data_file} has a damaged first row, so its rows cannot be placed in"
+            f" time: {damage_reason}"
         )
-    where = "from its first row" if good is None else f"after its row of {good}"
-    _log.error("data file %s is damaged %s: %s", path, where, problem)
-    return FileCheck(through=good, damaged=True)
+    damage_place = (
+        "from its first row" if good_epoch is None else f"after its row of {good_epoch}"
+    )
+    _log.error("data file %s is damaged %s: %s", data_file, damage_place, damage_reason)
+    return FileCheck(good_through=good_epoch, damaged=True)
 
 
 def _first_damage(
-    file: BinaryIO, rows: int, header_lines: int, size: int, kind: FileKind
+    open_file: BinaryIO,
+    row_slots: int,
+    header_lines: int,
+    line_size: int,
+    file_kind: FileKind,
 ) -> tuple[datetime | None, str]:
     """Find a damaged file's first line that is not a good row.
 
     Parameters
     ----------
-    file : BinaryIO
+    open_file : BinaryIO
         The file, open.
-    rows : int
+    row_slots : int
         Its whole line slots after the header.
     header_lines : int
         Its header's lines.
-    size : int
+    line_size : int
         Its line width, newline included.
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         Its kind.
 
     Returns
@@ -1266,23 +1325,25 @@ def _first_damage(
         none, and what is wrong: with every whole row good, the last line,
         cut short.
     """
-    good = None
-    for index in range(rows):
-        epoch, problem = _examined(_slot(file, header_lines + index, size), kind)
-        if epoch is None:
-            return good, problem
-        good = epoch
-    return good, "its last line is cut short"
+    good_epoch = None
+    for slot_index in range(row_slots):
+        slot_epoch, damage_reason = _examined(
+            _slot(open_file, header_lines + slot_index, line_size), file_kind
+        )
+        if slot_epoch is None:
+            return good_epoch, damage_reason
+        good_epoch = slot_epoch
+    return good_epoch, "its last line is cut short"
 
 
-def read_last_row(path: Path, kind: FileKind) -> Row:
+def read_last_row(data_file: Path, file_kind: FileKind) -> Row:
     """Read the last row of a sound file (design 5.7).
 
     Parameters
     ----------
-    path : Path
+    data_file : Path
         The file.
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         The kind of file.
 
     Returns
@@ -1296,17 +1357,17 @@ def read_last_row(path: Path, kind: FileKind) -> Row:
         If the file cannot be read, is not sound, or its last row is not a
         row of the file.
     """
-    return read_last_record(path, kind).row
+    return read_last_record(data_file, file_kind).row
 
 
-def read_last_record(path: Path, kind: FileKind) -> MeasRecord | DdiffRecord:
+def read_last_record(data_file: Path, file_kind: FileKind) -> MeasRecord | DdiffRecord:
     """Read the last record of a sound file: its measurement and row.
 
     Parameters
     ----------
-    path : Path
+    data_file : Path
         The file.
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         The kind of file.
 
     Returns
@@ -1320,26 +1381,26 @@ def read_last_record(path: Path, kind: FileKind) -> MeasRecord | DdiffRecord:
         If the file cannot be read, is not sound, or its last row is not a
         row of the file.
     """
-    size, header_lines = WIDTHS[kind] + 1, HEADER_LINES[kind]
+    line_size, header_lines = WIDTHS[file_kind] + 1, HEADER_LINES[file_kind]
     try:
-        with path.open("rb") as file:
-            length = file.seek(0, os.SEEK_END)
-            rows = length // size - header_lines
-            if rows < 1 or length % size != 0:
-                _fail(f"data file {path} is not sound: {length} bytes")
-            line = _slot(file, header_lines + rows - 1, size)
+        with data_file.open("rb") as open_file:
+            file_length = open_file.seek(0, os.SEEK_END)
+            row_slots = file_length // line_size - header_lines
+            if row_slots < 1 or file_length % line_size != 0:
+                _fail(f"data file {data_file} is not sound: {file_length} bytes")
+            last_slot = _slot(open_file, header_lines + row_slots - 1, line_size)
     except OSError as exc:
-        _fail(f"cannot read data file {path}: {exc}", exc)
+        _fail(f"cannot read data file {data_file}: {exc}", exc)
     try:
-        text = line[:-1].decode("ascii")
+        last_line = last_slot[:-1].decode("ascii")
     except UnicodeDecodeError as exc:
-        _fail(f"data file {path} is not sound: its last row is not ASCII", exc)
-    return _parse_line(text, kind)
+        _fail(f"data file {data_file} is not sound: its last row is not ASCII", exc)
+    return _parse_line(last_line, file_kind)
 
 
 # --------------------------------------------------- day buffer and write
 
-_KIND_ORDER: Final[dict[FileKind, int]] = {"meas": 0, "ddiff": 1}
+_FILE_KIND_ORDER: Final[dict[FileKind, int]] = {"meas": 0, "ddiff": 1}
 """The order the kinds of file are written in: measurement files first."""
 
 
@@ -1357,11 +1418,11 @@ class DayBuffer:
 
     Attributes
     ----------
-    texts : dict of Path to str
+    file_texts : dict of Path to str
         Each file's lines since the last write, newlines included.
-    last : dict of series key to Row
+    last_rows : dict of series key to Row
         Each series' newest row, as a later run would read it back.
-    start : datetime or None
+    earliest_epoch : datetime or None
         The earliest epoch of the rows since the last write; ``None`` when
         there are none.
     """
@@ -1379,28 +1440,33 @@ class DayBuffer:
         """
         self.channel: RfChannel = channel
         self.journal = journal
-        self.start: datetime | None = None
-        self.texts: dict[Path, str] = {}
-        self.last: dict[SeriesKey, Row] = {}
-        self._series: dict[Path, tuple[FileKind, SeriesKey]] = {}
+        self.earliest_epoch: datetime | None = None
+        self.file_texts: dict[Path, str] = {}
+        self.last_rows: dict[SeriesKey, Row] = {}
+        self._file_series: dict[Path, tuple[FileKind, SeriesKey]] = {}
 
-    def add(self, path: Path, key: SeriesKey, record: MeasRecord | DdiffRecord) -> None:
+    def add(
+        self,
+        data_file: Path,
+        series_key: SeriesKey,
+        file_record: MeasRecord | DdiffRecord,
+    ) -> None:
         """Add a series' record for an epoch.
 
         Parameters
         ----------
-        path : Path
+        data_file : Path
             The series' file.
-        key : (str, str) or (str, str, str)
+        series_key : (str, str) or (str, str, str)
             The series.
-        record : MeasRecord or DdiffRecord
+        file_record : MeasRecord or DdiffRecord
             Its measurement and row at the epoch.
 
         Raises
         ------
         DataFileError
             If a value does not fit its column, the line does not read back
-            as written, or ``path`` was given another series or kind of
+            as written, or ``data_file`` was given another series or kind of
             file before.
 
         Notes
@@ -1410,60 +1476,73 @@ class DayBuffer:
         file, so the next epoch is the same whether it takes the row from
         here or from the file (I5).
         """
-        kind: FileKind = "meas" if isinstance(record, MeasRecord) else "ddiff"
-        if self._series.setdefault(path, (kind, key)) != (kind, key):
-            _fail(f"{path} holds the {self._series[path]} series, not {(kind, key)}")
-        if isinstance(record, MeasRecord):
-            line = format_meas_row(record)
-            back = parse_meas_row(line).row
+        file_kind: FileKind = "meas" if isinstance(file_record, MeasRecord) else "ddiff"
+        if self._file_series.setdefault(data_file, (file_kind, series_key)) != (
+            file_kind,
+            series_key,
+        ):
+            _fail(
+                f"{data_file} holds the {self._file_series[data_file]} series,"
+                f" not {(file_kind, series_key)}"
+            )
+        if isinstance(file_record, MeasRecord):
+            row_line = format_meas_row(file_record)
+            read_back_row = parse_meas_row(row_line).row
         else:
-            line = format_ddiff_row(record)
-            back = parse_ddiff_row(line).row
-        self.texts[path] = self.texts.get(path, "") + line + "\n"
-        self.last[key] = back
-        self._started(back.interpolated_datetime)
+            row_line = format_ddiff_row(file_record)
+            read_back_row = parse_ddiff_row(row_line).row
+        self.file_texts[data_file] = (
+            self.file_texts.get(data_file, "") + row_line + "\n"
+        )
+        self.last_rows[series_key] = read_back_row
+        self._started(read_back_row.interpolated_datetime)
 
-    def _started(self, mark: datetime | None) -> None:
+    def _started(self, epoch_start: datetime | None) -> None:
         """Note an epoch of a buffered row, keeping the earliest.
 
         Parameters
         ----------
-        mark : datetime or None
+        epoch_start : datetime or None
             The epoch; ``None`` changes nothing.
         """
-        if mark is not None and (self.start is None or mark < self.start):
-            self.start = mark
+        if epoch_start is not None and (
+            self.earliest_epoch is None or epoch_start < self.earliest_epoch
+        ):
+            self.earliest_epoch = epoch_start
 
-    def take(self, other: DayBuffer) -> None:
+    def take(self, newer_buffer: DayBuffer) -> None:
         """Move another buffer's rows into this one, all of them or none.
 
         Parameters
         ----------
-        other : DayBuffer
+        newer_buffer : DayBuffer
             A buffer of rows added after this one's, such as one epoch's.
 
         Raises
         ------
         DataFileError
-            If a path of ``other`` is another series' or kind's in this
+            If a path of ``newer_buffer`` is another series' or kind's in this
             buffer; this buffer is then unchanged.
         """
-        for path in other.texts:
-            series = other.series_of(path)
-            if self._series.get(path, series) != series:
-                _fail(f"{path} holds the {self._series[path]} series, not {series}")
-        for path, text in other.texts.items():
-            self._series[path] = other.series_of(path)
-            self.texts[path] = self.texts.get(path, "") + text
-        self.last.update(other.last)
-        self._started(other.start)
+        for data_file in newer_buffer.file_texts:
+            file_series = newer_buffer.series_of(data_file)
+            if self._file_series.get(data_file, file_series) != file_series:
+                _fail(
+                    f"{data_file} holds the {self._file_series[data_file]} series,"
+                    f" not {file_series}"
+                )
+        for data_file, file_text in newer_buffer.file_texts.items():
+            self._file_series[data_file] = newer_buffer.series_of(data_file)
+            self.file_texts[data_file] = self.file_texts.get(data_file, "") + file_text
+        self.last_rows.update(newer_buffer.last_rows)
+        self._started(newer_buffer.earliest_epoch)
 
-    def series_of(self, path: Path) -> tuple[FileKind, SeriesKey]:
+    def series_of(self, data_file: Path) -> tuple[FileKind, SeriesKey]:
         """Give the kind of file and the series a buffered path is for.
 
         Parameters
         ----------
-        path : Path
+        data_file : Path
             A path the buffer holds text for.
 
         Returns
@@ -1471,15 +1550,15 @@ class DayBuffer:
         tuple of (FileKind, series key)
             Its kind of file and series.
         """
-        return self._series[path]
+        return self._file_series[data_file]
 
 
-def write_buffer(buffer: DayBuffer) -> None:
+def write_buffer(day_buffer: DayBuffer) -> None:
     """Write every file's buffered rows: all of them, or none (design 5.8).
 
     Parameters
     ----------
-    buffer : DayBuffer
+    day_buffer : DayBuffer
         The buffer; its texts are emptied after the write, its newest rows
         kept.
 
@@ -1502,40 +1581,42 @@ def write_buffer(buffer: DayBuffer) -> None:
     write stopped part way, whichever files it reached or created, and
     rolls every file back to before that epoch (see :func:`read_journal`).
     """
-    data = _prepared(buffer)
-    if not data:
+    file_bytes = _prepared(day_buffer)
+    if not file_bytes:
         return
-    if buffer.journal is not None and buffer.start is not None:
-        _write_journal(buffer.journal, buffer.start)
-    order = sorted(data, key=lambda path: _write_order(buffer, path))
+    if day_buffer.journal is not None and day_buffer.earliest_epoch is not None:
+        _write_journal(day_buffer.journal, day_buffer.earliest_epoch)
+    write_order = sorted(
+        file_bytes, key=lambda data_file: _write_order(day_buffer, data_file)
+    )
     new_directories: set[Path] = set()
-    for path in order:
-        is_new = not os.path.lexists(path)
+    for data_file in write_order:
+        is_new = not os.path.lexists(data_file)
         try:
-            with path.open("xb" if is_new else "ab") as file:
-                file.write(data[path])
-                file.flush()
-                os.fsync(file.fileno())
+            with data_file.open("xb" if is_new else "ab") as open_file:
+                open_file.write(file_bytes[data_file])
+                open_file.flush()
+                os.fsync(open_file.fileno())
         except OSError as exc:
-            _fail(f"cannot write data file {path}: {exc}", exc)
+            _fail(f"cannot write data file {data_file}: {exc}", exc)
         if is_new:
-            new_directories.add(path.parent)
-    for directory in sorted(new_directories):
-        _sync_directory(directory)
-    if buffer.journal is not None:
-        _delete(buffer.journal)
-    buffer.texts.clear()
-    buffer.start = None
+            new_directories.add(data_file.parent)
+    for new_directory in sorted(new_directories):
+        _sync_directory(new_directory)
+    if day_buffer.journal is not None:
+        _delete(day_buffer.journal)
+    day_buffer.file_texts.clear()
+    day_buffer.earliest_epoch = None
 
 
-def _write_order(buffer: DayBuffer, path: Path) -> tuple[int, SeriesKey]:
+def _write_order(day_buffer: DayBuffer, data_file: Path) -> tuple[int, SeriesKey]:
     """Give a file's place in the write: measurement files first, by series.
 
     Parameters
     ----------
-    buffer : DayBuffer
+    day_buffer : DayBuffer
         The buffer.
-    path : Path
+    data_file : Path
         A buffered file.
 
     Returns
@@ -1543,16 +1624,16 @@ def _write_order(buffer: DayBuffer, path: Path) -> tuple[int, SeriesKey]:
     tuple of (int, series key)
         Its kind's rank and its series.
     """
-    kind, key = buffer.series_of(path)
-    return _KIND_ORDER[kind], key
+    file_kind, series_key = day_buffer.series_of(data_file)
+    return _FILE_KIND_ORDER[file_kind], series_key
 
 
-def _prepared(buffer: DayBuffer) -> dict[Path, bytes]:
+def _prepared(day_buffer: DayBuffer) -> dict[Path, bytes]:
     """Check every file can be written, and give the bytes to write (design 5.8).
 
     Parameters
     ----------
-    buffer : DayBuffer
+    day_buffer : DayBuffer
         The buffer.
 
     Returns
@@ -1566,35 +1647,35 @@ def _prepared(buffer: DayBuffer) -> dict[Path, bytes]:
     DataFileError
         If any check of the prepare step fails; no file is opened.
     """
-    data: dict[Path, bytes] = {}
-    for path, text in buffer.texts.items():
-        kind, key = buffer.series_of(path)
-        if os.path.lexists(path):
-            _check_existing(path, kind)
-            prefix = ""
+    file_bytes: dict[Path, bytes] = {}
+    for data_file, file_text in day_buffer.file_texts.items():
+        file_kind, series_key = day_buffer.series_of(data_file)
+        if os.path.lexists(data_file):
+            _check_existing(data_file, file_kind)
+            header_text = ""
         else:
-            _check_new(path)
-            prefix = header(kind, buffer.channel, key)
+            _check_new(data_file)
+            header_text = header(file_kind, day_buffer.channel, series_key)
         try:
-            data[path] = (prefix + text).encode("ascii")
+            file_bytes[data_file] = (header_text + file_text).encode("ascii")
         except UnicodeEncodeError as exc:
-            _fail(f"the rows for {path} are not ASCII", exc)
-    if buffer.journal is not None and data:
-        if os.path.lexists(buffer.journal):
-            _fail(f"write journal {buffer.journal} is there: a write is still open")
-        _check_new(buffer.journal)
-    _check_space(data)
-    return data
+            _fail(f"the rows for {data_file} are not ASCII", exc)
+    if day_buffer.journal is not None and file_bytes:
+        if os.path.lexists(day_buffer.journal):
+            _fail(f"write journal {day_buffer.journal} is there: a write is still open")
+        _check_new(day_buffer.journal)
+    _check_space(file_bytes)
+    return file_bytes
 
 
-def _check_existing(path: Path, kind: FileKind) -> None:
+def _check_existing(data_file: Path, file_kind: FileKind) -> None:
     """Refuse an existing file that cannot be appended to soundly.
 
     Parameters
     ----------
-    path : Path
+    data_file : Path
         The file.
-    kind : {'meas', 'ddiff'}
+    file_kind : {'meas', 'ddiff'}
         Its kind.
 
     Raises
@@ -1603,22 +1684,25 @@ def _check_existing(path: Path, kind: FileKind) -> None:
         If it is not a regular file, this process cannot write it, or its
         length is not its header plus whole rows.
     """
-    if path.is_symlink() or not path.is_file():
-        _fail(f"data file {path} is not a regular file")
-    if not os.access(path, os.W_OK):
-        _fail(f"data file {path} cannot be written")
-    size = WIDTHS[kind] + 1
-    length = path.stat().st_size
-    if length % size != 0 or length // size <= HEADER_LINES[kind]:
-        _fail(f"data file {path} is not sound: {length} bytes")
+    if data_file.is_symlink() or not data_file.is_file():
+        _fail(f"data file {data_file} is not a regular file")
+    if not os.access(data_file, os.W_OK):
+        _fail(f"data file {data_file} cannot be written")
+    line_size = WIDTHS[file_kind] + 1
+    file_length = data_file.stat().st_size
+    if (
+        file_length % line_size != 0
+        or file_length // line_size <= HEADER_LINES[file_kind]
+    ):
+        _fail(f"data file {data_file} is not sound: {file_length} bytes")
 
 
-def _check_new(path: Path) -> None:
+def _check_new(new_file: Path) -> None:
     """Refuse a new file whose directory cannot be written into.
 
     Parameters
     ----------
-    path : Path
+    new_file : Path
         The file, which does not exist yet.
 
     Raises
@@ -1626,17 +1710,19 @@ def _check_new(path: Path) -> None:
     DataFileError
         If its directory is not a directory this process can write into.
     """
-    directory = path.parent
-    if not directory.is_dir() or not os.access(directory, os.W_OK | os.X_OK):
-        _fail(f"file {path} cannot be created in {directory}")
+    parent_directory = new_file.parent
+    if not parent_directory.is_dir() or not os.access(
+        parent_directory, os.W_OK | os.X_OK
+    ):
+        _fail(f"file {new_file} cannot be created in {parent_directory}")
 
 
-def _check_space(data: dict[Path, bytes]) -> None:
+def _check_space(file_bytes: dict[Path, bytes]) -> None:
     """Refuse a write the free space does not cover.
 
     Parameters
     ----------
-    data : dict of Path to bytes
+    file_bytes : dict of Path to bytes
         The bytes to write to each file.
 
     Raises
@@ -1644,15 +1730,20 @@ def _check_space(data: dict[Path, bytes]) -> None:
     DataFileError
         If, on any device, the bytes to write are more than its free space.
     """
-    needed: dict[int, tuple[Path, int]] = {}
-    for path, chunk in data.items():
-        device = path.parent.stat().st_dev
-        directory, total = needed.get(device, (path.parent, 0))
-        needed[device] = (directory, total + len(chunk))
-    for directory, total in needed.values():
-        free = shutil.disk_usage(directory).free
-        if total > free:
-            _fail(f"{total} bytes to write in {directory}, only {free} free")
+    bytes_by_device: dict[int, tuple[Path, int]] = {}
+    for data_file, file_chunk in file_bytes.items():
+        device = data_file.parent.stat().st_dev
+        device_directory, byte_total = bytes_by_device.get(
+            device, (data_file.parent, 0)
+        )
+        bytes_by_device[device] = (device_directory, byte_total + len(file_chunk))
+    for device_directory, byte_total in bytes_by_device.values():
+        free_bytes = shutil.disk_usage(device_directory).free
+        if byte_total > free_bytes:
+            _fail(
+                f"{byte_total} bytes to write in {device_directory},"
+                f" only {free_bytes} free"
+            )
 
 
 def _sync_directory(directory: Path) -> None:
@@ -1669,11 +1760,11 @@ def _sync_directory(directory: Path) -> None:
         If the device fails.
     """
     try:
-        handle = os.open(directory, os.O_RDONLY)
+        directory_fd = os.open(directory, os.O_RDONLY)
         try:
-            os.fsync(handle)
+            os.fsync(directory_fd)
         finally:
-            os.close(handle)
+            os.close(directory_fd)
     except OSError as exc:
         _fail(f"cannot flush directory {directory}: {exc}", exc)
 
@@ -1687,68 +1778,79 @@ type Cut = Literal["kept", "cut", "deleted"]
 """What keeping a file's rows through an epoch did to it."""
 
 
-def _keep_through(path: Path, kind: FileKind, through: datetime | None) -> Cut:
+def _keep_through(
+    data_file: Path, file_kind: FileKind, last_kept_epoch: datetime | None
+) -> Cut:
     """Keep a file's rows up to and including an epoch, and remove the rest.
 
     Parameters
     ----------
-    path : Path
-        The file, whose rows up to ``through`` are good.
-    kind : {'meas', 'ddiff'}
+    data_file : Path
+        The file, whose rows up to ``last_kept_epoch`` are good.
+    file_kind : {'meas', 'ddiff'}
         Its kind.
-    through : datetime or None
+    last_kept_epoch : datetime or None
         The last epoch to keep; ``None`` to keep none.
 
     Returns
     -------
     {'kept', 'cut', 'deleted'}
         Whether the file was left as it was, truncated just after its row
-        for ``through``, or deleted because it had no row at or before it.
+        for ``last_kept_epoch``, or deleted because it had no row at or before it.
 
     Raises
     ------
     DataFileError
         If the file cannot be read, changed or deleted, its first row is
-        not good, or the row for ``through`` found by counting one row per
+        not good, or the row for ``last_kept_epoch`` found by counting one row per
         epoch from the first is missing or of another epoch.
     """
-    size, header_lines = WIDTHS[kind] + 1, HEADER_LINES[kind]
+    line_size, header_lines = WIDTHS[file_kind] + 1, HEADER_LINES[file_kind]
     try:
-        with path.open("rb") as file:
-            length = file.seek(0, os.SEEK_END)
-            rows = length // size - header_lines
-            first = (
-                row_epoch(_slot(file, header_lines, size), kind) if rows > 0 else None
+        with data_file.open("rb") as open_file:
+            file_length = open_file.seek(0, os.SEEK_END)
+            row_slots = file_length // line_size - header_lines
+            first_epoch = (
+                row_epoch(_slot(open_file, header_lines, line_size), file_kind)
+                if row_slots > 0
+                else None
             )
-            if through is None or first is None or through < first:
-                keep = 0
+            if (
+                last_kept_epoch is None
+                or first_epoch is None
+                or last_kept_epoch < first_epoch
+            ):
+                kept_rows = 0
             else:
-                keep = (through - first) // _EPOCH + 1
-                if keep > rows:
-                    _fail(f"{path} has no row for {through}")
-                found = row_epoch(_slot(file, header_lines + keep - 1, size), kind)
-                if found != through:
+                kept_rows = (last_kept_epoch - first_epoch) // _EPOCH + 1
+                if kept_rows > row_slots:
+                    _fail(f"{data_file} has no row for {last_kept_epoch}")
+                found_epoch = row_epoch(
+                    _slot(open_file, header_lines + kept_rows - 1, line_size), file_kind
+                )
+                if found_epoch != last_kept_epoch:
                     _fail(
-                        f"{path} does not hold one row per epoch: {found} for {through}"
+                        f"{data_file} does not hold one row per epoch:"
+                        f" {found_epoch} for {last_kept_epoch}"
                     )
     except OSError as exc:
-        _fail(f"cannot read data file {path}: {exc}", exc)
-    if keep == 0:
-        _delete(path)
+        _fail(f"cannot read data file {data_file}: {exc}", exc)
+    if kept_rows == 0:
+        _delete(data_file)
         return "deleted"
-    end = (header_lines + keep) * size
-    if end == length:
+    new_length = (header_lines + kept_rows) * line_size
+    if new_length == file_length:
         return "kept"
-    _truncate(path, end)
+    _truncate(data_file, new_length)
     return "cut"
 
 
-def _delete(path: Path) -> None:
+def _delete(deleted_file: Path) -> None:
     """Delete a file, and flush its directory so the deletion is kept.
 
     Parameters
     ----------
-    path : Path
+    deleted_file : Path
         The file.
 
     Raises
@@ -1757,20 +1859,20 @@ def _delete(path: Path) -> None:
         If the file cannot be deleted or the device fails.
     """
     try:
-        path.unlink()
+        deleted_file.unlink()
     except OSError as exc:
-        _fail(f"cannot delete {path}: {exc}", exc)
-    _sync_directory(path.parent)
+        _fail(f"cannot delete {deleted_file}: {exc}", exc)
+    _sync_directory(deleted_file.parent)
 
 
-def _truncate(path: Path, end: int) -> None:
+def _truncate(data_file: Path, new_length: int) -> None:
     """Cut a data file to a length, and flush it.
 
     Parameters
     ----------
-    path : Path
+    data_file : Path
         The file.
-    end : int
+    new_length : int
         Its new length, bytes.
 
     Raises
@@ -1779,24 +1881,26 @@ def _truncate(path: Path, end: int) -> None:
         If the file cannot be changed or the device fails.
     """
     try:
-        with path.open("r+b") as file:
-            file.truncate(end)
-            file.flush()
-            os.fsync(file.fileno())
+        with data_file.open("r+b") as open_file:
+            open_file.truncate(new_length)
+            open_file.flush()
+            os.fsync(open_file.fileno())
     except OSError as exc:
-        _fail(f"cannot cut data file {path}: {exc}", exc)
+        _fail(f"cannot cut data file {data_file}: {exc}", exc)
 
 
-def roll_back(path: Path, kind: FileKind, common: datetime | None) -> Cut:
+def roll_back(
+    data_file: Path, file_kind: FileKind, common_epoch: datetime | None
+) -> Cut:
     """Roll a file back to the epoch every file holds (design 6.7).
 
     Parameters
     ----------
-    path : Path
-        The file, good through ``common`` or later.
-    kind : {'meas', 'ddiff'}
+    data_file : Path
+        The file, good through ``common_epoch`` or later.
+    file_kind : {'meas', 'ddiff'}
         Its kind.
-    common : datetime or None
+    common_epoch : datetime or None
         L, the oldest epoch any file of the channel is good through;
         ``None`` when no file holds a whole row.
 
@@ -1814,25 +1918,27 @@ def roll_back(path: Path, kind: FileKind, common: datetime | None) -> Cut:
 
     Notes
     -----
-    The file is truncated just after its row for ``common``, which also
+    The file is truncated just after its row for ``common_epoch``, which also
     removes any damaged or torn line after it, or deleted when it has no
-    row at or before ``common``. A file that already ends there is left as
+    row at or before ``common_epoch``. A file that already ends there is left as
     it is.
     """
-    return _keep_through(path, kind, common)
+    return _keep_through(data_file, file_kind, common_epoch)
 
 
 def redo_from(
-    series: Iterable[tuple[Path, FileKind]], mark: datetime, channel: RfChannel
+    data_files: Iterable[tuple[Path, FileKind]],
+    redo_epoch: datetime,
+    channel: RfChannel,
 ) -> None:
     """Delete every row at or after an epoch from every file (design 6.5).
 
     Parameters
     ----------
-    series : iterable of (Path, FileKind)
+    data_files : iterable of (Path, FileKind)
         Every file of the channel, measurement and double-difference, with
         its kind.
-    mark : datetime
+    redo_epoch : datetime
         The epoch to reprocess from.
     channel : {'a', 'b'}
         The RF channel, for the log.
@@ -1845,7 +1951,7 @@ def redo_from(
 
     Notes
     -----
-    Each file is truncated just before its first row at or after ``mark``,
+    Each file is truncated just before its first row at or after ``redo_epoch``,
     and deleted when it has no earlier row. A file is never kept past its
     last good row, so a damaged one is cut there instead, and the roll-back
     that follows (see :func:`roll_back`) brings every file to one epoch.
@@ -1853,19 +1959,27 @@ def redo_from(
     already cut is left as it is. The redo is logged once at INFO, with how
     many files it cut, deleted and left.
     """
-    done: list[Cut] = []
-    for path, kind in series:
-        good = good_through(path, kind)
-        through = mark - _EPOCH if good is None else min(mark - _EPOCH, good)
-        done.append(_keep_through(path, kind, None if good is None else through))
+    cuts: list[Cut] = []
+    for data_file, file_kind in data_files:
+        good_epoch = good_through(data_file, file_kind)
+        last_kept_epoch = (
+            redo_epoch - _EPOCH
+            if good_epoch is None
+            else min(redo_epoch - _EPOCH, good_epoch)
+        )
+        cuts.append(
+            _keep_through(
+                data_file, file_kind, None if good_epoch is None else last_kept_epoch
+            )
+        )
     _log.info(
         "redo of channel %s from %s: %d files cut, %d deleted,"
         " %d with no row at or after it",
         channel,
-        mark,
-        done.count("cut"),
-        done.count("deleted"),
-        done.count("kept"),
+        redo_epoch,
+        cuts.count("cut"),
+        cuts.count("deleted"),
+        cuts.count("kept"),
     )
 
 
@@ -1888,31 +2002,31 @@ def ensure_archives(processed_path: Path) -> None:
     A directory made here is flushed into ``processed_path``, so the files
     written into it later are found after a crash.
     """
-    made = False
-    for name in (MEAS_SUBDIRECTORY, DDIFF_SUBDIRECTORY):
-        directory = processed_path / name
-        if directory.is_dir():
+    made_any = False
+    for subdirectory in (MEAS_SUBDIRECTORY, DDIFF_SUBDIRECTORY):
+        archive = processed_path / subdirectory
+        if archive.is_dir():
             continue
         try:
-            directory.mkdir()
+            archive.mkdir()
         except OSError as exc:
-            _fail(f"cannot make archive {directory}: {exc}", exc)
-        made = True
-    if made:
+            _fail(f"cannot make archive {archive}: {exc}", exc)
+        made_any = True
+    if made_any:
         _sync_directory(processed_path)
 
 
 # ---------------------------------------------------------- the write journal
 
 
-def _write_journal(journal: Path, start: datetime) -> None:
+def _write_journal(journal: Path, first_epoch: datetime) -> None:
     """Write the journal of a write about to start, and flush it.
 
     Parameters
     ----------
     journal : Path
         The journal, which is not there yet.
-    start : datetime
+    first_epoch : datetime
         The first epoch of the rows to write.
 
     Raises
@@ -1921,10 +2035,10 @@ def _write_journal(journal: Path, start: datetime) -> None:
         If the journal cannot be written or the device fails.
     """
     try:
-        with journal.open("xb") as file:
-            file.write(f"{start.isoformat()}\n".encode("ascii"))
-            file.flush()
-            os.fsync(file.fileno())
+        with journal.open("xb") as open_file:
+            open_file.write(f"{first_epoch.isoformat()}\n".encode("ascii"))
+            open_file.flush()
+            os.fsync(open_file.fileno())
     except OSError as exc:
         _fail(f"cannot write journal {journal}: {exc}", exc)
     _sync_directory(journal.parent)
@@ -1953,17 +2067,21 @@ def read_journal(journal: Path) -> datetime | None:
     if not os.path.lexists(journal):
         return None
     try:
-        text = journal.read_bytes()
+        journal_bytes = journal.read_bytes()
     except OSError as exc:
         _fail(f"cannot read journal {journal}: {exc}", exc)
     try:
-        start = datetime.fromisoformat(text.decode("ascii").rstrip("\n"))
+        first_epoch = datetime.fromisoformat(journal_bytes.decode("ascii").rstrip("\n"))
     except (
         UnicodeDecodeError,
         ValueError,
     ):
         return None
-    return start if start.tzinfo is not None and text.endswith(b"\n") else None
+    return (
+        first_epoch
+        if first_epoch.tzinfo is not None and journal_bytes.endswith(b"\n")
+        else None
+    )
 
 
 def clear_journal(journal: Path) -> None:

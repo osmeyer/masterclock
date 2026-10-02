@@ -51,7 +51,7 @@ _SILENT: Final[int] = logging.CRITICAL + 1
 """A logging level above every record's, for a run with logging set to None."""
 
 
-def _settings(argv: Sequence[str] | None) -> tuple[AppConfig, CliOptions] | None:
+def _read_settings(argv: Sequence[str] | None) -> tuple[AppConfig, CliOptions] | None:
     """Read the run's settings: the logging ones first, then the rest.
 
     Parameters
@@ -81,12 +81,12 @@ def _settings(argv: Sequence[str] | None) -> tuple[AppConfig, CliOptions] | None
     alone, and so is any error when the log level is None, since nothing is
     then logged.
     """
-    options = parse_args(argv)
-    silent = _start_logging(options)
-    if silent is None:
+    cli_options = parse_args(argv)
+    logging_silenced = _start_logging(cli_options)
+    if logging_silenced is None:
         return None
     try:
-        config = build_config(options)
+        config = build_config(cli_options)
         check_paths(config)
     except MissingSettingsError as exc:
         _log.error("%s", exc)
@@ -96,18 +96,18 @@ def _settings(argv: Sequence[str] | None) -> tuple[AppConfig, CliOptions] | None
         OSError,
     ) as exc:
         _log.error("%s", exc)
-        if silent:
+        if logging_silenced:
             print(f"das_processor: error: {exc}", file=sys.stderr)
         return None
-    return config, options
+    return config, cli_options
 
 
-def _start_logging(options: CliOptions) -> bool | None:
+def _start_logging(cli_options: CliOptions) -> bool | None:
     """Start logging from the logging settings alone.
 
     Parameters
     ----------
-    options : CliOptions
+    cli_options : CliOptions
         The command line.
 
     Returns
@@ -123,12 +123,14 @@ def _start_logging(options: CliOptions) -> bool | None:
         given by neither source.
     """
     try:
-        settings = build_logging_config(options)
-        level = settings.log_level
+        logging_config = build_logging_config(cli_options)
+        log_level_name = logging_config.log_level
         configure_logging(
-            level=_SILENT if level is None else logging.getLevelNamesMapping()[level],
-            log_file=settings.log_file,
-            backup_count=settings.backup_count,
+            root_level=_SILENT
+            if log_level_name is None
+            else logging.getLevelNamesMapping()[log_level_name],
+            log_file=logging_config.log_file,
+            backup_count=logging_config.backup_count,
         )
     except MissingSettingsError as exc:
         usage_error(str(exc))
@@ -138,7 +140,7 @@ def _start_logging(options: CliOptions) -> bool | None:
     ) as exc:
         print(f"das_processor: error: {exc}", file=sys.stderr)
         return None
-    return level is None
+    return log_level_name is None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -170,10 +172,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     to stop between epochs. A redo, when one is asked for, deletes its rows
     before the run starts, and the run then computes them again.
     """
-    settings = _settings(argv)
-    if settings is None:
+    run_settings = _read_settings(argv)
+    if run_settings is None:
         return FAILURE
-    config, options = settings
+    config, cli_options = run_settings
     try:
         clock_config = read_clock_config(config.processed.clock_config_file)
         lock_name = LOCK_FILE_TEMPLATE.format(rf=config.das.rf)
@@ -181,14 +183,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             RunLock(config.processed.processed_path, lock_name),
             ShutdownHandler() as shutdown,
         ):
-            redo_mjd = options.redo_from_mjd
+            redo_mjd = cli_options.redo_from_mjd
             if redo_mjd is not None:
                 redo_from(
-                    [(path, kind) for path, kind, _ in data_series(config)],
+                    [
+                        (data_file, file_kind)
+                        for data_file, file_kind, _ in data_series(config)
+                    ],
                     floor_to_ten_minutes(mjd_to_datetime(redo_mjd)),
                     config.das.rf,
                 )
-            run_channel(config, clock_config, options.steps, shutdown)
+            run_channel(config, clock_config, cli_options.steps, shutdown)
     except MasterClockError:
         return FAILURE
     return SUCCESS

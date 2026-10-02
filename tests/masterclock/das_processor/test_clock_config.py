@@ -313,7 +313,7 @@ def test_the_rms_limits_need_only_a_default(tmp_path: Path) -> None:
 def test_a_pair_takes_its_second_clock_s_settings(tmp_path: Path) -> None:
     """Give a pair the entry of its clock b and its RMS limit (8.1)."""
     assert load(tmp_path).params_for(("mc2", "nav23"), AT) == SeriesParams(
-        model=3,
+        filter_states=3,
         M=150.0,
         M_sigma=50.0,
         sigma0=5.0,
@@ -326,13 +326,18 @@ def test_a_pair_takes_its_second_clock_s_settings(tmp_path: Path) -> None:
 def test_a_self_or_link_pair_takes_the_reference_s_settings(tmp_path: Path) -> None:
     """Give (r, r) and (r, s) the reference's 1-state entry."""
     params = load(tmp_path).params_for(("mc1", "mc2"), AT)
-    assert (params.model, params.M, params.sigma0, params.rms_max) == (1, None, 3.0, 50)
+    assert (params.filter_states, params.M, params.sigma0, params.rms_max) == (
+        1,
+        None,
+        3.0,
+        50,
+    )
 
 
 def test_a_triple_takes_its_clock_s_settings_and_no_rms_limit(tmp_path: Path) -> None:
     """Give (r, s, c) the entry of c and no RMS limit (8.1, 12.5)."""
     params = load(tmp_path).params_for(("mc1", "mc2", "nav23"), BEFORE)
-    assert (params.model, params.M, params.rms_max) == (3, 100.0, None)
+    assert (params.filter_states, params.M, params.rms_max) == (3, 100.0, None)
 
 
 # ------------------------------------------------------------------ example

@@ -80,7 +80,7 @@ def test_a_self_shift_excludes_the_pairs_that_share_it() -> None:
     """Exclude only the pairs of r that show the self pair's shift (U23)."""
     result = screen(self_epoch(100, 2), ("mc1",))
     assert result.excluded == frozenset({("mc1", "nav1"), ("mc1", "nav2")})
-    assert [event.kind for event in result.events] == ["self_fail"]
+    assert [event.finding for event in result.events] == ["self_fail"]
     assert result.events[0].references == ("mc1",)
     assert result.events[0].excluded == (("mc1", "nav1"), ("mc1", "nav2"))
 
@@ -89,7 +89,7 @@ def test_a_self_shift_alone_excludes_nothing() -> None:
     """Exclude nothing when no pair of r shares the shift, with an event (U23)."""
     result = screen(self_epoch(100, 0), ("mc1",))
     assert result.excluded == frozenset()
-    assert [(event.kind, event.excluded) for event in result.events] == [
+    assert [(event.finding, event.excluded) for event in result.events] == [
         ("self_fail", ())
     ]
 
@@ -101,7 +101,7 @@ def test_a_missing_self_measurement_excludes_nothing_with_an_event() -> None:
     scales = {**ones(innovations), ("mc1", "mc1"): 1.0}
     result = screen(innovations, ("mc1",), scales)
     assert result.excluded == frozenset()
-    assert [(event.kind, event.references) for event in result.events] == [
+    assert [(event.finding, event.references) for event in result.events] == [
         ("self_missing", ("mc1",))
     ]
 
@@ -152,7 +152,7 @@ def test_a_delay_on_one_direction_excludes_that_direction() -> None:
     innovations[("mc1", "mc2")] += 100
     result = screen(innovations, REFS)
     assert result.excluded == frozenset({("mc1", "mc2")})
-    assert [(e.kind, e.references, e.excluded) for e in result.events] == [
+    assert [(e.finding, e.references, e.excluded) for e in result.events] == [
         ("reciprocity_fail", ("mc1", "mc2"), (("mc1", "mc2"),))
     ]
 
@@ -242,7 +242,7 @@ def test_an_error_in_one_link_excludes_only_that_link() -> None:
     """Exclude the one link in both failing triangles of four references (U16)."""
     result = screen(links(REFS, {("mc1", "mc2"): 100}), REFS)
     assert result.excluded == frozenset({("mc1", "mc2"), ("mc2", "mc1")})
-    assert [(e.kind, e.references) for e in result.events] == [
+    assert [(e.finding, e.references) for e in result.events] == [
         ("closure_fail", ("mc1", "mc2"))
     ]
 
@@ -281,7 +281,7 @@ def test_closure_skips_links_an_earlier_test_excluded() -> None:
     innovations[("mc1", "mc2")] += 100
     result = screen(innovations, refs)
     assert result.excluded == frozenset({("mc1", "mc2")})
-    assert [e.kind for e in result.events] == ["reciprocity_fail"]
+    assert [e.finding for e in result.events] == ["reciprocity_fail"]
 
 
 # -------------------------------------------------------------------- general
@@ -316,7 +316,7 @@ def test_an_event_names_a_known_kind() -> None:
     """Refuse an event of a kind screening does not give."""
     with pytest.raises(ValidationError):
         screening.ScreeningEvent.model_validate(
-            {"kind": "other", "references": ("mc1",), "excluded": ()}
+            {"finding": "other", "references": ("mc1",), "excluded": ()}
         )
 
 
@@ -377,7 +377,7 @@ def test_the_bad_direction_is_judged_on_the_estimate_and_both_scales() -> None:
     innovations[("mc2", "mc1")] = Fraction(47, 2)
     result = screen(innovations, THREE)
     assert result.excluded == frozenset({("mc1", "mc2")})
-    assert [event.kind for event in result.events] == ["reciprocity_fail"]
+    assert [event.finding for event in result.events] == ["reciprocity_fail"]
 
 
 def test_a_triangle_exactly_at_the_closure_limit_passes() -> None:

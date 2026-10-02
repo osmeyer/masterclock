@@ -65,12 +65,12 @@ type DataMjd = Annotated[float, Field(ge=FIRST_DAY, lt=LAST_DAY + 1)]
 """An MJD on a day a data file can cover."""
 
 
-def data_mjd(text: str) -> float:
+def data_mjd(cli_token: str) -> float:
     """Convert a command-line token to an MJD on a day a data file can cover.
 
     Parameters
     ----------
-    text : str
+    cli_token : str
         The raw command-line token.
 
     Returns
@@ -81,15 +81,15 @@ def data_mjd(text: str) -> float:
     Raises
     ------
     argparse.ArgumentTypeError
-        If ``text`` is not a finite number above zero, or is before day
+        If ``cli_token`` is not a finite number above zero, or is before day
         :data:`~masterclock.das_processor.read_cd5m5m.FIRST_DAY` or after
         day :data:`~masterclock.das_processor.read_cd5m5m.LAST_DAY`.
     """
-    value = positive_mjd(text)
-    if not FIRST_DAY <= value < LAST_DAY + 1:
-        message = f"MJD must be on a day from {FIRST_DAY} to {LAST_DAY}: {text!r}"
+    parsed_mjd = positive_mjd(cli_token)
+    if not FIRST_DAY <= parsed_mjd < LAST_DAY + 1:
+        message = f"MJD must be on a day from {FIRST_DAY} to {LAST_DAY}: {cli_token!r}"
         raise argparse.ArgumentTypeError(message)
-    return value
+    return parsed_mjd
 
 
 class CliOptions(BaseModel):

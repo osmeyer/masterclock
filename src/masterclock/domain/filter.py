@@ -28,7 +28,7 @@ and three in a row are looked at for a step (:func:`classify`): agreeing,
 they are a phase step; on a line, a frequency step (:func:`accept_step`).
 
 :func:`filter_step` puts it all together for one series at one epoch: it
-takes the series' measurement as plain values (:class:`Measured`) and
+takes the series' measurement as plain values (:class:`FilterInput`) and
 gives its row and whether it cold-started (:class:`StepResult`).
 """
 
@@ -70,12 +70,12 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 
-def gains(model: int, M: float | None) -> tuple[float, float, float]:
+def gains(filter_states: int, M: float | None) -> tuple[float, float, float]:
     """Give the fixed gains of a model with time constant M.
 
     Parameters
     ----------
-    model : int
+    filter_states : int
         How many states the estimator has: 1, 2 or 3.
     M : float or None
         The time constant, epochs, at least 1; ``None`` for one state.
@@ -91,7 +91,7 @@ def gains(model: int, M: float | None) -> tuple[float, float, float]:
     Raises
     ------
     FilterError
-        If ``model`` is not 1, 2 or 3, or ``M`` is given for one state or is
+        If ``filter_states`` is not 1, 2 or 3, or ``M`` is given for one state or is
         not at least 1 for two or three.
 
     Examples
@@ -102,14 +102,14 @@ def gains(model: int, M: float | None) -> tuple[float, float, float]:
     >>> round(g, 6), drift
     (0.181269, 0.0)
     """
-    if model == 1 and M is None:
+    if filter_states == 1 and M is None:
         return (1.0, 0.0, 0.0)
-    if model not in {2, 3} or M is None or not M >= 1:
-        message = f"no gains for a {model}-state model with time constant {M}"
+    if filter_states not in {2, 3} or M is None or not M >= 1:
+        message = f"no gains for a {filter_states}-state model with time constant {M}"
         _log.error(message)
         raise FilterError(message)
     lam = math.exp(-1.0 / M)
-    if model == 3:
+    if filter_states == 3:
         return (
             1 - lam**3,
             1.5 * (1 - lam) ** 2 * (1 + lam) / _T,
@@ -118,12 +118,12 @@ def gains(model: int, M: float | None) -> tuple[float, float, float]:
     return (1 - lam**2, (1 - lam) ** 2 / _T, 0.0)
 
 
-def predict(last: Row | None, u: tuple[Fraction, float]) -> State | None:
+def predict(last_row: Row | None, u: tuple[Fraction, float]) -> State | None:
     """Predict a series' state at the next epoch from its last row.
 
     Parameters
     ----------
-    last : Row or None
+    last_row : Row or None
         The series' last row, or ``None`` for a series with none.
     u : tuple of (Fraction, float)
         The steering input over the epoch: u_x, exact, and u_y.
@@ -136,14 +136,14 @@ def predict(last: Row | None, u: tuple[Fraction, float]) -> State | None:
         phase and has no rate; a 2-state row has no drift. ``None`` when
         there is no last row, or it is dormant.
     """
-    if last is None or "D" in last.flags:
+    if last_row is None or "D" in last_row.flags:
         return None
-    x_fs, y, d = last.known_state()
+    x_fs, y, d = last_row.known_state()
     x = from_fs(x_fs)
     ux, uy = u
-    if last.filter_states == 1:
+    if last_row.filter_states == 1:
         return State(x=x + ux, y=0.0)
-    if last.filter_states == 3:
+    if last_row.filter_states == 3:
         return State(
             x=x + exact(y) * _T + exact(d) * _T * _T / 2 + ux,
             y=y + d * _T + uy,
@@ -153,7 +153,7 @@ def predict(last: Row | None, u: tuple[Fraction, float]) -> State | None:
 
 
 def update(
-    prediction: State, innovation: Fraction, model: int, M: float | None
+    prediction: State, innovation: Fraction, filter_states: int, M: float | None
 ) -> State:
     """Correct a prediction by the gains times the innovation.
 
@@ -163,7 +163,7 @@ def update(
         The predicted state at the epoch.
     innovation : Fraction
         The measurement less the predicted phase, exact.
-    model : int
+    filter_states : int
         How many states the estimator has.
     M : float or None
         The time constant; ``None`` for one state.
@@ -177,14 +177,14 @@ def update(
     Raises
     ------
     FilterError
-        If ``model`` and ``M`` do not belong together (see :func:`gains`).
+        If ``filter_states`` and ``M`` do not belong together (see :func:`gains`).
     """
-    g, h_over_t, two_k_over_t2 = gains(model, M)
+    g, h_over_t, two_k_over_t2 = gains(filter_states, M)
     nu = float(innovation)
     return State(
         x=prediction.x + exact(g) * innovation,
         y=prediction.y + h_over_t * nu,
-        d=prediction.d + two_k_over_t2 * nu if model == 3 else 0.0,
+        d=prediction.d + two_k_over_t2 * nu if filter_states == 3 else 0.0,
     )
 
 
@@ -230,17 +230,21 @@ class RowDraft:
 
 
 def carry(
-    mark: datetime, last: Row | None, params: SeriesParams, *, slip: bool = False
+    epoch_start: datetime,
+    last_row: Row | None,
+    series_params: SeriesParams,
+    *,
+    slip: bool = False,
 ) -> RowDraft:
     """Start an epoch's row from the series' last row.
 
     Parameters
     ----------
-    mark : datetime
+    epoch_start : datetime
         The epoch start E.
-    last : Row or None
+    last_row : Row or None
         The series' last row, or ``None`` for a new series.
-    params : SeriesParams
+    series_params : SeriesParams
         The series' settings at E; used only for a new series.
     slip : bool, optional
         Whether the slip check corrected this epoch's measurement; the row
@@ -250,15 +254,15 @@ def carry(
     -------
     RowDraft
         For a new series: dormant, with no state, in segment 0, every
-        counter 0, the model and time constants of ``params``. Otherwise
-        the last row moved on to ``mark``, with no innovation, one more
+        counter 0, the model and time constants of ``series_params``. Otherwise
+        the last row moved on to ``epoch_start``, with no innovation, one more
         epoch in its segment and no flags. S when ``slip``.
 
     Examples
     --------
     >>> from datetime import UTC, datetime
     >>> settings = SeriesParams(
-    ...     model=1, M=None, M_sigma=50.0, sigma0=5.0, gmax=432, n_break=36,
+    ...     filter_states=1, M=None, M_sigma=50.0, sigma0=5.0, gmax=432, n_break=36,
     ...     rms_max=80,
     ... )
     >>> draft = carry(datetime(2025, 9, 23, 6, 0, tzinfo=UTC), None, settings)
@@ -266,9 +270,9 @@ def carry(
     (0, None, '')
     """
     flags = "S" if slip else ""
-    if last is None:
+    if last_row is None:
         return RowDraft(
-            interpolated_datetime=mark,
+            interpolated_datetime=epoch_start,
             innovation=None,
             x_fs=None,
             y=None,
@@ -280,24 +284,24 @@ def carry(
             epochs_since_accept=0,
             consecutive_rejects=0,
             rejects=(),
-            filter_states=params.model,
-            time_constant=params.M,
-            scale_time_constant=params.M_sigma,
+            filter_states=series_params.filter_states,
+            time_constant=series_params.M,
+            scale_time_constant=series_params.M_sigma,
             flags=flags,
         )
     return RowDraft(
         **{
-            **dict(last),
-            "interpolated_datetime": mark,
+            **dict(last_row),
+            "interpolated_datetime": epoch_start,
             "innovation": None,
-            "epochs_in_segment": last.epochs_in_segment + 1,
+            "epochs_in_segment": last_row.epochs_in_segment + 1,
             "flags": flags,
         }
     )
 
 
 def start_segment(
-    draft: RowDraft, params: SeriesParams, *, keep_offset: bool
+    draft: RowDraft, series_params: SeriesParams, *, keep_offset: bool
 ) -> RowDraft:
     """Begin a new segment on a draft.
 
@@ -305,7 +309,7 @@ def start_segment(
     ----------
     draft : RowDraft
         The row as built so far.
-    params : SeriesParams
+    series_params : SeriesParams
         The settings in force at the epoch, whose M and M_sigma the segment
         takes.
     keep_offset : bool
@@ -316,18 +320,18 @@ def start_segment(
     -------
     RowDraft
         The segment number one more, no rows in it yet, the time constants
-        of ``params``, and N among the flags. The state is not touched.
+        of ``series_params``, and N among the flags. The state is not touched.
 
     Raises
     ------
     FilterError
-        If ``params`` is for another model than the series': a series keeps
+        If ``series_params`` is for another model than the series': a series keeps
         its model for the life of its file.
     """
-    if params.model != draft.filter_states:
+    if series_params.filter_states != draft.filter_states:
         message = (
             f"a {draft.filter_states}-state series keeps its model;"
-            f" its settings name model {params.model}"
+            f" its settings name model {series_params.filter_states}"
         )
         _log.error(message)
         raise FilterError(message)
@@ -336,20 +340,20 @@ def start_segment(
         segment=draft.segment + 1,
         epochs_in_segment=0,
         step_offset=draft.step_offset if keep_offset else 0,
-        time_constant=params.M,
-        scale_time_constant=params.M_sigma,
+        time_constant=series_params.M,
+        scale_time_constant=series_params.M_sigma,
         flags=draft.flags + "N",
     )
 
 
-def finish(draft: RowDraft, flag: Outcome) -> Row:
+def finish(draft: RowDraft, outcome: Outcome) -> Row:
     """Add the epoch's outcome to a draft and check it into a row.
 
     Parameters
     ----------
     draft : RowDraft
         The row as built so far.
-    flag : {'A', 'R', 'X', 'P'}
+    outcome : {'A', 'R', 'X', 'P'}
         The outcome.
 
     Returns
@@ -365,26 +369,29 @@ def finish(draft: RowDraft, flag: Outcome) -> Row:
     FilterError
         If the finished row breaks a rule of :class:`Row`.
     """
-    flags = draft.flags + flag
+    flags = draft.flags + outcome
     if (
         "D" not in flags
         and draft.time_constant is not None
         and draft.epochs_in_segment < SETTLE_FACTOR * draft.time_constant
     ):
         flags += "U"
-    ordered = "".join(letter for letter in FLAG_ORDER if letter in flags)
-    values = {field.name: getattr(draft, field.name) for field in fields(draft)}
-    return build_row({**values, "flags": ordered})
+    ordered_flags = "".join(letter for letter in FLAG_ORDER if letter in flags)
+    draft_fields = {
+        draft_field.name: getattr(draft, draft_field.name)
+        for draft_field in fields(draft)
+    }
+    return build_row({**draft_fields, "flags": ordered_flags})
 
 
-def dormant(draft: RowDraft, flag: Held, *, keep_buffer: bool = False) -> Row:
+def dormant(draft: RowDraft, outcome: Held, *, keep_buffer: bool = False) -> Row:
     """Finish a draft as a dormant row: one with no valid state.
 
     Parameters
     ----------
     draft : RowDraft
         The row as built so far.
-    flag : {'R', 'X', 'P'}
+    outcome : {'R', 'X', 'P'}
         The outcome: a measurement buffered or rejected, or none.
     keep_buffer : bool, optional
         Whether the buffer stays: it does while a dormant series gathers
@@ -394,7 +401,7 @@ def dormant(draft: RowDraft, flag: Held, *, keep_buffer: bool = False) -> Row:
     -------
     Row
         The row with no phase, rate, drift or innovation scale, flag D
-        beside ``flag``, and segment and step offset as they were.
+        beside ``outcome``, and segment and step offset as they were.
 
     Raises
     ------
@@ -411,12 +418,15 @@ def dormant(draft: RowDraft, flag: Held, *, keep_buffer: bool = False) -> Row:
             rejects=draft.rejects if keep_buffer else (),
             flags=draft.flags + "D",
         ),
-        flag,
+        outcome,
     )
 
 
 def hold(
-    draft: RowDraft, prediction: State | None, flag: Held, params: SeriesParams
+    draft: RowDraft,
+    prediction: State | None,
+    outcome: Held,
+    series_params: SeriesParams,
 ) -> Row:
     """Finish a draft as a held row: no update, the prediction carried.
 
@@ -427,10 +437,10 @@ def hold(
         measurement.
     prediction : State or None
         The series' prediction at the epoch, or ``None`` when it has none.
-    flag : {'R', 'X', 'P'}
+    outcome : {'R', 'X', 'P'}
         Why the state is not updated: a counted reject, an excluded
         measurement, or no measurement.
-    params : SeriesParams
+    series_params : SeriesParams
         The settings in force, whose ``gmax`` is the gap limit.
 
     Returns
@@ -450,16 +460,16 @@ def hold(
     draft = dataclasses.replace(
         draft, epochs_since_accept=draft.epochs_since_accept + 1
     )
-    if prediction is None or draft.epochs_since_accept > params.gmax:
-        return dormant(draft, flag)
-    held = dataclasses.replace(
+    if prediction is None or draft.epochs_since_accept > series_params.gmax:
+        return dormant(draft, outcome)
+    held_draft = dataclasses.replace(
         draft, x_fs=to_fs(prediction.x), y=prediction.y, d=prediction.d
     )
-    return finish(held, flag)
+    return finish(held_draft, outcome)
 
 
 def accept(
-    draft: RowDraft, prediction: State, innovation: Fraction, floor: float
+    draft: RowDraft, prediction: State, innovation: Fraction, scale_floor: float
 ) -> Row:
     """Finish a draft as an accepted row: the prediction updated.
 
@@ -471,7 +481,7 @@ def accept(
         The series' prediction at the epoch.
     innovation : Fraction
         The measurement less the predicted phase, exact.
-    floor : float
+    scale_floor : float
         The lowest the innovation scale may go, ps: the measurement's own
         rms for a pair, sigma_dd for a triple.
 
@@ -494,25 +504,29 @@ def accept(
         message = f"an accept at {draft.interpolated_datetime} has no innovation scale"
         _log.error(message)
         raise FilterError(message)
-    state = update(prediction, innovation, draft.filter_states, draft.time_constant)
+    updated_state = update(
+        prediction, innovation, draft.filter_states, draft.time_constant
+    )
     nu = float(innovation)
     w = 1.0 / draft.scale_time_constant
-    scale = math.sqrt(max((1 - w) * draft.innovation_scale**2 + w * nu**2, floor**2))
-    accepted = dataclasses.replace(
+    new_scale = math.sqrt(
+        max((1 - w) * draft.innovation_scale**2 + w * nu**2, scale_floor**2)
+    )
+    accepted_draft = dataclasses.replace(
         draft,
         innovation=nu,
-        x_fs=to_fs(state.x),
-        y=state.y,
-        d=state.d,
-        innovation_scale=scale,
+        x_fs=to_fs(updated_state.x),
+        y=updated_state.y,
+        d=updated_state.d,
+        innovation_scale=new_scale,
         consecutive_rejects=0,
         rejects=(),
         epochs_since_accept=0,
     )
-    return finish(accepted, "A")
+    return finish(accepted_draft, "A")
 
 
-def cold_start(draft: RowDraft, z: int, params: SeriesParams) -> Row:
+def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     """Finish a draft as a cold start: a new segment from the measurement alone.
 
     Parameters
@@ -521,7 +535,7 @@ def cold_start(draft: RowDraft, z: int, params: SeriesParams) -> Row:
         The row as built so far, of a dormant series.
     z : int
         The measurement at the epoch, ps.
-    params : SeriesParams
+    series_params : SeriesParams
         The settings in force, whose time constants and ``sigma0`` the new
         segment takes.
 
@@ -535,17 +549,17 @@ def cold_start(draft: RowDraft, z: int, params: SeriesParams) -> Row:
     Raises
     ------
     FilterError
-        If ``params`` is for another model than the series', or the
+        If ``series_params`` is for another model than the series', or the
         finished row breaks a rule of :class:`Row`.
     """
-    started = start_segment(draft, params, keep_offset=False)
+    started_draft = start_segment(draft, series_params, keep_offset=False)
     return finish(
         dataclasses.replace(
-            started,
+            started_draft,
             x_fs=to_fs(z),
             y=0.0,
             d=0.0,
-            innovation_scale=params.sigma0,
+            innovation_scale=series_params.sigma0,
             consecutive_rejects=0,
             rejects=(),
             epochs_since_accept=0,
@@ -571,7 +585,7 @@ class Classified(BaseModel):
 
     Parameters
     ----------
-    kind : {'phase', 'frequency'} or None
+    step_kind : {'phase', 'frequency'} or None
         The kind of step; ``None`` when the rejects show neither.
     a : float or None, optional
         For a frequency step, the fitted line's value at the first reject,
@@ -583,7 +597,7 @@ class Classified(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    kind: Literal["phase", "frequency"] | None
+    step_kind: Literal["phase", "frequency"] | None
     a: float | None = None
     s: float | None = None
 
@@ -618,39 +632,39 @@ def classify(rejects: tuple[Reject, ...], sigma: float) -> Classified:
     >>> from datetime import UTC, datetime, timedelta
     >>> start = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
     >>> epochs = [start + timedelta(minutes=10 * i) for i in range(3)]
-    >>> classify(tuple(zip(epochs, (150.0, 151.0, 149.0))), 3.0).kind
+    >>> classify(tuple(zip(epochs, (150.0, 151.0, 149.0))), 3.0).step_kind
     'phase'
-    >>> classify(tuple(zip(epochs, (30.0, 60.0, 90.0))), 3.0).kind
+    >>> classify(tuple(zip(epochs, (30.0, 60.0, 90.0))), 3.0).step_kind
     'frequency'
     """
     if len(rejects) != _STEP_REJECTS:
         message = f"a step is looked for in three rejects, not {len(rejects)}"
         _log.error(message)
         raise FilterError(message)
-    first = rejects[0][0]
-    ts = [float(seconds(when, first)) for when, _ in rejects]
-    vs = [value for _, value in rejects]
+    first_epoch = rejects[0][0]
+    ts = [float(seconds(reject_epoch, first_epoch)) for reject_epoch, _ in rejects]
+    vs = [reject_innovation for _, reject_innovation in rejects]
     vbar = sum(vs) / _STEP_REJECTS
     if max(abs(v - vbar) for v in vs) < K_STEP * sigma:
-        return Classified(kind="phase")
+        return Classified(step_kind="phase")
     tbar = sum(ts) / _STEP_REJECTS
     s = sum((t - tbar) * (v - vbar) for t, v in zip(ts, vs, strict=True)) / sum(
         (t - tbar) ** 2 for t in ts
     )
     a = vbar - s * tbar
     if max(abs(v - a - s * t) for t, v in zip(ts, vs, strict=True)) < K_STEP * sigma:
-        return Classified(kind="frequency", a=a, s=s)
-    return Classified(kind=None)
+        return Classified(step_kind="frequency", a=a, s=s)
+    return Classified(step_kind=None)
 
 
-def within_gate(innovation: Fraction, scale: float) -> bool:
+def within_gate(innovation: Fraction, innovation_scale: float) -> bool:
     """Tell whether an innovation passes the gate's width (design 9.1).
 
     Parameters
     ----------
     innovation : Fraction
         The measurement less the predicted phase, exact.
-    scale : float
+    innovation_scale : float
         The innovation scale, ps.
 
     Returns
@@ -664,7 +678,7 @@ def within_gate(innovation: Fraction, scale: float) -> bool:
     >>> within_gate(Fraction(15), 3.0), within_gate(Fraction(-31, 2), 3.0)
     (True, False)
     """
-    return abs(innovation) <= exact(K_OUT * scale)
+    return abs(innovation) <= exact(K_OUT * innovation_scale)
 
 
 def rms_ok(rms: int, rms_max: int | None) -> bool:
@@ -707,15 +721,15 @@ def count_reject(draft: RowDraft, innovation: Fraction) -> RowDraft:
         buffer, which keeps the newest
         :data:`~masterclock.domain.series.MAX_REJECTS`.
     """
-    entry = (draft.interpolated_datetime, float(innovation))
+    reject_entry = (draft.interpolated_datetime, float(innovation))
     return dataclasses.replace(
         draft,
         consecutive_rejects=draft.consecutive_rejects + 1,
-        rejects=(*draft.rejects, entry)[-MAX_REJECTS:],
+        rejects=(*draft.rejects, reject_entry)[-MAX_REJECTS:],
     )
 
 
-def phase_step(draft: RowDraft, prediction: State, z: int, floor: float) -> Row:
+def phase_step(draft: RowDraft, prediction: State, z: int, scale_floor: float) -> Row:
     """Accept a measurement after a phase step the rejects agree on (design 9.4).
 
     Parameters
@@ -726,7 +740,7 @@ def phase_step(draft: RowDraft, prediction: State, z: int, floor: float) -> Row:
         The series' prediction at the epoch.
     z : int
         The current measurement, ps.
-    floor : float
+    scale_floor : float
         The lowest the innovation scale may go, ps (see :func:`accept`).
 
     Returns
@@ -742,11 +756,18 @@ def phase_step(draft: RowDraft, prediction: State, z: int, floor: float) -> Row:
     FilterError
         If the finished row breaks a rule of :class:`Row`.
     """
-    total = sum((exact(value) for _, value in draft.rejects), Fraction(0))
-    step = round_even(total / _STEP_REJECTS)
-    corrected = State(x=prediction.x + step, y=prediction.y, d=prediction.d)
-    stepped = dataclasses.replace(draft, step_offset=draft.step_offset + step)
-    return accept(stepped, corrected, z - corrected.x, floor)
+    innovation_sum = sum(
+        (exact(reject_innovation) for _, reject_innovation in draft.rejects),
+        Fraction(0),
+    )
+    step_ps = round_even(innovation_sum / _STEP_REJECTS)
+    corrected_prediction = State(
+        x=prediction.x + step_ps, y=prediction.y, d=prediction.d
+    )
+    stepped_draft = dataclasses.replace(draft, step_offset=draft.step_offset + step_ps)
+    return accept(
+        stepped_draft, corrected_prediction, z - corrected_prediction.x, scale_floor
+    )
 
 
 def frequency_step(
@@ -755,8 +776,8 @@ def frequency_step(
     a: float,
     s: float,
     z: int,
-    floor: float,
-    params: SeriesParams,
+    scale_floor: float,
+    series_params: SeriesParams,
 ) -> Row:
     """Accept a measurement after a frequency step the rejects lie on (design 9.4).
 
@@ -772,9 +793,9 @@ def frequency_step(
         The fitted line's slope, ps/s.
     z : int
         The current measurement, ps.
-    floor : float
+    scale_floor : float
         The lowest the innovation scale may go, ps (see :func:`accept`).
-    params : SeriesParams
+    series_params : SeriesParams
         The settings in force, whose time constants the new segment takes.
 
     Returns
@@ -789,19 +810,25 @@ def frequency_step(
     Raises
     ------
     FilterError
-        If ``params`` is for another model than the series', or the
+        If ``series_params`` is for another model than the series', or the
         finished row breaks a rule of :class:`Row`.
     """
     t3 = seconds(draft.rejects[-1][0], draft.rejects[0][0])
-    corrected = State(
+    corrected_prediction = State(
         x=prediction.x + exact(a) + exact(s) * t3, y=prediction.y + s, d=prediction.d
     )
-    started = start_segment(draft, params, keep_offset=True)
-    return accept(started, corrected, z - corrected.x, floor)
+    started_draft = start_segment(draft, series_params, keep_offset=True)
+    return accept(
+        started_draft, corrected_prediction, z - corrected_prediction.x, scale_floor
+    )
 
 
 def accept_step(
-    draft: RowDraft, prediction: State, z: int, floor: float, params: SeriesParams
+    draft: RowDraft,
+    prediction: State,
+    z: int,
+    scale_floor: float,
+    series_params: SeriesParams,
 ) -> Row | None:
     """Accept a measurement after a step, when the rejects show one (design 9.4).
 
@@ -813,9 +840,9 @@ def accept_step(
         The series' prediction at the epoch.
     z : int
         The current measurement, ps.
-    floor : float
+    scale_floor : float
         The lowest the innovation scale may go, ps (see :func:`accept`).
-    params : SeriesParams
+    series_params : SeriesParams
         The settings in force.
 
     Returns
@@ -840,16 +867,16 @@ def accept_step(
         _log.error(message)
         raise FilterError(message)
     classified = classify(draft.rejects, draft.innovation_scale)
-    if classified.kind == "phase":
-        return phase_step(draft, prediction, z, floor)
+    if classified.step_kind == "phase":
+        return phase_step(draft, prediction, z, scale_floor)
     if (
-        classified.kind == "frequency"
+        classified.step_kind == "frequency"
         and draft.filter_states > 1
         and classified.a is not None
         and classified.s is not None
     ):
         return frequency_step(
-            draft, prediction, classified.a, classified.s, z, floor, params
+            draft, prediction, classified.a, classified.s, z, scale_floor, series_params
         )
     return None
 
@@ -878,11 +905,12 @@ def _consecutive(rejects: tuple[Reject, ...]) -> bool:
         Whether each entry's epoch is one epoch after the one before.
     """
     return all(
-        seconds(later, earlier) == _T for (earlier, _), (later, _) in pairwise(rejects)
+        seconds(later_epoch, earlier_epoch) == _T
+        for (earlier_epoch, _), (later_epoch, _) in pairwise(rejects)
     )
 
 
-def acquire(draft: RowDraft, z: int, params: SeriesParams) -> Row:
+def acquire(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     """Buffer a dormant series' measurement; cold-start when it is consistent.
 
     Parameters
@@ -893,7 +921,7 @@ def acquire(draft: RowDraft, z: int, params: SeriesParams) -> Row:
     z : int
         The measurement at the epoch, ps, decycled against the last buffered
         one (see :func:`anchor_of`).
-    params : SeriesParams
+    series_params : SeriesParams
         The settings in force, whose ``sigma0`` sets the test.
 
     Returns
@@ -912,24 +940,26 @@ def acquire(draft: RowDraft, z: int, params: SeriesParams) -> Row:
     FilterError
         If the finished row breaks a rule of :class:`Row`.
     """
-    entry = (draft.interpolated_datetime, float(z))
-    rejects = (*draft.rejects, entry)[-MAX_REJECTS:]
-    buffered = dataclasses.replace(draft, rejects=rejects)
-    if len(rejects) == MAX_REJECTS and _consecutive(rejects):
-        z1, z2, z3 = (exact(value) for _, value in rejects)
-        if abs(z3 - 2 * z2 + z1) <= exact(_ACQUIRE_LIMIT * params.sigma0):
-            return cold_start(buffered, z, params)
+    buffer_entry = (draft.interpolated_datetime, float(z))
+    buffered_rejects = (*draft.rejects, buffer_entry)[-MAX_REJECTS:]
+    buffered_draft = dataclasses.replace(draft, rejects=buffered_rejects)
+    if len(buffered_rejects) == MAX_REJECTS and _consecutive(buffered_rejects):
+        z1, z2, z3 = (exact(buffered_z) for _, buffered_z in buffered_rejects)
+        if abs(z3 - 2 * z2 + z1) <= exact(_ACQUIRE_LIMIT * series_params.sigma0):
+            return cold_start(buffered_draft, z, series_params)
     return dormant(
-        dataclasses.replace(buffered, consecutive_rejects=0), "R", keep_buffer=True
+        dataclasses.replace(buffered_draft, consecutive_rejects=0),
+        "R",
+        keep_buffer=True,
     )
 
 
-def anchor_of(last: Row | None) -> int | None:
+def anchor_of(last_row: Row | None) -> int | None:
     """Give what a series with no prediction is decycled against (design 7.5).
 
     Parameters
     ----------
-    last : Row or None
+    last_row : Row or None
         The series' last row, or ``None`` for a new series.
 
     Returns
@@ -954,15 +984,15 @@ def anchor_of(last: Row | None) -> int | None:
     >>> anchor_of(row)
     1234577
     """
-    if last is None or "D" not in last.flags or not last.rejects:
+    if last_row is None or "D" not in last_row.flags or not last_row.rejects:
         return None
-    return round_even(exact(last.rejects[-1][1]))
+    return round_even(exact(last_row.rejects[-1][1]))
 
 
 # ------------------------------------------------------------- filter step
 
 
-class Measured(BaseModel):
+class FilterInput(BaseModel):
     """What one series measured at an epoch: a pair's or a triple's value.
 
     Parameters
@@ -979,7 +1009,7 @@ class Measured(BaseModel):
     slip : bool, optional
         Whether the slip check corrected a pair's cycle count. Never set
         for a triple.
-    cold : bool, optional
+    pair_cold_started : bool, optional
         Whether a pair that gave a triple's value cold-started at the
         epoch. Never set for a pair.
 
@@ -992,9 +1022,9 @@ class Measured(BaseModel):
 
     Examples
     --------
-    >>> Measured(z=1_234_577, rms=3).floor
+    >>> FilterInput(z=1_234_577, rms=3).scale_floor
     3.0
-    >>> Measured(z=6_666_667, sigma_dd=3.3166).floor
+    >>> FilterInput(z=6_666_667, sigma_dd=3.3166).scale_floor
     3.3166
     """
 
@@ -1004,10 +1034,10 @@ class Measured(BaseModel):
     rms: Annotated[int, Field(ge=0)] | None = None
     sigma_dd: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
     slip: bool = False
-    cold: bool = False
+    pair_cold_started: bool = False
 
     @model_validator(mode="after")
-    def _check_kind(self) -> Self:
+    def _check_pair_or_triple(self) -> Self:
         """Refuse a measurement that is not wholly a pair's or a triple's.
 
         Returns
@@ -1027,13 +1057,13 @@ class Measured(BaseModel):
         if self.sigma_dd is not None and self.slip:
             message = "the slip check corrects pairs only"
             raise ValueError(message)
-        if self.rms is not None and self.cold:
+        if self.rms is not None and self.pair_cold_started:
             message = "only a triple follows its component pairs' cold starts"
             raise ValueError(message)
         return self
 
     @property
-    def floor(self) -> float:
+    def scale_floor(self) -> float:
         """The lowest the innovation scale may go: a pair's rms, a triple's sigma_dd."""
         if self.rms is not None:
             return float(self.rms)
@@ -1047,7 +1077,7 @@ class StepResult(BaseModel):
     ----------
     row : Row
         The series' row at the epoch.
-    cold : bool
+    cold_started : bool
         Whether the row is a cold start: a triple built from this pair's
         value then goes dormant (design 12.6).
     """
@@ -1055,17 +1085,17 @@ class StepResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     row: Row
-    cold: bool
+    cold_started: bool
 
 
-def params_changed(params: SeriesParams, last: Row) -> bool:
+def params_changed(series_params: SeriesParams, last_row: Row) -> bool:
     """Tell whether a series' settings changed its time constants (design 8.7).
 
     Parameters
     ----------
-    params : SeriesParams
+    series_params : SeriesParams
         The settings in force at the epoch.
-    last : Row
+    last_row : Row
         The series' last row, which carries its segment's time constants.
 
     Returns
@@ -1073,15 +1103,18 @@ def params_changed(params: SeriesParams, last: Row) -> bool:
     bool
         Whether M or M_sigma differ from the last row's.
     """
-    return (params.M, params.M_sigma) != (last.time_constant, last.scale_time_constant)
+    return (series_params.M, series_params.M_sigma) != (
+        last_row.time_constant,
+        last_row.scale_time_constant,
+    )
 
 
 def filter_step(
-    mark: datetime,
-    params: SeriesParams,
-    last: Row | None,
+    epoch_start: datetime,
+    series_params: SeriesParams,
+    last_row: Row | None,
     prediction: State | None,
-    measured: Measured | None,
+    measurement: FilterInput | None,
     *,
     excluded: bool = False,
 ) -> StepResult:
@@ -1089,16 +1122,16 @@ def filter_step(
 
     Parameters
     ----------
-    mark : datetime
+    epoch_start : datetime
         The epoch start E.
-    params : SeriesParams
+    series_params : SeriesParams
         The settings in force at E.
-    last : Row or None
+    last_row : Row or None
         The series' last row, or ``None`` for a new series.
     prediction : State or None
-        The prediction at E from ``last`` (see :func:`predict`), or
+        The prediction at E from ``last_row`` (see :func:`predict`), or
         ``None`` when the series has none.
-    measured : Measured or None
+    measurement : FilterInput or None
         The series' measurement at E, or ``None`` when there is none.
     excluded : bool, optional
         Whether screening or the slip check excluded the measurement.
@@ -1117,29 +1150,40 @@ def filter_step(
     Raises
     ------
     FilterError
-        If ``params`` is for another model than the series', or a row
+        If ``series_params`` is for another model than the series', or a row
         breaks a rule of :class:`Row`.
     """
-    draft = carry(mark, last, params, slip=measured is not None and measured.slip)
-    if last is not None and "D" not in last.flags and params_changed(params, last):
-        draft = start_segment(draft, params, keep_offset=True)
-    if measured is None:
-        return StepResult(row=hold(draft, prediction, "P", params), cold=False)
-    if measured.cold:
+    draft = carry(
+        epoch_start,
+        last_row,
+        series_params,
+        slip=measurement is not None and measurement.slip,
+    )
+    if (
+        last_row is not None
+        and "D" not in last_row.flags
+        and params_changed(series_params, last_row)
+    ):
+        draft = start_segment(draft, series_params, keep_offset=True)
+    if measurement is None:
+        return StepResult(
+            row=hold(draft, prediction, "P", series_params), cold_started=False
+        )
+    if measurement.pair_cold_started:
         draft = dataclasses.replace(draft, rejects=())
         prediction = None
     if prediction is None:
-        row = acquire(draft, measured.z, params)
-        return StepResult(row=row, cold="D" not in row.flags)
-    row = _gate(draft, prediction, measured, params, excluded=excluded)
-    return StepResult(row=row, cold=False)
+        row = acquire(draft, measurement.z, series_params)
+        return StepResult(row=row, cold_started="D" not in row.flags)
+    row = _gate(draft, prediction, measurement, series_params, excluded=excluded)
+    return StepResult(row=row, cold_started=False)
 
 
 def _gate(
     draft: RowDraft,
     prediction: State,
-    measured: Measured,
-    params: SeriesParams,
+    measurement: FilterInput,
+    series_params: SeriesParams,
     *,
     excluded: bool,
 ) -> Row:
@@ -1151,9 +1195,9 @@ def _gate(
         The row as built so far.
     prediction : State
         The series' prediction at the epoch.
-    measured : Measured
+    measurement : FilterInput
         The measurement.
-    params : SeriesParams
+    series_params : SeriesParams
         The settings in force.
     excluded : bool
         Whether screening or the slip check excluded the measurement.
@@ -1173,22 +1217,28 @@ def _gate(
     FilterError
         If a row breaks a rule of :class:`Row`.
     """
-    innovation = measured.z - prediction.x
+    innovation = measurement.z - prediction.x
     draft = dataclasses.replace(draft, innovation=float(innovation))
     if draft.innovation_scale is None:
         message = f"a measurement at {draft.interpolated_datetime} has no scale"
         _log.error(message)
         raise FilterError(message)
-    within = within_gate(innovation, draft.innovation_scale)
-    rms_passes = measured.rms is None or rms_ok(measured.rms, params.rms_max)
-    if within and rms_passes and not excluded:
-        return accept(draft, prediction, innovation, measured.floor)
-    if within and excluded:
-        return hold(draft, prediction, "X", params)
+    in_gate = within_gate(innovation, draft.innovation_scale)
+    rms_passes = measurement.rms is None or rms_ok(
+        measurement.rms, series_params.rms_max
+    )
+    if in_gate and rms_passes and not excluded:
+        return accept(draft, prediction, innovation, measurement.scale_floor)
+    if in_gate and excluded:
+        return hold(draft, prediction, "X", series_params)
     draft = count_reject(draft, innovation)
-    stepped = accept_step(draft, prediction, measured.z, measured.floor, params)
-    if stepped is not None:
-        return stepped
-    if draft.consecutive_rejects >= params.n_break:
-        return acquire(dataclasses.replace(draft, rejects=()), measured.z, params)
-    return hold(draft, prediction, "R", params)
+    step_row = accept_step(
+        draft, prediction, measurement.z, measurement.scale_floor, series_params
+    )
+    if step_row is not None:
+        return step_row
+    if draft.consecutive_rejects >= series_params.n_break:
+        return acquire(
+            dataclasses.replace(draft, rejects=()), measurement.z, series_params
+        )
+    return hold(draft, prediction, "R", series_params)

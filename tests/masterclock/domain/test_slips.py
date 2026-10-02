@@ -97,7 +97,7 @@ def test_a_slip_against_one_of_three_references_is_corrected(
     result = check(epoch(THREE, clocks), THREE)
     assert result.corrections == {(ref, "nav1"): cycles}
     assert result.excluded == frozenset()
-    assert [(e.kind, e.clock, e.pairs, e.cycles) for e in result.events] == [
+    assert [(e.finding, e.clock, e.pairs, e.cycles) for e in result.events] == [
         ("slip_corrected", "nav1", ((ref, "nav1"),), cycles)
     ]
 
@@ -127,7 +127,7 @@ def test_a_pair_in_a_clean_d_is_not_corrected() -> None:
     result = of_nav1(check(innovations, THREE))
     assert result.corrections == {}
     assert result.excluded == frozenset({("mc1", "nav1"), ("mc2", "nav1")})
-    assert [(e.kind, e.pairs, e.cycles) for e in result.events] == [
+    assert [(e.finding, e.pairs, e.cycles) for e in result.events] == [
         ("slip_undecided", (("mc1", "nav1"), ("mc2", "nav1")), 0)
     ]
 
@@ -178,7 +178,7 @@ def test_with_two_references_the_weak_pair_is_corrected(weak: str) -> None:
         flags[("mc2", "nav1")] = weak
     result = check(innovations, TWO, flags)
     assert result.corrections == {("mc2", "nav1"): -1}
-    assert result.events[0].kind == "slip_corrected"
+    assert result.events[0].finding == "slip_corrected"
 
 
 def test_the_first_pair_weak_is_corrected_the_other_way() -> None:
@@ -202,7 +202,7 @@ def test_with_two_references_both_or_neither_weak_is_undecided(
     result = check(innovations, TWO, last)
     assert result.corrections == {}
     assert result.excluded == frozenset({("mc1", "nav1"), ("mc2", "nav1")})
-    assert [e.kind for e in result.events] == ["slip_undecided"]
+    assert [e.finding for e in result.events] == ["slip_undecided"]
 
 
 # ---------------------------------------------------------------- what is used
@@ -233,7 +233,7 @@ def test_a_reference_measured_as_a_clock_is_checked_too() -> None:
     innovations[("mc1", "mc4")] += P
     result = check(innovations, four)
     assert result.corrections == {("mc1", "mc4"): -1}
-    assert [(e.kind, e.clock) for e in result.events] == [("slip_corrected", "mc4")]
+    assert [(e.finding, e.clock) for e in result.events] == [("slip_corrected", "mc4")]
 
 
 def test_the_tolerance_is_five_combined_scales() -> None:
@@ -257,7 +257,7 @@ def test_an_event_names_a_known_kind() -> None:
     """Refuse an event of a kind the slip check does not give."""
     with pytest.raises(ValidationError):
         slips.SlipEvent.model_validate(
-            {"kind": "other", "clock": "nav1", "pairs": (), "cycles": 0}
+            {"finding": "other", "clock": "nav1", "pairs": (), "cycles": 0}
         )
 
 

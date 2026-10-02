@@ -158,26 +158,26 @@ both claim it.
 """
 
 
-def _refuse_passed_in(data: object, derived: tuple[str, ...]) -> object:
+def _refuse_passed_in(model_input: object, derived_fields: tuple[str, ...]) -> object:
     """Refuse input to a model that passes in a value the model works out.
 
     Parameters
     ----------
-    data : object
+    model_input : object
         What the model is being built from. Only a mapping can name a field,
         so anything else is let through for pydantic to judge.
-    derived : tuple[str, ...]
+    derived_fields : tuple[str, ...]
         The names of the fields the model works out for itself.
 
     Returns
     -------
     object
-        ``data``, unchanged.
+        ``model_input``, unchanged.
 
     Raises
     ------
     ValueError
-        Naming every one of ``derived`` that ``data`` passes in. A plain
+        Naming every one of ``derived_fields`` that ``model_input`` passes in. A plain
         ``ValueError`` so that pydantic reports it as a validation error.
 
     Examples
@@ -189,12 +189,14 @@ def _refuse_passed_in(data: object, derived: tuple[str, ...]) -> object:
     ...
     ValueError: worked out, so may not be passed in: b
     """
-    if isinstance(data, dict):
-        passed = [name for name in derived if name in data]
-        if passed:
-            names = ", ".join(passed)
-            raise ValueError(f"worked out, so may not be passed in: {names}")
-    return data
+    if isinstance(model_input, dict):
+        passed_fields = [
+            field_name for field_name in derived_fields if field_name in model_input
+        ]
+        if passed_fields:
+            passed_names = ", ".join(passed_fields)
+            raise ValueError(f"worked out, so may not be passed in: {passed_names}")
+    return model_input
 
 
 class DASMeasurement(BaseModel):
@@ -283,25 +285,25 @@ class DASMeasurement(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _refuse_derived(cls, data: object) -> object:
+    def _refuse_derived(cls, model_input: object) -> object:
         """Refuse a call that passes in any attribute worked out from the columns.
 
         Parameters
         ----------
-        data : object
+        model_input : object
             What the record is being built from.
 
         Returns
         -------
         object
-            ``data``, unchanged.
+            ``model_input``, unchanged.
 
         Raises
         ------
         ValueError
             Naming each of :attr:`_DERIVED` that was passed in.
         """
-        return _refuse_passed_in(data, cls._DERIVED)
+        return _refuse_passed_in(model_input, cls._DERIVED)
 
     def model_post_init(self, _context: object, /) -> None:
         """Work out the four attributes that follow from the columns.
@@ -316,10 +318,10 @@ class DASMeasurement(BaseModel):
         This runs once the columns have been validated, so the switch is a
         switch and the MJD is a number by the time they are read here.
         """
-        measured = mjd_to_datetime(self.measurement_mjd)
-        epoch = floor_to_ten_minutes(measured)
+        measured_datetime = mjd_to_datetime(self.measurement_mjd)
+        epoch = floor_to_ten_minutes(measured_datetime)
         object.__setattr__(self, "reference", f"{REFERENCE_PREFIX}{self.switch[0]}")
-        object.__setattr__(self, "measurement_datetime", measured)
+        object.__setattr__(self, "measurement_datetime", measured_datetime)
         object.__setattr__(self, "interpolated_datetime", epoch)
         object.__setattr__(self, "interpolated_mjd", datetime_to_mjd(epoch))
 
@@ -405,25 +407,25 @@ class DASData(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _refuse_derived(cls, data: object) -> object:
+    def _refuse_derived(cls, model_input: object) -> object:
         """Refuse a call that passes in the MJD worked out from the mark.
 
         Parameters
         ----------
-        data : object
+        model_input : object
             What the block is being built from.
 
         Returns
         -------
         object
-            ``data``, unchanged.
+            ``model_input``, unchanged.
 
         Raises
         ------
         ValueError
             If ``interpolated_mjd`` was passed in.
         """
-        return _refuse_passed_in(data, cls._DERIVED)
+        return _refuse_passed_in(model_input, cls._DERIVED)
 
     def model_post_init(self, _context: object, /) -> None:
         """Work out the epoch as an MJD.
@@ -502,15 +504,19 @@ def parse_line(line: str) -> DASMeasurement:
         line.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise MalformedLineError("not UTF-8 text") from exc
-    fields = line.split()
-    if len(fields) != _FIELD_COUNT:
-        raise MalformedLineError(f"expected {_FIELD_COUNT} fields, found {len(fields)}")
-    measurement_mjd, measured_phase, rms, switch, clock = fields
-    for (name, form), text in zip(
+    line_fields = line.split()
+    if len(line_fields) != _FIELD_COUNT:
+        raise MalformedLineError(
+            f"expected {_FIELD_COUNT} fields, found {len(line_fields)}"
+        )
+    measurement_mjd, measured_phase, rms, switch, clock = line_fields
+    for (column_name, plain_form), column_text in zip(
         _PLAIN_NUMBERS, (measurement_mjd, measured_phase, rms), strict=True
     ):
-        if form.fullmatch(text) is None:
-            raise MalformedLineError(f"{name} {text!r} is not a plain number")
+        if plain_form.fullmatch(column_text) is None:
+            raise MalformedLineError(
+                f"{column_name} {column_text!r} is not a plain number"
+            )
     try:
         return DASMeasurement.model_validate(
             {
@@ -525,12 +531,12 @@ def parse_line(line: str) -> DASMeasurement:
         raise MalformedLineError(describe_error(exc)) from exc
 
 
-def _file_mjd(path: Path) -> int:
+def _file_mjd(data_file: Path) -> int:
     """Extract the MJD day from a daily data file's name.
 
     Parameters
     ----------
-    path : Path
+    data_file : Path
         Path to a daily data file named ``cd5m5m_<MJD>.dat``.
 
     Returns
@@ -544,12 +550,12 @@ def _file_mjd(path: Path) -> int:
         If the file name does not match :data:`DATA_FILE_PATTERN`, and so
         carries no MJD to read.
     """
-    match = DATA_FILE_PATTERN.fullmatch(path.name)
-    if match is None:
-        message = f"not a daily data file name: {path.name!r}"
+    name_match = DATA_FILE_PATTERN.fullmatch(data_file.name)
+    if name_match is None:
+        message = f"not a daily data file name: {data_file.name!r}"
         _log.error(message)
         raise DataFileError(message)
-    return int(match.group(1))
+    return int(name_match.group(1))
 
 
 def data_file_name(mjd: int) -> str:
@@ -608,8 +614,8 @@ def _check_day(measurement: DASMeasurement, file_mjd: int) -> None:
     covers. Since the files are read in the order their names give, that
     would put measurements out of time order without anything saying so.
     """
-    day = int(measurement.measurement_mjd)
-    if day != file_mjd:
+    measurement_day = int(measurement.measurement_mjd)
+    if measurement_day != file_mjd:
         raise WrongDayError(
             f"MJD {measurement.measurement_mjd} is not in day {file_mjd}",
         )
@@ -633,11 +639,11 @@ def _check_early(measurement: DASMeasurement) -> None:
     Measured from the measurement's own epoch rather than from the day, so
     every epoch is judged by its own end.
     """
-    mark = measurement.interpolated_datetime + EPOCH_LENGTH
-    before = mark - measurement.measurement_datetime
-    if before <= EPOCH_EDGE:
+    next_epoch_start = measurement.interpolated_datetime + EPOCH_LENGTH
+    time_left = next_epoch_start - measurement.measurement_datetime
+    if time_left <= EPOCH_EDGE:
         raise LateLineError(
-            f"measured {before.total_seconds():.3f} s before the next epoch, "
+            f"measured {time_left.total_seconds():.3f} s before the next epoch, "
             f"inside the last {EPOCH_EDGE.total_seconds():.0f} s of its own"
         )
 
@@ -672,14 +678,16 @@ def _check_forward(measurement: DASMeasurement, previous_mjd: float | None) -> N
         )
 
 
-def _check_unseen(measurement: DASMeasurement, seen: set[tuple[str, str]]) -> None:
+def _check_unseen(
+    measurement: DASMeasurement, seen_pairs: set[tuple[str, str]]
+) -> None:
     """Refuse a reference-clock pair already measured in this epoch.
 
     Parameters
     ----------
     measurement : DASMeasurement
         The measurement parsed from the line.
-    seen : set of (str, str)
+    seen_pairs : set of (str, str)
         The reference-clock pairs already accepted in the current epoch.
 
     Raises
@@ -693,23 +701,23 @@ def _check_unseen(measurement: DASMeasurement, seen: set[tuple[str, str]]) -> No
     give the epoch two values for one measurement, and nothing downstream
     could say which to believe.
     """
-    if (measurement.reference, measurement.clock) in seen:
+    if (measurement.reference, measurement.clock) in seen_pairs:
         raise DuplicatePairError(
             f"{measurement.reference}-{measurement.clock} was already measured "
             "in this epoch",
         )
 
 
-def _check_terminated(line: str, number: int, path: Path) -> None:
+def _check_terminated(line: str, line_number: int, data_file: Path) -> None:
     """Refuse a file whose line has no newline at its end.
 
     Parameters
     ----------
     line : str
         The line as read, with its newline if it has one.
-    number : int
+    line_number : int
         The line's number in the file, counting from one.
-    path : Path
+    data_file : Path
         The file the line came from, for the message.
 
     Raises
@@ -725,12 +733,12 @@ def _check_terminated(line: str, number: int, path: Path) -> None:
     clock name.
     """
     if not line.endswith("\n"):
-        message = f"malformed data file {path}: line {number} has no newline"
+        message = f"malformed data file {data_file}: line {line_number} has no newline"
         _log.error(message)
         raise DataFileError(message)
 
 
-def read_measurements(path: Path) -> Iterator[DASMeasurement]:
+def read_measurements(data_file: Path) -> Iterator[DASMeasurement]:
     """Yield the valid measurements from a DAS data file, in file order.
 
     Lines that deviate from the expected structure are logged at WARNING
@@ -744,7 +752,7 @@ def read_measurements(path: Path) -> Iterator[DASMeasurement]:
 
     Parameters
     ----------
-    path : Path
+    data_file : Path
         Path to a ``cd5m5m_<MJD>.dat`` file.
 
     Yields
@@ -761,38 +769,38 @@ def read_measurements(path: Path) -> Iterator[DASMeasurement]:
         when that line is reached, after every measurement before it has
         been yielded.
     """
-    file_mjd = _file_mjd(path)
+    file_mjd = _file_mjd(data_file)
     previous_mjd: float | None = None
-    epoch: datetime | None = None
-    seen: set[tuple[str, str]] = set()
+    current_epoch: datetime | None = None
+    seen_pairs: set[tuple[str, str]] = set()
     try:
-        with path.open(encoding="utf-8", errors="surrogateescape") as file:
-            for number, line in enumerate(file, start=1):
-                _check_terminated(line, number, path)
+        with data_file.open(encoding="utf-8", errors="surrogateescape") as open_file:
+            for line_number, line in enumerate(open_file, start=1):
+                _check_terminated(line, line_number, data_file)
                 try:
                     measurement = parse_line(line)
                     _check_day(measurement, file_mjd)
                     _check_early(measurement)
                     _check_forward(measurement, previous_mjd)
-                    if measurement.interpolated_datetime != epoch:
-                        epoch = measurement.interpolated_datetime
-                        seen = set()
-                    _check_unseen(measurement, seen)
+                    if measurement.interpolated_datetime != current_epoch:
+                        current_epoch = measurement.interpolated_datetime
+                        seen_pairs = set()
+                    _check_unseen(measurement, seen_pairs)
                 except RefusedLineError as exc:
                     _log.warning(
                         "skipping %s line %d of %s: %r (%s)",
-                        exc.kind,
-                        number,
-                        path,
+                        exc.refusal_kind,
+                        line_number,
+                        data_file,
                         line.rstrip("\n"),
                         exc,
                     )
                     continue
                 previous_mjd = measurement.measurement_mjd
-                seen.add((measurement.reference, measurement.clock))
+                seen_pairs.add((measurement.reference, measurement.clock))
                 yield measurement
     except OSError as exc:
-        message = f"cannot read data file {path}: {exc}"
+        message = f"cannot read data file {data_file}: {exc}"
         _log.error(message)
         raise DataFileError(message) from exc
 
@@ -826,15 +834,16 @@ def iter_blocks(measurements: Iterable[DASMeasurement]) -> Iterator[DASData]:
     with it, and each daily file holds one day and they are read in order.
     The behaviour is stated for a caller grouping a stream of its own.
     """
-    for interpolated_datetime, group in groupby(
+    for interpolated_datetime, epoch_measurements in groupby(
         measurements, key=lambda measurement: measurement.interpolated_datetime
     ):
         yield DASData(
-            interpolated_datetime=interpolated_datetime, measurements=tuple(group)
+            interpolated_datetime=interpolated_datetime,
+            measurements=tuple(epoch_measurements),
         )
 
 
-def read_blocks(path: Path) -> Iterator[DASData]:
+def read_blocks(data_file: Path) -> Iterator[DASData]:
     """Read a DAS data file as one ten-minute block at a time.
 
     Equivalent to ``iter_blocks(read_measurements(path))``: refused lines are
@@ -843,7 +852,7 @@ def read_blocks(path: Path) -> Iterator[DASData]:
 
     Parameters
     ----------
-    path : Path
+    data_file : Path
         Path to a ``cd5m5m_<MJD>.dat`` file.
 
     Returns
@@ -858,10 +867,10 @@ def read_blocks(path: Path) -> Iterator[DASData]:
         :func:`read_measurements`, which is a generator, so the error
         surfaces on first iteration rather than at call time.
     """
-    return iter_blocks(read_measurements(path))
+    return iter_blocks(read_measurements(data_file))
 
 
-def find_data_files(directory: Path) -> tuple[Path, ...]:
+def find_data_files(das_directory: Path) -> tuple[Path, ...]:
     """Find the daily DAS data files in a directory, in chronological order.
 
     An entry is a data file when its name matches :data:`DATA_FILE_PATTERN`
@@ -873,7 +882,7 @@ def find_data_files(directory: Path) -> tuple[Path, ...]:
 
     Parameters
     ----------
-    directory : Path
+    das_directory : Path
         The directory holding the daily ``cd5m5m_<MJD>.dat`` files.
 
     Returns
@@ -888,26 +897,31 @@ def find_data_files(directory: Path) -> tuple[Path, ...]:
         If the directory cannot be listed.
     """
     try:
-        entries = list(directory.iterdir())
+        directory_entries = list(das_directory.iterdir())
     except OSError as exc:
-        message = f"cannot list the DAS directory {directory}: {exc}"
+        message = f"cannot list the DAS directory {das_directory}: {exc}"
         _log.error(message)
         raise DataFileError(message) from exc
-    files: list[Path] = []
-    for entry in sorted(entries):
-        if not DATA_FILE_PATTERN.fullmatch(entry.name):
-            _log.debug("ignoring %s, which is not named as a daily data file", entry)
-        elif not entry.is_file():
-            _log.debug("ignoring %s, named as a daily data file but not a file", entry)
+    data_files: list[Path] = []
+    for directory_entry in sorted(directory_entries):
+        if not DATA_FILE_PATTERN.fullmatch(directory_entry.name):
+            _log.debug(
+                "ignoring %s, which is not named as a daily data file", directory_entry
+            )
+        elif not directory_entry.is_file():
+            _log.debug(
+                "ignoring %s, named as a daily data file but not a file",
+                directory_entry,
+            )
         else:
-            files.append(entry)
-    if not files:
-        _log.warning("no cd5m5m data files found in %s", directory)
-    return tuple(files)
+            data_files.append(directory_entry)
+    if not data_files:
+        _log.warning("no cd5m5m data files found in %s", das_directory)
+    return tuple(data_files)
 
 
 def read_all_blocks(
-    directory: Path, start_at_mjd: float | None = None
+    das_directory: Path, start_at_mjd: float | None = None
 ) -> Iterator[DASData]:
     """Read the ten-minute blocks of every daily data file in a directory.
 
@@ -917,7 +931,7 @@ def read_all_blocks(
 
     Parameters
     ----------
-    directory : Path
+    das_directory : Path
         The directory holding the daily ``cd5m5m_<MJD>.dat`` files.
     start_at_mjd : float, optional
         If given, start at the ten-minute epoch containing this MJD: the
@@ -943,12 +957,20 @@ def read_all_blocks(
         At call time if ``start_at_mjd`` is infinite or too large for the
         platform's time functions.
     """
-    files = find_data_files(directory)
+    data_files = find_data_files(das_directory)
     if start_at_mjd is None:
         return iter_blocks(
-            chain.from_iterable(read_measurements(path) for path in files)
+            chain.from_iterable(
+                read_measurements(data_file) for data_file in data_files
+            )
         )
     start_mjd = datetime_to_mjd(floor_to_ten_minutes(mjd_to_datetime(start_at_mjd)))
-    kept = tuple(path for path in files if _file_mjd(path) + 1 > start_mjd)
-    blocks = iter_blocks(chain.from_iterable(read_measurements(path) for path in kept))
-    return dropwhile(lambda block: block.interpolated_mjd < start_mjd, blocks)
+    kept_files = tuple(
+        data_file for data_file in data_files if _file_mjd(data_file) + 1 > start_mjd
+    )
+    das_blocks = iter_blocks(
+        chain.from_iterable(read_measurements(data_file) for data_file in kept_files)
+    )
+    return dropwhile(
+        lambda das_block: das_block.interpolated_mjd < start_mjd, das_blocks
+    )

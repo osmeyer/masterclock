@@ -67,21 +67,22 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 
-def seconds(later: datetime, earlier: datetime) -> Fraction:
+def seconds(later_instant: datetime, earlier_instant: datetime) -> Fraction:
     """Give the time from one datetime to another in seconds, exactly.
 
     Parameters
     ----------
-    later : datetime
+    later_instant : datetime
         Where the offset ends. Must carry a timezone.
-    earlier : datetime
+    earlier_instant : datetime
         Where it starts. Must carry a timezone.
 
     Returns
     -------
     Fraction
-        ``later - earlier`` in seconds: a whole number of microseconds over
-        one million, negative when ``later`` is the earlier of the two.
+        ``later_instant - earlier_instant`` in seconds: a whole number of
+        microseconds over one million, negative when ``later_instant`` is the
+        earlier of the two.
 
     Raises
     ------
@@ -97,19 +98,24 @@ def seconds(later: datetime, earlier: datetime) -> Fraction:
     ... )
     Fraction(85752, 625)
     """
-    if later.tzinfo is None or earlier.tzinfo is None:
-        message = f"cannot take an offset between naive datetimes: {later}, {earlier}"
+    if later_instant.tzinfo is None or earlier_instant.tzinfo is None:
+        message = (
+            "cannot take an offset between naive datetimes:"
+            f" {later_instant}, {earlier_instant}"
+        )
         _log.error(message)
         raise PhaseError(message)
-    return Fraction((later - earlier) // _MICROSECOND, _MICROSECONDS_PER_SECOND)
+    return Fraction(
+        (later_instant - earlier_instant) // _MICROSECOND, _MICROSECONDS_PER_SECOND
+    )
 
 
-def exact(value: float) -> Fraction:
+def exact(number: float) -> Fraction:
     """Give the exact value a float holds, as a fraction.
 
     Parameters
     ----------
-    value : float
+    number : float
         A finite float, such as a rate, a drift or a steering value.
 
     Returns
@@ -121,7 +127,7 @@ def exact(value: float) -> Fraction:
     Raises
     ------
     FilterError
-        If ``value`` is nan or infinite, which no phase can be summed with.
+        If ``number`` is nan or infinite, which no phase can be summed with.
 
     Examples
     --------
@@ -130,19 +136,19 @@ def exact(value: float) -> Fraction:
     >>> exact(2.5)
     Fraction(5, 2)
     """
-    if not math.isfinite(value):
-        message = f"value {value} is not finite"
+    if not math.isfinite(number):
+        message = f"value {number} is not finite"
         _log.error(message)
         raise FilterError(message)
-    return Fraction(value)
+    return Fraction(number)
 
 
-def round_even(value: Fraction | int) -> int:
+def round_even(exact_sum: Fraction | int) -> int:
     """Round an exact value to the nearest whole number, a tie to the even one.
 
     Parameters
     ----------
-    value : Fraction or int
+    exact_sum : Fraction or int
         An exact sum, such as a phase plus a float term.
 
     Returns
@@ -158,15 +164,15 @@ def round_even(value: Fraction | int) -> int:
     >>> round_even(Fraction(12_345_773_124, 10_000))
     1234577
     """
-    return round(value)
+    return round(exact_sum)
 
 
-def to_fs(value: Fraction | int) -> int:
+def to_fs(phase_ps: Fraction | int) -> int:
     """Round a phase in picoseconds to whole femtoseconds, a tie to even.
 
     Parameters
     ----------
-    value : Fraction or int
+    phase_ps : Fraction or int
         An exact phase, ps.
 
     Returns
@@ -181,15 +187,15 @@ def to_fs(value: Fraction | int) -> int:
     >>> to_fs(Fraction(1, 2000))
     0
     """
-    return round_even(value * FS_PER_PS)
+    return round_even(phase_ps * FS_PER_PS)
 
 
-def from_fs(value: int) -> Fraction:
+def from_fs(phase_fs: int) -> Fraction:
     """Give a phase held in whole femtoseconds in picoseconds, exactly.
 
     Parameters
     ----------
-    value : int
+    phase_fs : int
         The phase, fs.
 
     Returns
@@ -202,7 +208,7 @@ def from_fs(value: int) -> Fraction:
     >>> from_fs(1_234_574_457)
     Fraction(1234574457, 1000)
     """
-    return Fraction(value, FS_PER_PS)
+    return Fraction(phase_fs, FS_PER_PS)
 
 
 class Decycled(BaseModel):
@@ -314,7 +320,11 @@ def decycle(
     if prediction is None:
         n = 0 if anchor is None else round_even((anchor - phi + w) / PHASE_PERIOD)
         return Decycled(cycle_count=n, z=round_even(phi + n * PHASE_PERIOD - w))
-    motion = exact(prediction.y) * delta + exact(prediction.d) * delta * delta / 2
-    predicted = prediction.x + motion + w
-    n = round_even((predicted - phi) / PHASE_PERIOD)
-    return Decycled(cycle_count=n, z=round_even(phi + n * PHASE_PERIOD - motion - w))
+    predicted_motion = (
+        exact(prediction.y) * delta + exact(prediction.d) * delta * delta / 2
+    )
+    predicted_phase = prediction.x + predicted_motion + w
+    n = round_even((predicted_phase - phi) / PHASE_PERIOD)
+    return Decycled(
+        cycle_count=n, z=round_even(phi + n * PHASE_PERIOD - predicted_motion - w)
+    )

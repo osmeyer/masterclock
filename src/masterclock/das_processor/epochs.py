@@ -27,7 +27,7 @@ _CACHE_SIZE: Final[int] = 1024
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def floor_to_ten_minutes(value: DatetimeLike) -> datetime:
+def floor_to_ten_minutes(given_datetime: DatetimeLike) -> datetime:
     """Round a datetime down to a ten-minute mark.
 
     A datetime already exactly on a ten-minute mark (minute divisible by ten,
@@ -37,18 +37,18 @@ def floor_to_ten_minutes(value: DatetimeLike) -> datetime:
 
     Parameters
     ----------
-    value : datetime or str
+    given_datetime : datetime or str
         The datetime (naive datetimes are assumed UTC), or an ISO 8601 string.
 
     Returns
     -------
     datetime
-        The most recent ten-minute mark at or before ``value``, in UTC.
+        The most recent ten-minute mark at or before ``given_datetime``, in UTC.
 
     Raises
     ------
     ValueError
-        If ``value`` is a string that is not valid ISO 8601.
+        If ``given_datetime`` is a string that is not valid ISO 8601.
 
     Examples
     --------
@@ -58,14 +58,14 @@ def floor_to_ten_minutes(value: DatetimeLike) -> datetime:
     >>> floor_to_ten_minutes(datetime(2026, 7, 12, 4, 40, tzinfo=UTC))
     datetime.datetime(2026, 7, 12, 4, 40, tzinfo=datetime.timezone.utc)
     """
-    moment = ensure_utc(value)
-    return moment.replace(
-        minute=moment.minute - moment.minute % 10, second=0, microsecond=0
+    utc_datetime = ensure_utc(given_datetime)
+    return utc_datetime.replace(
+        minute=utc_datetime.minute - utc_datetime.minute % 10, second=0, microsecond=0
     )
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def ceil_to_ten_minutes(value: DatetimeLike) -> datetime:
+def ceil_to_ten_minutes(given_datetime: DatetimeLike) -> datetime:
     """Round a datetime up to the next ten-minute mark.
 
     The result is always strictly after the input: a datetime already
@@ -76,18 +76,18 @@ def ceil_to_ten_minutes(value: DatetimeLike) -> datetime:
 
     Parameters
     ----------
-    value : datetime or str
+    given_datetime : datetime or str
         The datetime (naive datetimes are assumed UTC), or an ISO 8601 string.
 
     Returns
     -------
     datetime
-        The earliest ten-minute mark strictly after ``value``, in UTC.
+        The earliest ten-minute mark strictly after ``given_datetime``, in UTC.
 
     Raises
     ------
     ValueError
-        If ``value`` is a string that is not valid ISO 8601.
+        If ``given_datetime`` is a string that is not valid ISO 8601.
     OverflowError
         If the next mark is after the last instant of year 9999.
 
@@ -99,27 +99,27 @@ def ceil_to_ten_minutes(value: DatetimeLike) -> datetime:
     >>> ceil_to_ten_minutes(datetime(2026, 7, 12, 4, 40, tzinfo=UTC))
     datetime.datetime(2026, 7, 12, 4, 50, tzinfo=datetime.timezone.utc)
     """
-    return floor_to_ten_minutes(value) + EPOCH_LENGTH
+    return floor_to_ten_minutes(given_datetime) + EPOCH_LENGTH
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
 def format_epoch(
-    at: datetime, mjd: float, width: int, decimals: int
+    epoch_start: datetime, mjd: float, mjd_width: int, mjd_decimals: int
 ) -> tuple[str, str]:
     """Render a ten-minute mark, and that same mark as an MJD, as text.
 
     Parameters
     ----------
-    at : datetime
+    epoch_start : datetime
         The mark (naive datetimes are assumed UTC). It is written in UTC
         whatever its timezone (see
     :func:`~masterclock.app.timeutil.ensure_utc`).
     mjd : float
         The same instant as a Modified Julian Day. Given rather than worked
         out here, so what is rendered is the value its caller holds.
-    width : int
+    mjd_width : int
         Width to right-justify the MJD to.
-    decimals : int
+    mjd_decimals : int
         Decimal places to give it. The float is rounded to the nearest
         value with that many places; a float exactly halfway between two
         goes to the one whose last digit is even. A value that is, or
@@ -130,8 +130,8 @@ def format_epoch(
     tuple[str, str]
         The mark to the second (any fraction of a second is dropped, not
         rounded), in UTC with its ``+00:00`` offset, and the MJD
-        right-justified to ``width``. An MJD that needs more characters than
-        ``width`` is given in full, so the second string is then longer.
+        right-justified to ``mjd_width``. An MJD that needs more characters than
+        ``mjd_width`` is given in full, so the second string is then longer.
 
     Notes
     -----
@@ -150,5 +150,7 @@ def format_epoch(
     >>> format_epoch(datetime(2024, 3, 5, 6, 20, tzinfo=UTC), 60374.263889, 13, 6)
     ('2024-03-05 06:20:00+00:00', ' 60374.263889')
     """
-    moment = ensure_utc(at)
-    return moment.isoformat(sep=" ", timespec="seconds"), f"{mjd:z{width}.{decimals}f}"
+    utc_start = ensure_utc(epoch_start)
+    return utc_start.isoformat(
+        sep=" ", timespec="seconds"
+    ), f"{mjd:z{mjd_width}.{mjd_decimals}f}"

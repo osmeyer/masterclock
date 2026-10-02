@@ -71,12 +71,12 @@ class SteerEvent(BaseModel):
     dy: Annotated[float, Field(allow_inf_nan=False)]
 
 
-def signs(key: Sequence[str]) -> dict[str, int]:
+def signs(series_key: Sequence[str]) -> dict[str, int]:
     """Name the references that steer a series, each with its sign.
 
     Parameters
     ----------
-    key : sequence of str
+    series_key : sequence of str
         A pair (a, b) or a triple (r, s, c).
 
     Returns
@@ -91,23 +91,23 @@ def signs(key: Sequence[str]) -> dict[str, int]:
     >>> signs(("mc1", "mc2")), signs(("mc2", "nav23")), signs(("mc1", "mc2", "nav23"))
     ({'mc1': 1, 'mc2': -1}, {'mc2': 1}, {'mc1': 1})
     """
-    if len(key) == 3:
-        return {key[0]: 1}
-    first, second = key
-    if first == second:
+    if len(series_key) == 3:
+        return {series_key[0]: 1}
+    first_clock, second_clock = series_key
+    if first_clock == second_clock:
         return {}
     return {
-        name: sign
-        for name, sign in ((first, 1), (second, -1))
-        if name.startswith(REFERENCE_PREFIX)
+        clock_name: sign
+        for clock_name, sign in ((first_clock, 1), (second_clock, -1))
+        if clock_name.startswith(REFERENCE_PREFIX)
     }
 
 
-def _events(
+def _signed_events(
     steering: Mapping[str, Sequence[SteerEvent]],
-    key: Sequence[str],
-    after: datetime,
-    through: datetime,
+    series_key: Sequence[str],
+    window_start: datetime,
+    window_end: datetime,
 ) -> Iterator[tuple[int, SteerEvent]]:
     """Yield the events that move a series in (after, through], with their signs.
 
@@ -115,11 +115,11 @@ def _events(
     ----------
     steering : mapping of str to sequence of SteerEvent
         Each reference's events, in time order.
-    key : sequence of str
+    series_key : sequence of str
         The series.
-    after : datetime
+    window_start : datetime
         The start of the interval, left out.
-    through : datetime
+    window_end : datetime
         The end of the interval, counted.
 
     Yields
@@ -128,24 +128,24 @@ def _events(
         The sign of each event's reference in the series, and the event, by
         reference in the order :func:`signs` gives and then in time order.
     """
-    for reference, sign in signs(key).items():
-        for event in steering.get(reference, ()):
-            if after < event.applied_datetime <= through:
-                yield sign, event
+    for reference, sign in signs(series_key).items():
+        for steer_event in steering.get(reference, ()):
+            if window_start < steer_event.applied_datetime <= window_end:
+                yield sign, steer_event
 
 
 def steer_u(
-    key: Sequence[str],
-    mark: datetime,
+    series_key: Sequence[str],
+    epoch_start: datetime,
     steering: Mapping[str, Sequence[SteerEvent]],
 ) -> tuple[Fraction, float]:
     """Give the steering input over the epoch before a mark.
 
     Parameters
     ----------
-    key : sequence of str
+    series_key : sequence of str
         The series.
-    mark : datetime
+    epoch_start : datetime
         The epoch start E.
     steering : mapping of str to sequence of SteerEvent
         Each reference's events, in time order. A reference that is not in
@@ -160,7 +160,7 @@ def steer_u(
     Raises
     ------
     PhaseError
-        If ``mark`` or an event's instant has no timezone.
+        If ``epoch_start`` or an event's instant has no timezone.
 
     Examples
     --------
@@ -172,17 +172,20 @@ def steer_u(
     """
     ux = Fraction(0)
     uy = 0.0
-    for sign, event in _events(steering, key, mark - _EPOCH, mark):
+    for sign, steer_event in _signed_events(
+        steering, series_key, epoch_start - _EPOCH, epoch_start
+    ):
         ux += sign * (
-            exact(event.dx) + exact(event.dy) * seconds(mark, event.applied_datetime)
+            exact(steer_event.dx)
+            + exact(steer_event.dy) * seconds(epoch_start, steer_event.applied_datetime)
         )
-        uy += sign * event.dy
+        uy += sign * steer_event.dy
     return ux, uy
 
 
 def steer_w(
-    key: Sequence[str],
-    mark: datetime,
+    series_key: Sequence[str],
+    epoch_start: datetime,
     steering: Mapping[str, Sequence[SteerEvent]],
     measured_at: datetime,
 ) -> Fraction:
@@ -190,9 +193,9 @@ def steer_w(
 
     Parameters
     ----------
-    key : sequence of str
+    series_key : sequence of str
         The series.
-    mark : datetime
+    epoch_start : datetime
         The epoch start E.
     steering : mapping of str to sequence of SteerEvent
         Each reference's events, in time order.
@@ -211,9 +214,11 @@ def steer_w(
         If ``measured_at`` or an event's instant has no timezone.
     """
     w = Fraction(0)
-    for sign, event in _events(steering, key, mark, measured_at):
+    for sign, steer_event in _signed_events(
+        steering, series_key, epoch_start, measured_at
+    ):
         w += sign * (
-            exact(event.dx)
-            + exact(event.dy) * seconds(measured_at, event.applied_datetime)
+            exact(steer_event.dx)
+            + exact(steer_event.dy) * seconds(measured_at, steer_event.applied_datetime)
         )
     return w

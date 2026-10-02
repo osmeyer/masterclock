@@ -80,7 +80,7 @@ def test_every_command_line_setting_is_described_once() -> None:
         "steps",
         "redo_from_mjd",
     }
-    attributes = [setting.attribute for setting in config.SETTINGS]
+    attributes = [setting.options_field for setting in config.SETTINGS]
     assert sorted(attributes) == sorted(fields)
 
 
@@ -88,8 +88,8 @@ def test_each_setting_is_named_by_a_flag_the_parser_knows() -> None:
     """Name each setting by its flag, its entry and its command-line field alike."""
     flags = cli.build_parser()._option_string_actions
     for setting in config.SETTINGS:
-        assert flags[setting.flag].dest == setting.attribute
-        assert setting.entry == setting.attribute
+        assert flags[setting.cli_flag].dest == setting.options_field
+        assert setting.ini_entry == setting.options_field
 
 
 def test_the_required_settings_come_first() -> None:
@@ -101,7 +101,7 @@ def test_the_required_settings_come_first() -> None:
 
 def test_none_is_accepted_by_the_settings_whose_options_accept_it() -> None:
     """Accept the literal None in the file exactly where the command line does."""
-    accepting = {s.attribute for s in config.SETTINGS if s.allow_none}
+    accepting = {s.options_field for s in config.SETTINGS if s.allow_none}
     assert accepting == {
         "log_file",
         "log_level",
@@ -109,10 +109,10 @@ def test_none_is_accepted_by_the_settings_whose_options_accept_it() -> None:
     }
     for setting in config.SETTINGS:
         if setting.allow_none:
-            assert cli.parse_args([setting.flag, "None"]) is not None
+            assert cli.parse_args([setting.cli_flag, "None"]) is not None
         else:
             with pytest.raises(SystemExit):
-                cli.parse_args([setting.flag, "None"])
+                cli.parse_args([setting.cli_flag, "None"])
 
 
 def test_the_sections_and_entries_come_from_the_table() -> None:

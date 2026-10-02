@@ -276,7 +276,7 @@ def test_trace_and_todo_are_dropped_above_their_levels() -> None:
 def test_configure_logging_attaches_a_one_line_stream_handler() -> None:
     """Attach a stream handler with the project format, and set the level."""
     stream = io.StringIO()
-    handler = log.configure_logging(level=logging.WARNING, stream=stream)
+    handler = log.configure_logging(root_level=logging.WARNING, stream=stream)
     root = logging.getLogger()
     assert handler in root.handlers
     assert handler.stream is stream

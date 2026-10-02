@@ -139,11 +139,15 @@ def describe_error(error: Exception) -> str:
     'ValueError'
     """
     if isinstance(error, ValidationError):
-        parts = []
-        for detail in error.errors():
-            location = ".".join(str(part) for part in detail["loc"])
-            parts.append(f"{location}: {detail['msg']}" if location else detail["msg"])
-        text = "; ".join(parts)
+        field_messages = []
+        for field_error in error.errors():
+            location = ".".join(
+                str(location_part) for location_part in field_error["loc"]
+            )
+            field_messages.append(
+                f"{location}: {field_error['msg']}" if location else field_error["msg"]
+            )
+        description = "; ".join(field_messages)
     else:
-        text = str(error) or type(error).__name__
-    return text.replace("\r", "\\r").replace("\n", "\\n")
+        description = str(error) or type(error).__name__
+    return description.replace("\r", "\\r").replace("\n", "\\n")

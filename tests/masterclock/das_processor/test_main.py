@@ -36,6 +36,7 @@ def test_running_the_module_exits_with_the_status_main_returns(
     monkeypatch.delitem(
         sys.modules, "masterclock.das_processor.__main__", raising=False
     )
+    monkeypatch.setattr(das_processor, "main", lambda: 7)
     with pytest.raises(SystemExit) as stopped:
         runpy.run_module("masterclock.das_processor", run_name="__main__")
-    assert stopped.value.code == das_processor.main()
+    assert stopped.value.code == 7

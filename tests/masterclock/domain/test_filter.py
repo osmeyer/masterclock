@@ -21,6 +21,14 @@ step offset and takes the new time constants, never a new model; a row of a
 2- or 3-state series is unsettled while its segment is younger than five
 time constants, a dormant or 1-state row never; flags are written in the
 order ARXPDSNU; and a 1-state series passes its measurements through.
+
+Steps: the gate passes an innovation of at most five innovation scales and
+an rms up to the pair's limit; a counted reject enters the buffer, which
+keeps three; three rejects that agree within three innovation scales are a
+phase step, accepted in the same segment with the step added to the step
+offset; three that lie on a line within three scales are a frequency step,
+accepted in a new warm segment with the prediction moved onto the line; a
+1-state series takes only phase steps.
 """
 
 import dataclasses
@@ -812,3 +820,256 @@ def test_a_one_state_series_passes_its_measurements_through() -> None:
         assert (row.y, row.d) == (0.0, 0.0)
         assert "U" not in row.flags
         last = row
+
+
+# ------------------------------------------------------- step classification
+
+EPOCH: Final = timedelta(minutes=10)
+"""One epoch."""
+
+
+def buffer(*values: float) -> tuple[tuple[datetime, float], ...]:
+    """Give a reject buffer of ``values`` at consecutive epochs from MARK."""
+    return tuple((MARK + EPOCH * i, value) for i, value in enumerate(values))
+
+
+@pytest.mark.parametrize(
+    ("values", "sigma", "kind"),
+    [
+        ((150.0, 151.0, 149.0), 3.0, "phase"),
+        ((100.0, 100.0, 112.0), 3.0, "phase"),
+        ((100.0, 100.0, 121.0), 3.0, "frequency"),
+        ((30.0, 60.0, 90.0), 3.0, "frequency"),
+        ((0.0, 120.0, 120.0), 10.0, None),
+        ((100.0, -100.0, 100.0), 3.0, None),
+    ],
+)
+def test_classify_tells_a_phase_step_from_a_frequency_step(
+    values: tuple[float, float, float], sigma: float, kind: str | None
+) -> None:
+    """Find a phase step within 3 sigma of the mean, else a line within 3 sigma."""
+    assert estimator.classify(buffer(*values), sigma).kind == kind
+
+
+def test_classify_fits_the_line_of_a_frequency_step() -> None:
+    """Give the intercept a and the slope s, per second, of the fitted line."""
+    classified = estimator.classify(buffer(30.0, 60.0, 90.0), 3.0)
+    assert classified.a == pytest.approx(30.0)
+    assert classified.s == pytest.approx(30.0 / T)
+
+
+def test_classify_gives_no_line_for_a_phase_step() -> None:
+    """Leave a and s empty when the innovations agree."""
+    classified = estimator.classify(buffer(150.0, 150.0, 150.0), 3.0)
+    assert (classified.a, classified.s) == (None, None)
+
+
+def test_classify_uses_the_epochs_of_the_rejects() -> None:
+    """Fit against the epochs as they are, so a gap between rejects counts."""
+    rejects = ((MARK, 30.0), (MARK + EPOCH, 60.0), (MARK + 3 * EPOCH, 120.0))
+    classified = estimator.classify(rejects, 3.0)
+    assert classified.kind == "frequency"
+    assert classified.s == pytest.approx(30.0 / T)
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_classify_needs_three_rejects(count: int) -> None:
+    """Raise FilterError for a buffer that does not hold three rejects."""
+    with pytest.raises(FilterError, match="three rejects"):
+        estimator.classify(buffer(*[10.0] * count), 3.0)
+
+
+@pytest.mark.parametrize(
+    ("innovation", "scale", "within"),
+    [
+        (Fraction(15), 3.0, True),
+        (Fraction(-15), 3.0, True),
+        (Fraction(15) + Fraction(1, 10**9), 3.0, False),
+        (Fraction(-15) - Fraction(1, 10**9), 3.0, False),
+    ],
+)
+def test_the_gate_is_five_innovation_scales_wide(
+    innovation: Fraction, scale: float, within: bool
+) -> None:
+    """Pass an innovation of at most 5 sigma either way, compared exactly (U8)."""
+    assert estimator.within_gate(innovation, scale) is within
+
+
+@pytest.mark.parametrize(
+    ("rms", "rms_max", "ok"), [(80, 80, True), (81, 80, False), (10**6, None, True)]
+)
+def test_the_gate_refuses_an_rms_over_the_limit(
+    rms: int, rms_max: int | None, ok: bool
+) -> None:
+    """Pass an rms up to the pair's limit, and any rms without one (U8)."""
+    assert estimator.rms_ok(rms, rms_max) is ok
+
+
+def test_a_counted_reject_enters_the_buffer() -> None:
+    """Add one to consecutive_rejects and push (E, innovation), keeping three."""
+    last = last_row(
+        innovation=31.0,
+        consecutive_rejects=3,
+        rejects=buffer(10.0, 20.0, 31.0),
+        epochs_since_accept=3,
+        flags="R",
+    )
+    draft = estimator.count_reject(moved_on(last), Fraction(81, 2))
+    assert draft.consecutive_rejects == 4
+    assert draft.rejects == (*buffer(10.0, 20.0, 31.0)[1:], (MARK + EPOCH, 40.5))
+
+
+def run_epoch(last: Row, z: int, settings: SeriesParams, rms: int = 3) -> Row:
+    """Process one epoch's measurement as the filter step does, gate to row."""
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    draft = estimator.carry(last.interpolated_datetime + EPOCH, last, settings)
+    innovation = z - prediction.x
+    draft = dataclasses.replace(draft, innovation=float(innovation))
+    assert draft.innovation_scale is not None
+    if estimator.within_gate(innovation, draft.innovation_scale) and estimator.rms_ok(
+        rms, settings.rms_max
+    ):
+        return estimator.accept(draft, prediction, innovation, rms)
+    draft = estimator.count_reject(draft, innovation)
+    stepped = estimator.accept_step(draft, prediction, z, rms, settings)
+    if stepped is not None:
+        return stepped
+    return estimator.hold(draft, prediction, "R", settings)
+
+
+def truth(epochs: int, offset: int = 0) -> list[int]:
+    """Give the worked epoch's noise-free measurements, ``offset`` added."""
+    rate = exact(0.0123)
+    return [round_even(1_234_567 + rate * T * k) + offset for k in range(1, epochs + 1)]
+
+
+def run(measurements: list[int], settings: SeriesParams, last: Row) -> list[Row]:
+    """Process a run of measurements from ``last``, one epoch each."""
+    rows = []
+    for z in measurements:
+        last = run_epoch(last, z, settings)
+        rows.append(last)
+    return rows
+
+
+def test_an_innovation_in_the_gate_is_accepted_and_one_past_it_rejected() -> None:
+    """Accept 5 sigma, reject just over it, reject an rms over the limit (U8)."""
+    settings = params()
+    last = last_row(y=0.0)
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    edge = prediction.x + 15
+    assert edge == 1_234_582
+    assert run_epoch(last, int(edge), settings).flags == "A"
+    assert run_epoch(last, int(edge) + 1, settings).flags == "R"
+    assert run_epoch(last, int(edge) - 30, settings).flags == "A"
+    assert run_epoch(last, int(edge) - 31, settings).flags == "R"
+    assert run_epoch(last, int(prediction.x), settings, rms=81).flags == "R"
+
+
+@pytest.mark.parametrize("model", [3, 2, 1])
+def test_a_phase_step_is_found_on_the_third_reject(model: Literal[1, 2, 3]) -> None:
+    """Give R, R, then A with step_offset up by the step, same segment (U9)."""
+    M = {3: 100.0, 2: 30.0, 1: None}[model]
+    settings = params(model=model, M=M)
+    if model == 1:
+        last = last_row(**ONE_STATE, step_offset=12)
+    else:
+        last = last_row(filter_states=model, time_constant=M, step_offset=12)
+    measurements = truth(6) if model > 1 else [1_234_567] * 6
+    before = run(measurements[:3], settings, last)
+    assert [row.flags for row in before] == ["A", "A", "A"]
+    step = 150
+    after = run([z + step for z in measurements[3:]], settings, before[-1])
+    assert [row.flags for row in after] == ["R", "R", "A"]
+    assert abs(after[-1].step_offset - 12 - step) <= 1
+    assert after[-1].segment == before[-1].segment
+    assert after[-1].innovation is not None
+    assert abs(after[-1].innovation) <= 1
+    assert (after[-1].consecutive_rejects, after[-1].rejects) == (0, ())
+
+
+def test_a_phase_step_rounds_the_mean_half_to_even() -> None:
+    """Make the step the mean innovation rounded once, ties to even."""
+    last = last_row()
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    draft = moved_on(last, rejects=buffer(100.5, 100.5, 100.5), consecutive_rejects=3)
+    row = estimator.phase_step(draft, prediction, round_even(prediction.x) + 100, 3)
+    assert row.step_offset == 100
+    assert row.innovation == float(round_even(prediction.x) - prediction.x)
+
+
+@pytest.mark.parametrize("model", [3, 2])
+def test_a_frequency_step_starts_a_new_segment(model: Literal[2, 3]) -> None:
+    """Give R, R, then A N U in segment + 1, the prediction on the line (U10)."""
+    M = {3: 100.0, 2: 30.0}[model]
+    settings = params(model=model, M=M)
+    last = last_row(filter_states=model, time_constant=M, step_offset=12)
+    measurements = truth(6)
+    before = run(measurements[:3], settings, last)
+    ramp = [z + 30 * (i + 1) for i, z in enumerate(measurements[3:])]
+    after = run(ramp, settings, before[-1])
+    assert [row.flags for row in after] == ["R", "R", "ANU"]
+    assert after[-1].segment == before[-1].segment + 1
+    assert (after[-1].step_offset, after[-1].epochs_in_segment) == (12, 0)
+    assert after[-1].innovation is not None
+    assert abs(after[-1].innovation) <= 1
+    assert after[-1].y is not None
+    assert before[-1].y is not None
+    assert after[-1].y == pytest.approx(before[-1].y + 30 / T, abs=1e-3)
+
+
+def test_a_frequency_step_moves_the_phase_to_the_line_at_the_third_reject() -> None:
+    """Add a + s t3, exactly, with t3 the time from the first reject to the third."""
+    last = last_row()
+    prediction = State(x=Fraction(1_000), y=0.0123)
+    draft = moved_on(last, rejects=buffer(30.0, 60.0, 90.0), consecutive_rejects=3)
+    row = estimator.frequency_step(draft, prediction, 30.0, 0.05, 1_090, 3, params())
+    moved = Fraction(1_000) + exact(30.0) + exact(0.05) * 2 * T
+    assert row.innovation == float(1_090 - moved)
+    assert row.flags == "ANU"
+
+
+def test_a_one_state_series_takes_no_frequency_step() -> None:
+    """Keep rejecting a rate step on a 1-state series: it has no rate (9.4)."""
+    settings = params(model=1, M=None)
+    last = last_row(**ONE_STATE)
+    ramp = [1_234_567 + 30 * (i + 1) for i in range(4)]
+    rows = run(ramp, settings, last)
+    assert [row.flags for row in rows] == ["R", "R", "R", "R"]
+    draft = moved_on(last, rejects=buffer(30.0, 60.0, 90.0), consecutive_rejects=3)
+    prediction = State(x=Fraction(1_234_567), y=0.0)
+    assert estimator.accept_step(draft, prediction, 1_234_657, 3, settings) is None
+
+
+def test_no_step_is_looked_for_before_three_rejects() -> None:
+    """Give no step while fewer than three consecutive rejects are counted."""
+    last = last_row()
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    draft = moved_on(last, rejects=buffer(150.0, 150.0), consecutive_rejects=2)
+    assert estimator.accept_step(draft, prediction, 1_234_724, 3, params()) is None
+
+
+def test_scattered_rejects_show_no_step() -> None:
+    """Give no step when the rejects agree on neither a phase nor a line."""
+    last = last_row()
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    draft = moved_on(last, rejects=buffer(100.0, -100.0, 100.0), consecutive_rejects=3)
+    assert estimator.accept_step(draft, prediction, 1_234_674, 3, params()) is None
+
+
+def test_a_step_needs_a_series_with_an_innovation_scale() -> None:
+    """Raise FilterError for three rejects on a draft that has no scale."""
+    draft = moved_on(
+        last_row(),
+        rejects=buffer(150.0, 150.0, 150.0),
+        consecutive_rejects=3,
+        innovation_scale=None,
+    )
+    prediction = State(x=Fraction(0), y=0.0)
+    with pytest.raises(FilterError, match="no innovation scale"):
+        estimator.accept_step(draft, prediction, 150, 3, params())

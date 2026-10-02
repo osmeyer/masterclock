@@ -20,6 +20,11 @@ excluded or missing one leaves the prediction standing (:func:`hold`); a
 series with no valid state is dormant (:func:`dormant`) until it starts
 again from a measurement alone (:func:`cold_start`). Only the finished row
 is checked, by :func:`finish`.
+
+A measurement is accepted when it passes the gate (:func:`within_gate`,
+:func:`rms_ok`). One that fails is a counted reject (:func:`count_reject`),
+and three in a row are looked at for a step (:func:`classify`): agreeing,
+they are a phase step; on a line, a frequency step (:func:`accept_step`).
 """
 
 import dataclasses
@@ -29,11 +34,21 @@ from datetime import datetime
 from fractions import Fraction
 from typing import TYPE_CHECKING, Final, Literal
 
+from pydantic import BaseModel, ConfigDict
+
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
-from masterclock.domain.phase import EPOCH_SECONDS, exact, from_fs, to_fs
+from masterclock.domain.phase import (
+    EPOCH_SECONDS,
+    exact,
+    from_fs,
+    round_even,
+    seconds,
+    to_fs,
+)
 from masterclock.domain.series import (
     FLAG_ORDER,
+    MAX_REJECTS,
     FilterStates,
     Reject,
     SeriesParams,
@@ -533,3 +548,303 @@ def cold_start(draft: RowDraft, z: int, params: SeriesParams) -> Row:
         ),
         "A",
     )
+
+
+# ------------------------------------------------------- step classification
+
+K_OUT: Final[float] = 5.0
+"""How many innovation scales wide the gate is, either way."""
+
+K_STEP: Final[float] = 3.0
+"""How many innovation scales three rejects may stray from a step and show it."""
+
+_STEP_REJECTS: Final[int] = 3
+"""How many consecutive counted rejects a step is looked for in."""
+
+
+class Classified(BaseModel):
+    """What three consecutive rejects show: a phase step, a frequency step, or neither.
+
+    Parameters
+    ----------
+    kind : {'phase', 'frequency'} or None
+        The kind of step; ``None`` when the rejects show neither.
+    a : float or None, optional
+        For a frequency step, the fitted line's value at the first reject,
+        ps; ``None`` otherwise.
+    s : float or None, optional
+        For a frequency step, the fitted line's slope, ps/s; ``None``
+        otherwise.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    kind: Literal["phase", "frequency"] | None
+    a: float | None = None
+    s: float | None = None
+
+
+def classify(rejects: tuple[Reject, ...], sigma: float) -> Classified:
+    """Tell what three consecutive rejects show (design 9.4).
+
+    Parameters
+    ----------
+    rejects : tuple of (datetime, float)
+        The reject buffer: three (epoch, innovation) entries, oldest first,
+        the newest the current one.
+    sigma : float
+        The innovation scale, ps.
+
+    Returns
+    -------
+    Classified
+        A phase step when every innovation lies within :data:`K_STEP`
+        scales of their mean. Otherwise a frequency step, with the line
+        fitted by least squares against the time since the first reject,
+        when every innovation lies within :data:`K_STEP` scales of it.
+        Otherwise neither.
+
+    Raises
+    ------
+    FilterError
+        If the buffer does not hold three rejects.
+
+    Examples
+    --------
+    >>> from datetime import UTC, datetime, timedelta
+    >>> start = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
+    >>> epochs = [start + timedelta(minutes=10 * i) for i in range(3)]
+    >>> classify(tuple(zip(epochs, (150.0, 151.0, 149.0))), 3.0).kind
+    'phase'
+    >>> classify(tuple(zip(epochs, (30.0, 60.0, 90.0))), 3.0).kind
+    'frequency'
+    """
+    if len(rejects) != _STEP_REJECTS:
+        message = f"a step is looked for in three rejects, not {len(rejects)}"
+        _log.error(message)
+        raise FilterError(message)
+    first = rejects[0][0]
+    ts = [float(seconds(when, first)) for when, _ in rejects]
+    vs = [value for _, value in rejects]
+    vbar = sum(vs) / _STEP_REJECTS
+    if max(abs(v - vbar) for v in vs) < K_STEP * sigma:
+        return Classified(kind="phase")
+    tbar = sum(ts) / _STEP_REJECTS
+    s = sum((t - tbar) * (v - vbar) for t, v in zip(ts, vs, strict=True)) / sum(
+        (t - tbar) ** 2 for t in ts
+    )
+    a = vbar - s * tbar
+    if max(abs(v - a - s * t) for t, v in zip(ts, vs, strict=True)) < K_STEP * sigma:
+        return Classified(kind="frequency", a=a, s=s)
+    return Classified(kind=None)
+
+
+def within_gate(innovation: Fraction, scale: float) -> bool:
+    """Tell whether an innovation passes the gate's width (design 9.1).
+
+    Parameters
+    ----------
+    innovation : Fraction
+        The measurement less the predicted phase, exact.
+    scale : float
+        The innovation scale, ps.
+
+    Returns
+    -------
+    bool
+        Whether the innovation is at most :data:`K_OUT` scales either way,
+        compared exactly.
+
+    Examples
+    --------
+    >>> within_gate(Fraction(15), 3.0), within_gate(Fraction(-31, 2), 3.0)
+    (True, False)
+    """
+    return abs(innovation) <= exact(K_OUT * scale)
+
+
+def rms_ok(rms: int, rms_max: int | None) -> bool:
+    """Tell whether a pair measurement's rms passes the gate (design 9.1).
+
+    Parameters
+    ----------
+    rms : int
+        The rms the DAS gave with the measurement, ps.
+    rms_max : int or None
+        The pair's rms limit, ps; ``None`` for no limit.
+
+    Returns
+    -------
+    bool
+        Whether ``rms`` is at most ``rms_max``, or there is no limit.
+
+    Examples
+    --------
+    >>> rms_ok(80, 80), rms_ok(81, 80), rms_ok(81, None)
+    (True, False, True)
+    """
+    return rms_max is None or rms <= rms_max
+
+
+def count_reject(draft: RowDraft, innovation: Fraction) -> RowDraft:
+    """Count a rejected measurement and put it in the reject buffer (design 9.3).
+
+    Parameters
+    ----------
+    draft : RowDraft
+        The row as built so far.
+    innovation : Fraction
+        The rejected measurement less the predicted phase.
+
+    Returns
+    -------
+    RowDraft
+        One more consecutive reject, and (epoch, innovation) added to the
+        buffer, which keeps the newest
+        :data:`~masterclock.domain.series.MAX_REJECTS`.
+    """
+    entry = (draft.interpolated_datetime, float(innovation))
+    return dataclasses.replace(
+        draft,
+        consecutive_rejects=draft.consecutive_rejects + 1,
+        rejects=(*draft.rejects, entry)[-MAX_REJECTS:],
+    )
+
+
+def phase_step(draft: RowDraft, prediction: State, z: int, floor: float) -> Row:
+    """Accept a measurement after a phase step the rejects agree on (design 9.4).
+
+    Parameters
+    ----------
+    draft : RowDraft
+        The row as built so far, its buffer holding the three rejects.
+    prediction : State
+        The series' prediction at the epoch.
+    z : int
+        The current measurement, ps.
+    floor : float
+        The lowest the innovation scale may go, ps (see :func:`accept`).
+
+    Returns
+    -------
+    Row
+        The step, the rejects' mean innovation rounded once half to even,
+        added to the step offset and to the predicted phase; then the
+        measurement accepted against the corrected prediction, in the same
+        segment.
+
+    Raises
+    ------
+    FilterError
+        If the finished row breaks a rule of :class:`Row`.
+    """
+    total = sum((exact(value) for _, value in draft.rejects), Fraction(0))
+    step = round_even(total / _STEP_REJECTS)
+    corrected = State(x=prediction.x + step, y=prediction.y, d=prediction.d)
+    stepped = dataclasses.replace(draft, step_offset=draft.step_offset + step)
+    return accept(stepped, corrected, z - corrected.x, floor)
+
+
+def frequency_step(
+    draft: RowDraft,
+    prediction: State,
+    a: float,
+    s: float,
+    z: int,
+    floor: float,
+    params: SeriesParams,
+) -> Row:
+    """Accept a measurement after a frequency step the rejects lie on (design 9.4).
+
+    Parameters
+    ----------
+    draft : RowDraft
+        The row as built so far, its buffer holding the three rejects.
+    prediction : State
+        The series' prediction at the epoch.
+    a : float
+        The fitted line's value at the first reject, ps.
+    s : float
+        The fitted line's slope, ps/s.
+    z : int
+        The current measurement, ps.
+    floor : float
+        The lowest the innovation scale may go, ps (see :func:`accept`).
+    params : SeriesParams
+        The settings in force, whose time constants the new segment takes.
+
+    Returns
+    -------
+    Row
+        The prediction moved onto the line at the current epoch: a + s t3
+        added to the phase, exactly, with t3 the time from the first reject
+        to the current one, and s added to the rate. Then a warm segment
+        start (see :func:`start_segment`), keeping the step offset, and the
+        measurement accepted against the corrected prediction.
+
+    Raises
+    ------
+    FilterError
+        If ``params`` is for another model than the series', or the
+        finished row breaks a rule of :class:`Row`.
+    """
+    t3 = seconds(draft.rejects[-1][0], draft.rejects[0][0])
+    corrected = State(
+        x=prediction.x + exact(a) + exact(s) * t3, y=prediction.y + s, d=prediction.d
+    )
+    started = start_segment(draft, params, keep_offset=True)
+    return accept(started, corrected, z - corrected.x, floor)
+
+
+def accept_step(
+    draft: RowDraft, prediction: State, z: int, floor: float, params: SeriesParams
+) -> Row | None:
+    """Accept a measurement after a step, when the rejects show one (design 9.4).
+
+    Parameters
+    ----------
+    draft : RowDraft
+        The row as built so far, the current reject counted.
+    prediction : State
+        The series' prediction at the epoch.
+    z : int
+        The current measurement, ps.
+    floor : float
+        The lowest the innovation scale may go, ps (see :func:`accept`).
+    params : SeriesParams
+        The settings in force.
+
+    Returns
+    -------
+    Row or None
+        The accepted row after a phase step (see :func:`phase_step`) or, for
+        a 2- or 3-state series, a frequency step (see
+        :func:`frequency_step`). ``None`` while fewer than three
+        consecutive rejects are counted, when the rejects show neither, and
+        for a frequency step of a 1-state series, which has no rate.
+
+    Raises
+    ------
+    FilterError
+        If the draft has no innovation scale, or the finished row breaks a
+        rule of :class:`Row`.
+    """
+    if draft.consecutive_rejects < _STEP_REJECTS:
+        return None
+    if draft.innovation_scale is None:
+        message = f"a reject at {draft.interpolated_datetime} has no innovation scale"
+        _log.error(message)
+        raise FilterError(message)
+    classified = classify(draft.rejects, draft.innovation_scale)
+    if classified.kind == "phase":
+        return phase_step(draft, prediction, z, floor)
+    if (
+        classified.kind == "frequency"
+        and draft.filter_states > 1
+        and classified.a is not None
+        and classified.s is not None
+    ):
+        return frequency_step(
+            draft, prediction, classified.a, classified.s, z, floor, params
+        )
+    return None

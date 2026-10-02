@@ -21,9 +21,12 @@ good when it has no whole row, and is refused when its first row does not
 parse; and the last row of a sound file is read back as its row (U26).
 """
 
+import os
+import shutil
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Final, Literal
 
 import pytest
@@ -40,7 +43,7 @@ from masterclock.das_processor.measurements import (
 )
 from masterclock.das_processor.read_cd5m5m import DASMeasurement
 from masterclock.domain.phase import PHASE_MAX, exact
-from masterclock.domain.series import Row, SeriesKey, State
+from masterclock.domain.series import PairKey, Row, SeriesKey, State, TripleKey
 
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """The worked epoch's start."""
@@ -733,3 +736,309 @@ def test_a_file_that_cannot_be_opened_is_refused(tmp_path: Path) -> None:
         files.good_through(tmp_path / "missing.dat", "meas", KEY)
     with pytest.raises(DataFileError, match="cannot read"):
         files.read_last_row(tmp_path / "missing.dat", "meas", KEY)
+
+
+# ------------------------------------------------------ day buffer and write
+
+TRIPLE: Final = ("mc1", "mc2", "ox23")
+"""The triple the double-difference files below are for."""
+
+
+def directories(tmp_path: Path) -> tuple[Path, Path]:
+    """Make the two archive directories."""
+    meas, ddiff = tmp_path / "meas", tmp_path / "ddiff"
+    meas.mkdir()
+    ddiff.mkdir()
+    return meas, ddiff
+
+
+def predicted(index: int) -> files.MeasRecord:
+    """Give the pair's predicted record ``index`` epochs after E."""
+    return files.MeasRecord(
+        measurement=None,
+        row=row(
+            interpolated_datetime=E + index * STEP,
+            epochs_in_segment=812 + index,
+            epochs_since_accept=index + 1,
+            flags="P",
+        ),
+    )
+
+
+def triple_record(index: int) -> files.DdiffRecord:
+    """Give the triple's predicted record ``index`` epochs after E."""
+    return files.DdiffRecord(measurement=None, row=predicted(index).row)
+
+
+def filled(tmp_path: Path, epochs: int = 2) -> tuple[files.DayBuffer, Path, Path]:
+    """Give a buffer of ``epochs`` rows for the pair and the triple, and their paths."""
+    meas, ddiff = directories(tmp_path)
+    pair_path, triple_path = (
+        meas / "das_a.mc2.ox23.dat",
+        ddiff / "das_a.mc1.mc2.ox23.dat",
+    )
+    buffer = files.DayBuffer("a")
+    for index in range(epochs):
+        buffer.add(triple_path, TRIPLE, triple_record(index))
+        buffer.add(pair_path, KEY, predicted(index))
+    return buffer, pair_path, triple_path
+
+
+def test_a_new_file_gets_its_header_and_rows_in_one_write(tmp_path: Path) -> None:
+    """Create each file with its header then its rows, all at once (5.8)."""
+    buffer, pair_path, triple_path = filled(tmp_path)
+    files.write_buffer(buffer)
+    expected = files.header("meas", "a", KEY) + "".join(
+        files.format_meas_row(predicted(i)) + "\n" for i in range(2)
+    )
+    assert pair_path.read_text(encoding="ascii") == expected
+    assert files.good_through(triple_path, "ddiff", TRIPLE) == E + STEP
+
+
+def test_a_later_write_appends_to_the_file(tmp_path: Path) -> None:
+    """Append the next day's rows after the rows already written."""
+    buffer, pair_path, _ = filled(tmp_path)
+    files.write_buffer(buffer)
+    buffer.add(pair_path, KEY, predicted(2))
+    files.write_buffer(buffer)
+    assert files.good_through(pair_path, "meas", KEY) == E + 2 * STEP
+    assert (
+        pair_path.read_text(encoding="ascii").count("das_processor measurement file")
+        == 1
+    )
+
+
+def test_a_series_first_seen_in_a_day_appears_at_the_day_s_write(
+    tmp_path: Path,
+) -> None:
+    """Create a file for a series first seen mid-day, header first, at the write."""
+    buffer, pair_path, _ = filled(tmp_path)
+    files.write_buffer(buffer)
+    later = pair_path.parent / "das_a.mc2.cs7.dat"
+    buffer.add(pair_path, KEY, predicted(2))
+    buffer.add(later, ("mc2", "cs7"), predicted(2))
+    assert not later.exists()
+    files.write_buffer(buffer)
+    text = later.read_text(encoding="ascii")
+    assert text.startswith("# das_processor measurement file, format 1")
+    assert (
+        files.read_last_row(later, "meas", ("mc2", "cs7")).interpolated_datetime
+        == E + 2 * STEP
+    )
+
+
+def test_after_a_write_the_text_is_empty_and_the_last_rows_remain(
+    tmp_path: Path,
+) -> None:
+    """Empty the buffer's text and keep each series' newest row (5.8)."""
+    buffer, _, _ = filled(tmp_path)
+    files.write_buffer(buffer)
+    assert buffer.texts == {}
+    assert buffer.last == {KEY: predicted(1).row, TRIPLE: triple_record(1).row}
+
+
+def test_the_newest_row_is_the_one_read_back(tmp_path: Path) -> None:
+    """Keep the row parsed back from its line, as a later run would read it (I5)."""
+    meas, _ = directories(tmp_path)
+    buffer = files.DayBuffer("a")
+    record = files.MeasRecord(measurement=PAIR, row=row(innovation=2.62))
+    buffer.add(meas / "das_a.mc2.ox23.dat", KEY, record)
+    assert buffer.last[KEY].innovation is None
+    assert buffer.last[KEY] == row()
+
+
+def test_a_row_too_wide_is_refused_before_it_is_buffered(tmp_path: Path) -> None:
+    """Raise DataFileError at add, before any text is kept."""
+    meas, _ = directories(tmp_path)
+    buffer = files.DayBuffer("a")
+    record = files.MeasRecord(measurement=None, row=row(step_offset=10**16, flags="P"))
+    with pytest.raises(DataFileError, match="does not fit"):
+        buffer.add(meas / "das_a.mc2.ox23.dat", KEY, record)
+    assert buffer.texts == {}
+
+
+def test_a_file_keeps_one_series(tmp_path: Path) -> None:
+    """Raise DataFileError when a path is given rows of two series or kinds."""
+    buffer, pair_path, _ = filled(tmp_path)
+    with pytest.raises(DataFileError, match="series"):
+        buffer.add(pair_path, ("mc2", "cs7"), predicted(2))
+    with pytest.raises(DataFileError, match="series"):
+        buffer.add(pair_path, KEY, triple_record(2))
+
+
+class Recorder:
+    """Record every open, fsync and close the write makes."""
+
+    def __init__(self) -> None:
+        """Start with no events."""
+        self.events: list[tuple[str, str]] = []
+        self.open_now = 0
+        self.most_open = 0
+
+
+def test_files_are_written_one_at_a_time_in_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Write measurement files, then double-difference files, one open at a time."""
+    meas, ddiff = directories(tmp_path)
+    buffer = files.DayBuffer("a")
+    pairs: list[PairKey] = [("mc2", "ox23"), ("mc1", "mc2"), ("mc1", "mc1")]
+    triples: list[TripleKey] = [("mc2", "mc2", "ox23"), ("mc1", "mc2", "ox23")]
+    for triple in triples:
+        buffer.add(ddiff / f"das_a.{'.'.join(triple)}.dat", triple, triple_record(0))
+    for pair in pairs:
+        buffer.add(meas / f"das_a.{'.'.join(pair)}.dat", pair, predicted(0))
+    recorder = Recorder()
+    real_open, real_fsync = Path.open, os.fsync
+    fds: dict[int, str] = {}
+
+    class Tracked:
+        """A file that records its close."""
+
+        def __init__(self, inner: object, name: str) -> None:
+            """Wrap ``inner``."""
+            self.inner, self.name = inner, name
+
+        def __enter__(self) -> Tracked:
+            """Enter the wrapped file."""
+            self.inner.__enter__()  # type: ignore[attr-defined]
+            return self
+
+        def __exit__(self, *details: object) -> None:
+            """Close the wrapped file and record it."""
+            fds.pop(self.inner.fileno(), None)  # type: ignore[attr-defined]
+            self.inner.__exit__(*details)  # type: ignore[attr-defined]
+            recorder.open_now -= 1
+            recorder.events.append(("close", self.name))
+
+        def write(self, data: bytes) -> int:
+            """Write to the wrapped file."""
+            return self.inner.write(data)  # type: ignore[attr-defined, no-any-return]
+
+        def flush(self) -> None:
+            """Flush the wrapped file."""
+            self.inner.flush()  # type: ignore[attr-defined]
+
+        def fileno(self) -> int:
+            """Give the wrapped file's descriptor."""
+            number: int = self.inner.fileno()  # type: ignore[attr-defined]
+            fds[number] = self.name
+            return number
+
+    def tracked_open(path: Path, *args: object, **kwargs: object) -> Tracked:
+        """Open ``path`` and record it."""
+        recorder.open_now += 1
+        recorder.most_open = max(recorder.most_open, recorder.open_now)
+        recorder.events.append(("open", path.name))
+        return Tracked(real_open(path, *args, **kwargs), path.name)  # type: ignore[call-overload]
+
+    def tracked_fsync(fd: int) -> None:
+        """Flush ``fd`` and record it."""
+        recorder.events.append(("fsync", fds.get(fd, "directory")))
+        real_fsync(fd)
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+    monkeypatch.setattr(os, "fsync", tracked_fsync)
+    files.write_buffer(buffer)
+    names = [f"das_a.{'.'.join(key)}.dat" for key in sorted(pairs) + sorted(triples)]
+    expected = [
+        event
+        for name in names
+        for event in (("open", name), ("fsync", name), ("close", name))
+    ]
+    assert recorder.events[: len(expected)] == expected
+    assert recorder.events[len(expected) :] == [("fsync", "directory")] * 2
+    assert recorder.most_open == 1
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "torn",
+        "not_regular",
+        "symlink",
+        "read_only",
+        "clash",
+        "no_directory",
+        "no_space",
+        "not_ascii",
+    ],
+)
+def test_a_failed_check_changes_no_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, problem: str
+) -> None:
+    """Raise DataFileError in the prepare step with every file as it was (5.8)."""
+    buffer, pair_path, triple_path = filled(tmp_path)
+    files.write_buffer(buffer)
+    buffer.add(pair_path, KEY, predicted(2))
+    buffer.add(triple_path, TRIPLE, triple_record(2))
+    new_path = pair_path.parent / "das_a.mc2.cs7.dat"
+    buffer.add(new_path, ("mc2", "cs7"), predicted(2))
+    if problem == "torn":
+        with pair_path.open("ab") as file:
+            file.write(b"2025")
+    elif problem == "not_regular":
+        triple_path.unlink()
+        triple_path.mkdir()
+    elif problem == "symlink":
+        target = tmp_path / "copy.dat"
+        target.write_bytes(triple_path.read_bytes())
+        triple_path.unlink()
+        triple_path.symlink_to(target)
+    elif problem == "read_only":
+        triple_path.chmod(0o444)
+    elif problem == "clash":
+        new_path.symlink_to(tmp_path / "elsewhere")
+    elif problem == "no_directory":
+        new_path = tmp_path / "gone" / "das_a.mc2.cs7.dat"
+        buffer.add(new_path, ("mc2", "cs7"), predicted(3))
+    elif problem == "no_space":
+        monkeypatch.setattr(shutil, "disk_usage", lambda _: SimpleNamespace(free=10))
+    else:
+        buffer.texts[pair_path] += "é\n"
+    before = {
+        path: path.read_bytes() for path in (pair_path, triple_path) if path.is_file()
+    }
+    with pytest.raises(DataFileError):
+        files.write_buffer(buffer)
+    after = {
+        path: path.read_bytes() for path in (pair_path, triple_path) if path.is_file()
+    }
+    assert after == before
+    assert not (new_path.exists() and not new_path.is_symlink())
+
+
+def test_an_error_while_writing_is_a_data_file_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise DataFileError for a device fault in the write step."""
+    buffer, _, _ = filled(tmp_path)
+
+    def failing(_fd: int) -> None:
+        """Fail as a device would."""
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "fsync", failing)
+    with pytest.raises(DataFileError, match="Input/output error"):
+        files.write_buffer(buffer)
+
+
+def test_an_error_flushing_a_directory_is_a_data_file_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise DataFileError when a new file's directory cannot be flushed."""
+    buffer, _, _ = filled(tmp_path)
+
+    def failing(_path: object, _flags: int) -> int:
+        """Fail as a device would."""
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "open", failing)
+    with pytest.raises(DataFileError, match="cannot flush directory"):
+        files.write_buffer(buffer)
+
+
+def test_an_empty_buffer_writes_nothing(tmp_path: Path) -> None:
+    """Change nothing when no rows are buffered."""
+    files.write_buffer(files.DayBuffer("a"))
+    assert list(tmp_path.iterdir()) == []

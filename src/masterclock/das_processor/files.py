@@ -22,6 +22,7 @@ innovation, so a measurement row reads back without one.
 
 import os
 import re
+import shutil
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1135,3 +1136,281 @@ def read_last_row(path: Path, kind: FileKind, key: SeriesKey) -> Row:
     except UnicodeDecodeError as exc:
         _fail(f"data file {path} is not sound: its last row is not ASCII", exc)
     return _parse_line(text, kind, key).row
+
+
+# --------------------------------------------------- day buffer and write
+
+_KIND_ORDER: Final[dict[FileKind, int]] = {"meas": 0, "ddiff": 1}
+"""The order the kinds of file are written in: measurement files first."""
+
+
+class DayBuffer:
+    """The rows computed since the last write, for every file (design 5.8).
+
+    Rows are written a UTC day at a time. Until then each file's rows are
+    held here as text, and each series' newest row as a row, which the next
+    epoch takes as the series' last row.
+
+    Parameters
+    ----------
+    channel : {'a', 'b'}
+        The RF channel, whose name a new file's header gives.
+
+    Attributes
+    ----------
+    texts : dict of Path to str
+        Each file's lines since the last write, newlines included.
+    last : dict of series key to Row
+        Each series' newest row, as a later run would read it back.
+    """
+
+    def __init__(self, channel: RfChannel) -> None:
+        """Start an empty buffer.
+
+        Parameters
+        ----------
+        channel : {'a', 'b'}
+            The RF channel.
+        """
+        self.channel: RfChannel = channel
+        self.texts: dict[Path, str] = {}
+        self.last: dict[SeriesKey, Row] = {}
+        self._series: dict[Path, tuple[FileKind, SeriesKey]] = {}
+
+    def add(self, path: Path, key: SeriesKey, record: MeasRecord | DdiffRecord) -> None:
+        """Add a series' record for an epoch.
+
+        Parameters
+        ----------
+        path : Path
+            The series' file.
+        key : (str, str) or (str, str, str)
+            The series.
+        record : MeasRecord or DdiffRecord
+            Its measurement and row at the epoch.
+
+        Raises
+        ------
+        DataFileError
+            If a value does not fit its column, the line does not read back
+            as written, or ``path`` was given another series or kind of
+            file before.
+
+        Notes
+        -----
+        The record is formatted and read back, and the row read back is
+        kept as the series' newest: the row a later run would read from the
+        file, so the next epoch is the same whether it takes the row from
+        here or from the file (I5).
+        """
+        kind: FileKind = "meas" if isinstance(record, MeasRecord) else "ddiff"
+        if self._series.setdefault(path, (kind, key)) != (kind, key):
+            _fail(f"{path} holds the {self._series[path]} series, not {(kind, key)}")
+        if isinstance(record, MeasRecord):
+            line = format_meas_row(record)
+            back = parse_meas_row(line, (key[0], key[1])).row
+        else:
+            line = format_ddiff_row(record)
+            back = parse_ddiff_row(line).row
+        self.texts[path] = self.texts.get(path, "") + line + "\n"
+        self.last[key] = back
+
+    def series_of(self, path: Path) -> tuple[FileKind, SeriesKey]:
+        """Give the kind of file and the series a buffered path is for.
+
+        Parameters
+        ----------
+        path : Path
+            A path the buffer holds text for.
+
+        Returns
+        -------
+        tuple of (FileKind, series key)
+            Its kind of file and series.
+        """
+        return self._series[path]
+
+
+def write_buffer(buffer: DayBuffer) -> None:
+    """Write every file's buffered rows: all of them, or none (design 5.8).
+
+    Parameters
+    ----------
+    buffer : DayBuffer
+        The buffer; its texts are emptied after the write, its newest rows
+        kept.
+
+    Raises
+    ------
+    DataFileError
+        Before any file is opened, if a buffered text is not ASCII, an
+        existing file is not a regular file this process can write or its
+        length is not its header plus whole rows, a new file's directory is
+        not one this process can write into or a file of that name is
+        already there, or the free space does not cover every byte to be
+        written; nothing is changed then. While writing, if the device
+        fails; the next run rolls every file back to what they all hold.
+    """
+    data = _prepared(buffer)
+    order = sorted(data, key=lambda path: _write_order(buffer, path))
+    new_directories: set[Path] = set()
+    for path in order:
+        is_new = not os.path.lexists(path)
+        try:
+            with path.open("xb" if is_new else "ab") as file:
+                file.write(data[path])
+                file.flush()
+                os.fsync(file.fileno())
+        except OSError as exc:
+            _fail(f"cannot write data file {path}: {exc}", exc)
+        if is_new:
+            new_directories.add(path.parent)
+    for directory in sorted(new_directories):
+        _sync_directory(directory)
+    buffer.texts.clear()
+
+
+def _write_order(buffer: DayBuffer, path: Path) -> tuple[int, SeriesKey]:
+    """Give a file's place in the write: measurement files first, by series.
+
+    Parameters
+    ----------
+    buffer : DayBuffer
+        The buffer.
+    path : Path
+        A buffered file.
+
+    Returns
+    -------
+    tuple of (int, series key)
+        Its kind's rank and its series.
+    """
+    kind, key = buffer.series_of(path)
+    return _KIND_ORDER[kind], key
+
+
+def _prepared(buffer: DayBuffer) -> dict[Path, bytes]:
+    """Check every file can be written, and give the bytes to write (design 5.8).
+
+    Parameters
+    ----------
+    buffer : DayBuffer
+        The buffer.
+
+    Returns
+    -------
+    dict of Path to bytes
+        The bytes to append to each file; a new file's begin with its
+        header.
+
+    Raises
+    ------
+    DataFileError
+        If any check of the prepare step fails; no file is opened.
+    """
+    data: dict[Path, bytes] = {}
+    for path, text in buffer.texts.items():
+        kind, key = buffer.series_of(path)
+        if os.path.lexists(path):
+            _check_existing(path, kind)
+            prefix = ""
+        else:
+            _check_new(path)
+            prefix = header(kind, buffer.channel, key)
+        try:
+            data[path] = (prefix + text).encode("ascii")
+        except UnicodeEncodeError as exc:
+            _fail(f"the rows for {path} are not ASCII", exc)
+    _check_space(data)
+    return data
+
+
+def _check_existing(path: Path, kind: FileKind) -> None:
+    """Refuse an existing file that cannot be appended to soundly.
+
+    Parameters
+    ----------
+    path : Path
+        The file.
+    kind : {'meas', 'ddiff'}
+        Its kind.
+
+    Raises
+    ------
+    DataFileError
+        If it is not a regular file, this process cannot write it, or its
+        length is not its header plus whole rows.
+    """
+    if path.is_symlink() or not path.is_file():
+        _fail(f"data file {path} is not a regular file")
+    if not os.access(path, os.W_OK):
+        _fail(f"data file {path} cannot be written")
+    size = WIDTHS[kind] + 1
+    length = path.stat().st_size
+    if length % size != 0 or length // size <= HEADER_LINES[kind]:
+        _fail(f"data file {path} is not sound: {length} bytes")
+
+
+def _check_new(path: Path) -> None:
+    """Refuse a new file whose directory cannot be written into.
+
+    Parameters
+    ----------
+    path : Path
+        The file, which does not exist yet.
+
+    Raises
+    ------
+    DataFileError
+        If its directory is not a directory this process can write into.
+    """
+    directory = path.parent
+    if not directory.is_dir() or not os.access(directory, os.W_OK | os.X_OK):
+        _fail(f"data file {path} cannot be created in {directory}")
+
+
+def _check_space(data: dict[Path, bytes]) -> None:
+    """Refuse a write the free space does not cover.
+
+    Parameters
+    ----------
+    data : dict of Path to bytes
+        The bytes to write to each file.
+
+    Raises
+    ------
+    DataFileError
+        If, on any device, the bytes to write are more than its free space.
+    """
+    needed: dict[int, tuple[Path, int]] = {}
+    for path, chunk in data.items():
+        device = path.parent.stat().st_dev
+        directory, total = needed.get(device, (path.parent, 0))
+        needed[device] = (directory, total + len(chunk))
+    for directory, total in needed.values():
+        free = shutil.disk_usage(directory).free
+        if total > free:
+            _fail(f"{total} bytes to write in {directory}, only {free} free")
+
+
+def _sync_directory(directory: Path) -> None:
+    """Flush a directory's entries to the device, so a new file's name is kept.
+
+    Parameters
+    ----------
+    directory : Path
+        The directory.
+
+    Raises
+    ------
+    DataFileError
+        If the device fails.
+    """
+    try:
+        handle = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(handle)
+        finally:
+            os.close(handle)
+    except OSError as exc:
+        _fail(f"cannot flush directory {directory}: {exc}", exc)

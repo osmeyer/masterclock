@@ -146,7 +146,6 @@ def written(directory: Path, deployment: Deployment) -> AppConfig:
             },
             "processed": {
                 "processed_path": directory / "processed",
-                "redo_from_mjd": None,
                 "start_from_mjd": datetime_to_mjd(start),
                 "clock_config_file": directory / "clock_config.yaml",
             },

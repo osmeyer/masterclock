@@ -13,7 +13,8 @@ or steering directory that is not one or cannot be listed, a clock
 configuration file that is not a regular file it can read, and a processed
 directory that is something else or cannot be written into.
 
-The processed-directory refusals are word for word.
+The processed-directory refusals are word for word, and a file naming a
+redo or a count of epochs, which only the command line gives, is refused.
 """
 
 import os
@@ -72,8 +73,12 @@ def built(tmp_path: Path, *argv: str, **extra: str) -> config.AppConfig:
 
 
 def test_every_command_line_setting_is_described_once() -> None:
-    """Describe every CliOptions field but the two that back no entry."""
-    fields = set(cli.CliOptions.model_fields) - {"config_file", "steps"}
+    """Describe every CliOptions field but the three that back no entry."""
+    fields = set(cli.CliOptions.model_fields) - {
+        "config_file",
+        "steps",
+        "redo_from_mjd",
+    }
     attributes = [setting.attribute for setting in config.SETTINGS]
     assert sorted(attributes) == sorted(fields)
 
@@ -99,7 +104,6 @@ def test_none_is_accepted_by_the_settings_whose_options_accept_it() -> None:
     assert accepting == {
         "log_file",
         "log_level",
-        "redo_from_mjd",
         "backup_count",
     }
     for setting in config.SETTINGS:
@@ -129,7 +133,6 @@ def test_a_file_of_the_required_settings_builds(tmp_path: Path) -> None:
     }
     assert built_.processed.model_dump() == {
         "processed_path": Path("/data/processed"),
-        "redo_from_mjd": None,
         "start_from_mjd": cli.START_FROM_MJD,
         "clock_config_file": Path("/etc/clocks.yaml"),
     }
@@ -193,7 +196,6 @@ def test_a_start_given_in_the_file_is_kept(tmp_path: Path) -> None:
     [
         ("PROCESSED__start_from_mjd", "None", "invalid positive float value"),
         ("PROCESSED__start_from_mjd", "1", "MJD must be on a day from 50000"),
-        ("PROCESSED__redo_from_mjd", "100000", "MJD must be on a day from 50000"),
         ("LOGGING__backup_count", "0", "value must be a positive integer"),
     ],
 )
@@ -255,10 +257,8 @@ def test_none_in_the_file_sets_no_value_where_accepted(tmp_path: Path) -> None:
     """Read the literal None as no value in the settings that accept it."""
     built_ = built(
         tmp_path,
-        PROCESSED__redo_from_mjd="None",
         LOGGING__backup_count="None",
     )
-    assert built_.processed.redo_from_mjd is None
     assert built_.logging.backup_count is None
 
 
@@ -541,3 +541,12 @@ def test_a_processed_directory_refusal_is_word_for_word(
         f"[PROCESSED] processed_path: {processed} is a directory this process"
         " cannot write into"
     )
+
+
+@pytest.mark.parametrize("entry", ["redo_from_mjd", "steps"])
+def test_a_redo_or_a_count_of_epochs_in_the_file_is_refused(
+    tmp_path: Path, entry: str
+) -> None:
+    """Refuse a file naming either: they are given for one run, on its command line."""
+    with pytest.raises(ConfigError, match=entry):
+        built(tmp_path, **{f"PROCESSED__{entry}": "60010"})

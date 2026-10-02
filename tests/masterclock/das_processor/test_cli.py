@@ -4,9 +4,10 @@ The rules covered: every setting option is read as given, None or left out,
 and validated into CliOptions; paths are absolute, and refuse None except
 the log file's; the steering directory and the clock configuration file are
 options and take no None; there is no option for a time-constants file; an MJD
-falls on a day a data file can cover; the count of epochs is command line
-only and takes no None; the RF channel is one of the channels; the MJD to
-start from when none is given is 59500 and the help says so; no arguments,
+falls on a day a data file can cover; the count of epochs and the MJD to
+redo from are command line only and take no None; the RF channel is one of
+the channels; the MJD to start from when none is given is 59500 and the
+help says so; no arguments,
 a bad argument and a usage error found after parsing all print the full help
 and exit with status 2; --help and --version exit with status 0, a single
 argument read from sys.argv as given; and the help reads word for word as
@@ -71,9 +72,9 @@ options:
                         subdirectory of its own, overriding the config file's
                         [PROCESSED] processed_path (default: use the config
                         file)
-  --redo-from-mjd MJD   reprocess data starting from this MJD, overriding the
-                        config file's [PROCESSED] redo_from_mjd; pass None for
-                        no reprocessing (default: use the config file)
+  --redo-from-mjd MJD   reprocess data starting from this MJD, before the run;
+                        command line only, with no config-file entry (default:
+                        no reprocessing)
   --start-from-mjd MJD  MJD to start processing from when there are no
                         processed files to read a previous measurement from
                         (floored to its ten-minute mark), overriding the
@@ -130,7 +131,7 @@ def test_every_option_is_read_as_given() -> None:
 
 
 def test_an_option_left_out_defers_to_the_config_file() -> None:
-    """Leave every setting left out UNSET, and the two others None."""
+    """Leave every setting left out UNSET, and the three others None."""
     options = cli.parse_args(["--rf", "a"])
     assert options.model_dump() == {
         "config_file": None,
@@ -138,7 +139,7 @@ def test_an_option_left_out_defers_to_the_config_file() -> None:
         "cd5m5m_path": UNSET,
         "steering_path": UNSET,
         "processed_path": UNSET,
-        "redo_from_mjd": UNSET,
+        "redo_from_mjd": None,
         "start_from_mjd": UNSET,
         "clock_config_file": UNSET,
         "log_file": UNSET,
@@ -151,7 +152,6 @@ def test_an_option_left_out_defers_to_the_config_file() -> None:
 @pytest.mark.parametrize(
     ("option", "value", "field"),
     [
-        ("--redo-from-mjd", "None", "redo_from_mjd"),
         ("--log-file", "None", "log_file"),
         ("--log-level", "None", "log_level"),
     ],
@@ -308,10 +308,12 @@ def test_the_start_used_when_none_is_given_is_59500() -> None:
     assert "else MJD 59500)" in help_text
 
 
-def test_none_means_no_mjd_only_where_accepted() -> None:
-    """Read the literal None as no MJD only through the converter that accepts it."""
-    assert cli.data_mjd_or_none("None") is None
-    assert cli.data_mjd_or_none("60010") == 60010.0
+def test_a_redo_is_command_line_only() -> None:
+    """Give no redo when the option is left out, and take no None for one."""
+    assert cli.parse_args(["--rf", "a"]).redo_from_mjd is None
+    assert cli.parse_args(["--redo-from-mjd", "60010"]).redo_from_mjd == 60010.0
+    with pytest.raises(SystemExit):
+        cli.parse_args(["--redo-from-mjd", "None"])
 
 
 @pytest.mark.parametrize("argv", [[], None])

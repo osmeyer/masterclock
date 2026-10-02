@@ -4,12 +4,14 @@ It is read with :mod:`argparse` by the rules every program shares (see
 :mod:`masterclock.app.cli`) and validated into the frozen
 :class:`CliOptions`, since the command line is an external boundary.
 
-Every option but two overrides the configuration file's entry of the same
-name, and one left out is :data:`~masterclock.app.cli.UNSET`, deferring to
-the file. ``--config-file`` names that file rather than overriding an entry
-in it. ``--steps`` backs no entry: how many epochs to process is a way of
-running the program, not a property of the deployment, so it has nothing to
-defer to and the literal ``None`` means nothing to it. Without
+Every option but three overrides the configuration file's entry of the
+same name, and one left out is :data:`~masterclock.app.cli.UNSET`,
+deferring to the file. ``--config-file`` names that file rather than
+overriding an entry in it. ``--steps`` and ``--redo-from-mjd`` back no
+entry: how many epochs to process and whether to reprocess are ways of
+running the program once, not properties of the deployment, so they have
+nothing to defer to and the literal ``None`` means nothing to them. A redo
+left in a configuration file would reprocess at every scheduled run. Without
 ``--config-file``, every required setting must be given on the command line.
 
 An MJD option must fall on a day a data file can cover, from
@@ -90,29 +92,6 @@ def data_mjd(text: str) -> float:
     return value
 
 
-def data_mjd_or_none(text: str) -> float | None:
-    """Convert a command-line token as :func:`data_mjd` does, ``"None"`` as no value.
-
-    Parameters
-    ----------
-    text : str
-        The raw command-line token.
-
-    Returns
-    -------
-    float or None
-        ``None`` if ``text`` is the literal token ``"None"``, otherwise the
-        token read as :func:`data_mjd` reads it.
-
-    Raises
-    ------
-    argparse.ArgumentTypeError
-        If ``text`` is neither the token ``"None"`` nor an MJD
-        :func:`data_mjd` accepts.
-    """
-    return None if text == NONE_LITERAL else data_mjd(text)
-
-
 class CliOptions(BaseModel):
     """Validated command-line options.
 
@@ -139,10 +118,10 @@ class CliOptions(BaseModel):
         Absolute path under which processed results are written, each kind of file in
         a subdirectory of its own, or :data:`UNSET` when the option was
         omitted (defer to the config file).
-    redo_from_mjd : DataMjd, None, or Unset
-        Reprocess data starting from this MJD, ``None`` when reprocessing is
-        explicitly not requested, or :data:`UNSET` when the option was
-        omitted (defer to the config file).
+    redo_from_mjd : DataMjd or None, optional
+        Reprocess data starting from this MJD before the run
+        (``--redo-from-mjd``); ``None`` (the default) reprocesses nothing.
+        Command line only, like ``steps``.
     start_from_mjd : DataMjd or Unset
         MJD to start processing from when there are no processed files to
         read a previous measurement from, or :data:`UNSET` when the option
@@ -178,7 +157,7 @@ class CliOptions(BaseModel):
     cd5m5m_path: AbsolutePath | Unset = UNSET
     steering_path: AbsolutePath | Unset = UNSET
     processed_path: AbsolutePath | Unset = UNSET
-    redo_from_mjd: DataMjd | Unset | None = UNSET
+    redo_from_mjd: DataMjd | None = None
     start_from_mjd: DataMjd | Unset = UNSET
     clock_config_file: AbsolutePath | Unset = UNSET
     log_file: AbsolutePath | Unset | None = UNSET
@@ -261,13 +240,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--redo-from-mjd",
-        type=data_mjd_or_none,
-        default=UNSET,
+        type=data_mjd,
+        default=None,
         metavar="MJD",
         help=(
-            "reprocess data starting from this MJD, overriding "
-            f"the config file's [PROCESSED] redo_from_mjd; pass {NONE_LITERAL} "
-            "for no reprocessing (default: use the config file)"
+            "reprocess data starting from this MJD, before the run; command "
+            "line only, with no config-file entry (default: no reprocessing)"
         ),
     )
     parser.add_argument(

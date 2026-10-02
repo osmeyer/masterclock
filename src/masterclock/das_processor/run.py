@@ -7,23 +7,44 @@ steers a series, and each series' settings. Everything below it receives
 that epoch or plain values.
 """
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from datetime import datetime, timedelta
 from fractions import Fraction
+from pathlib import Path
 from typing import Final, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
 
+from masterclock.app.shutdown import ShutdownHandler
+from masterclock.app.timeutil import datetime_to_mjd, mjd_to_datetime
 from masterclock.das_processor.clock_config import ClockConfig
 from masterclock.das_processor.config import AppConfig
+from masterclock.das_processor.epochs import floor_to_ten_minutes
+from masterclock.das_processor.files import (
+    DayBuffer,
+    DdiffRecord,
+    FileKind,
+    MeasRecord,
+    ensure_archives,
+    good_through,
+    read_last_row,
+    roll_back,
+    write_buffer,
+)
 from masterclock.das_processor.measurements import (
     PairMeasurement,
     TripleMeasurement,
     measure_pair,
 )
-from masterclock.das_processor.read_cd5m5m import DASData
+from masterclock.das_processor.read_cd5m5m import DASData, read_all_blocks
 from masterclock.das_processor.read_steering import read_steering
-from masterclock.das_processor.registry import Existing, build_registry, refs_of
+from masterclock.das_processor.registry import (
+    Existing,
+    build_registry,
+    existing_series,
+    refs_of,
+    series_file,
+)
 from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.filter import StepResult, anchor_of, filter_step, predict
 from masterclock.domain.phase import EPOCH_SECONDS
@@ -41,6 +62,12 @@ from masterclock.domain.steering import SteerEvent, signs, steer_u, steer_w
 
 _EPOCH: Final[timedelta] = timedelta(seconds=EPOCH_SECONDS)
 """One epoch, T."""
+
+_PAIR: Final[int] = 2
+"""How many names a pair key holds."""
+
+_TRIPLE: Final[int] = 3
+"""How many names a triple key holds."""
 
 
 class Epoch(BaseModel):
@@ -423,3 +450,262 @@ def process_triples(
             None if measurement is None else measurement.measured(),
         )
     return TripleStep(results=results, measurements=measurements)
+
+
+# --------------------------------------------------------------- the epoch loop
+
+
+class EpochDone(BaseModel):
+    """What processing an epoch gave, for the run to log (design 6.3).
+
+    Parameters
+    ----------
+    epoch : Epoch
+        The epoch.
+    pairs : PairStep
+        What its pairs gave.
+    triples : TripleStep
+        What its triples gave.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    epoch: Epoch
+    pairs: PairStep
+    triples: TripleStep
+
+
+def data_series(config: AppConfig) -> list[tuple[Path, FileKind, SeriesKey]]:
+    """Give every file of the channel, with its kind and series.
+
+    Parameters
+    ----------
+    config : AppConfig
+        The run's settings.
+
+    Returns
+    -------
+    list of (Path, FileKind, series key)
+        The measurement files, then the double-difference files, each by
+        series.
+
+    Raises
+    ------
+    DataFileError
+        If an archive cannot be listed.
+    """
+    processed, channel = config.processed.processed_path, config.das.rf
+    existing = existing_series(processed, channel)
+    series: list[tuple[Path, FileKind, SeriesKey]] = [
+        (series_file(processed, channel, pair), "meas", pair)
+        for pair in sorted(existing.pairs)
+    ]
+    series += [
+        (series_file(processed, channel, triple), "ddiff", triple)
+        for triple in sorted(existing.triples)
+    ]
+    return series
+
+
+def next_epoch(config: AppConfig) -> datetime:
+    """Roll every file back to the epoch they all hold, and give the next (design 6.7).
+
+    Parameters
+    ----------
+    config : AppConfig
+        The run's settings.
+
+    Returns
+    -------
+    datetime
+        One epoch after L, the oldest epoch any file is good through; with
+        no file holding a whole row, the epoch containing
+        ``start_from_mjd``.
+
+    Raises
+    ------
+    DataFileError
+        If a file cannot be read, changed or deleted, or its first row is
+        damaged, so its rows cannot be placed in time.
+    """
+    series = data_series(config)
+    good = [good_through(path, kind, key) for path, kind, key in series]
+    common = min((mark for mark in good if mark is not None), default=None)
+    for path, kind, key in series:
+        roll_back(path, kind, key, common)
+    if common is None:
+        return floor_to_ten_minutes(mjd_to_datetime(config.processed.start_from_mjd))
+    return common + _EPOCH
+
+
+def read_last_rows(config: AppConfig) -> dict[SeriesKey, Row]:
+    """Read the last row of every series from its file (I4).
+
+    Parameters
+    ----------
+    config : AppConfig
+        The run's settings.
+
+    Returns
+    -------
+    dict of series key to Row
+        Each series' last row.
+
+    Raises
+    ------
+    DataFileError
+        If a file cannot be read or is not sound.
+    """
+    return {
+        key: read_last_row(path, kind, key) for path, kind, key in data_series(config)
+    }
+
+
+def process_epoch(
+    mark: datetime,
+    block: DASData | None,
+    buffer: DayBuffer,
+    config: AppConfig,
+    clock_config: ClockConfig,
+) -> EpochDone:
+    """Process one epoch and add its rows to the day buffer (design 6.3).
+
+    Parameters
+    ----------
+    mark : datetime
+        The epoch start E.
+    block : DASData or None
+        The epoch's DAS block, or ``None`` when the DAS measured nothing.
+    buffer : DayBuffer
+        The day buffer, whose newest rows are the series' last rows; when
+        it holds none, they are read from the files.
+    config : AppConfig
+        The run's settings.
+    clock_config : ClockConfig
+        The clock configuration.
+
+    Returns
+    -------
+    EpochDone
+        The epoch and what its pairs and triples gave.
+
+    Raises
+    ------
+    MasterClockError
+        If anything about the epoch cannot be read, worked out or
+        formatted; the buffer then holds none of the epoch's rows.
+    """
+    last = dict(buffer.last) if buffer.last else read_last_rows(config)
+    existing = Existing(
+        pairs=frozenset((key[0], key[1]) for key in last if len(key) == _PAIR),
+        triples=frozenset(
+            (key[0], key[1], key[-1]) for key in last if len(key) == _TRIPLE
+        ),
+    )
+    epoch = build_epoch(mark, block, existing, config, clock_config)
+    pairs = process_pairs(epoch, last)
+    triples = process_triples(epoch, last, pairs)
+    records: list[tuple[SeriesKey, MeasRecord | DdiffRecord]] = [
+        (
+            pair,
+            MeasRecord(
+                measurement=pairs.measurements.get(pair), row=pairs.results[pair].row
+            ),
+        )
+        for pair in epoch.pairs
+    ]
+    records += [
+        (
+            triple,
+            DdiffRecord(
+                measurement=triples.measurements.get(triple),
+                row=triples.results[triple].row,
+            ),
+        )
+        for triple in epoch.triples
+    ]
+    staged = DayBuffer(buffer.channel)
+    processed = config.processed.processed_path
+    for key, record in records:
+        staged.add(series_file(processed, config.das.rf, key), key, record)
+    buffer.take(staged)
+    return EpochDone(epoch=epoch, pairs=pairs, triples=triples)
+
+
+def run(
+    config: AppConfig,
+    clock_config: ClockConfig,
+    steps: int | None,
+    shutdown: ShutdownHandler,
+) -> None:
+    """Process the channel's epochs in order, up to the end of the data (design 6.3).
+
+    Parameters
+    ----------
+    config : AppConfig
+        The run's settings.
+    clock_config : ClockConfig
+        The clock configuration.
+    steps : int or None
+        How many epochs to process at most; ``None`` for all the data has.
+    shutdown : ShutdownHandler
+        Asked between epochs whether to stop.
+
+    Raises
+    ------
+    MasterClockError
+        If an epoch cannot be processed or a write fails; the rows of the
+        day so far are then lost, and the next run computes them again.
+
+    Notes
+    -----
+    The run starts one epoch after the epoch every file holds (see
+    :func:`next_epoch`). An epoch with no block before the data resume is
+    processed with no measurements; the run stops when no block remains,
+    after ``steps`` epochs, or on a shutdown request, always between
+    epochs. Rows are written after each day's 23:50 UTC epoch and when the
+    run stops.
+    """
+    ensure_archives(config.processed.processed_path)
+    mark = next_epoch(config)
+    blocks = read_all_blocks(config.das.cd5m5m_path, datetime_to_mjd(mark))
+    pending = _next_block(blocks, mark)
+    buffer = DayBuffer(config.das.rf)
+    done = 0
+    while (
+        pending is not None
+        and not shutdown.shutdown_requested
+        and (steps is None or done < steps)
+    ):
+        block = None
+        if pending.interpolated_datetime == mark:
+            block = pending
+            pending = _next_block(blocks, mark + _EPOCH)
+        process_epoch(mark, block, buffer, config, clock_config)
+        if (mark + _EPOCH).date() != mark.date():
+            write_buffer(buffer)
+        mark += _EPOCH
+        done += 1
+    write_buffer(buffer)
+
+
+def _next_block(blocks: Iterator[DASData], mark: datetime) -> DASData | None:
+    """Give the next block at or after a mark, passing over any before it.
+
+    Parameters
+    ----------
+    blocks : Iterator of DASData
+        The DAS blocks, in order.
+    mark : datetime
+        The epoch the run is at.
+
+    Returns
+    -------
+    DASData or None
+        The next block not earlier than ``mark``; ``None`` at the end of
+        the data.
+    """
+    for block in blocks:
+        if block.interpolated_datetime >= mark:
+            return block
+    return None

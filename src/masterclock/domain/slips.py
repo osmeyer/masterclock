@@ -2,6 +2,8 @@
 
 A clock measured against two or more references shows a wrong cycle count
 as a mismatch of a whole number of periods between its pairs' innovations.
+Every clock measured is checked, a reference measured as a clock by the
+other references included, so a slip on a link is found as on any pair.
 For clock c and references r < s, D = nu(r, c) - nu(s, c) - two-way(r, s)
 is near zero; a D near a non-zero whole number m of periods, within five
 combined scales, is flagged. The pair that slipped is then found:
@@ -96,7 +98,7 @@ def slip_check(
     refs: frozenset[str],
     excluded: frozenset[PairKey],
 ) -> Slips:
-    """Find and place cycle slips in one epoch's clock pairs (design 11).
+    """Find and place cycle slips in one epoch's pairs, by their clocks (design 11).
 
     Parameters
     ----------
@@ -141,7 +143,7 @@ def slip_check(
         raise FilterError(message)
     epoch = _Epoch(innovations, scales, excluded)
     ordered = tuple(sorted(refs))
-    clocks = sorted({pair[1] for pair in innovations if pair[1] not in refs})
+    clocks = sorted({pair[1] for pair in innovations})
     found = [_check_clock(epoch, ordered, c, last_flags) for c in clocks]
     return _decided(tuple(event for event in found if event is not None))
 

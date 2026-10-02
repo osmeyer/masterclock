@@ -296,12 +296,12 @@ def test_counting_the_write_step(
     assert writes.count == WRITE_EVENTS
 
 
-WRITE_EVENTS: Final = 39
+WRITE_EVENTS: Final = 71
 """How many writes and fsyncs a run of the invented data makes.
 
 The archives' directories are flushed once when made. Each of the two
 writes, one per day, writes and flushes the journal and its directory,
-writes and flushes the 7 files, flushes the directories of the files it
+writes and flushes every data file, flushes the directories of the files it
 created (both, the first day), and flushes the journal's directory after
 deleting it.
 """

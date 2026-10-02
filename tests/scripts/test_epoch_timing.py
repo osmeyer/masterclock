@@ -86,12 +86,12 @@ def test_the_timed_runs_write_the_deployment_s_files(
          "--runs", "3"]
     ) == 0  # fmt: skip
     stepped, batch = rows(folder / "stepped"), rows(folder / "batch")
-    assert len(stepped) == 2 * 2 + 1 + 2 * 1
+    assert len(stepped) == (2 * 2 + 1) + 2 * (2 * 2 + 1)
     assert set(stepped.values()) == {3}
     assert batch.keys() == stepped.keys()
     assert set(batch.values()) == {4}
     out = capsys.readouterr().out
-    assert "5 pair files, 2 triple files" in out
+    assert "5 pair files, 10 triple files" in out
     assert "median of the next 2" in out
     assert "batch run of 4 epochs" in out
     assert "% of 600 s" in out

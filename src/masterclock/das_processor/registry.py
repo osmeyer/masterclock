@@ -125,16 +125,14 @@ def build_registry(
     tuple of (tuple of (str, str), tuple of (str, str, str))
         The pairs and the triples, each sorted: every existing one, every
         (reference, clock) the block measured, and every (r, s, c) for a
-        clock pair (s, c) and a reference r whose link with s is a pair
-        both ways.
+        pair (s, c), its clock c a reference or not, and a reference r
+        whose link with s is a pair both ways.
     """
     pairs = set(existing.pairs)
     if block is not None:
         pairs |= {(m.reference, m.clock) for m in block.measurements}
     triples = set(existing.triples)
     for s, c in pairs:
-        if c in refs:
-            continue
         for r in refs:
             if (r, s) in pairs and (s, r) in pairs:
                 triples.add((r, s, c))

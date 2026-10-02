@@ -3,8 +3,8 @@
 The script builds a deployment of invented DAS files and clock configuration
 in a new folder: R references, each measured against itself and every other
 reference, and C clocks, each measured against one reference, taken in turn.
-That gives R * R + C pair files and R * C triple files, one triple for each
-clock through each reference. No reference steers.
+That gives R * R + C pair files and R * (R * R + C) triple files, one
+triple for each pair through each reference. No reference steers.
 
 It then runs das_processor as the scheduler does, one process per epoch,
 for the first epochs of a day whose DAS file is already whole, so each run
@@ -228,7 +228,7 @@ def report(options: argparse.Namespace) -> list[str]:
     lines = [
         f"deployment: {references} references, {clocks} clocks, {epochs} epochs:"
         f" {references * references + clocks} pair files,"
-        f" {references * clocks} triple files"
+        f" {references * (references * references + clocks)} triple files"
     ]
     runs = [timed([*stepped, "--steps", "1"]) for _ in range(options.runs)]
     lines.append(f"run of one epoch, first, which creates the files: {share(runs[0])}")

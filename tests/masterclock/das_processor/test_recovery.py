@@ -4,8 +4,10 @@ The rules covered: an error at any point of computing an epoch or
 preparing a write changes no file; a stop at any point of the write, before
 or after any write or fsync, a torn line included, is undone by the next
 run, whose data files end byte-identical to those of a run that never
-stopped; and a line damaged by hand in the middle of a file is redone from
-its epoch, with the same result.
+stopped; and a file whose end is torn, with a line damaged by hand in its
+middle, is redone from that line's epoch, with the same result. A file of
+whole rows whose last row is good is not scanned (design 5.7), so damage in
+its middle alone is not looked for.
 """
 
 import os
@@ -340,7 +342,7 @@ def test_a_stop_while_writing_is_undone_by_the_next_run(
 def test_a_line_damaged_by_hand_is_redone_from_its_epoch(
     tmp_path: Path, uninterrupted: dict[str, bytes], kind: str
 ) -> None:
-    """Redo every file from a damaged line's epoch, with the same result (U21, U26)."""
+    """Redo every file from a torn file's damaged middle line, alike (U21, U26)."""
     config = deployment(tmp_path)
     run_once(config)
     name = "das_a.mc1.hm1.dat" if kind == "meas" else "das_a.mc1.mc1.hm1.dat"

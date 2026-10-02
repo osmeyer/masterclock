@@ -8,6 +8,8 @@ self pair; the input over the previous epoch counts the events in
 in (E, t], moved on to the measurement time t; every phase term is exact;
 and an event inside an epoch, before the measurement, leaves the decycled
 phase at E as it was, and enters the next epoch's input in full.
+
+w adds up every event inside the epoch.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -203,3 +205,15 @@ def test_an_event_inside_the_epoch_is_taken_off_and_counted_next_epoch() -> None
     true_at_following = true_at_mark + 40 + phase.exact(0.002) * 500
     assert decycled.z + ux == true_at_following
     assert uy == 0.002
+
+
+def test_w_adds_up_every_event_inside_the_epoch() -> None:
+    """Sum the events of the epoch up to t, not keep the last alone."""
+    measured = MARK + timedelta(seconds=137)
+    events = {
+        "mc2": (
+            event(MARK + timedelta(seconds=10), dx=-4.0),
+            event(MARK + timedelta(seconds=20), dx=-1.0),
+        )
+    }
+    assert steering.steer_w(("mc1", "mc2"), MARK, events, measured) == 5

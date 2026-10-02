@@ -12,6 +12,8 @@ constant is held exactly when the model has more than one state; every
 float is finite; a row gives its state unless it is dormant; every model is
 frozen and strict and refuses unknown fields; and build_row builds a row
 from its fields, and replace a changed row, checking it again.
+
+Each row refusal says why and is logged as raised.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -413,3 +415,31 @@ def test_build_row_checks_the_row() -> None:
     """Raise FilterError for fields that make no valid row."""
     with pytest.raises(FilterError, match="invalid row"):
         series.build_row({**dict(row()), "flags": "AR"})
+
+
+def test_every_row_error_says_why_and_is_logged_as_raised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Give each refusal's reason in words, and log the FilterError as raised."""
+    with pytest.raises(FilterError) as raised:
+        series.build_row({**dict(row()), "flags": "AR"})
+    assert str(raised.value).startswith("invalid row: ")
+    assert "flags" in str(raised.value)
+    assert [r.getMessage() for r in caplog.records] == [str(raised.value)]
+    for call in (
+        lambda: row(flags="RD", **DORMANT).known_state(),
+        lambda: row(y=float("inf")),
+    ):
+        caplog.clear()
+        with pytest.raises(FilterError) as raised:
+            call()
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert errors == [str(raised.value)]
+
+
+def test_a_one_state_row_with_u_is_refused_in_words() -> None:
+    """Say that U is never carried by a 1-state row."""
+    with pytest.raises(ValidationError) as raised:
+        row(flags="AU", **ONE_STATE)
+    (error,) = raised.value.errors()
+    assert error["msg"] == "Value error, U is never carried by a 1-state row"

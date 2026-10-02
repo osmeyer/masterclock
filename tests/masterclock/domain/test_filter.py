@@ -40,10 +40,16 @@ The filter step: a configuration change starts a warm segment before the
 measurement is handled, and shares the row with its outcome; then every
 path of the decision flow gives its row, a component cold start makes a
 triple dormant, and the result says whether the row cold-started.
+
+The classification and acquisition limits hold exactly at their values, the
+slope is fitted as the design writes it, gains exist for M = 1, the drift is
+carried through holds and steps, a settings change keeps the step offset,
+and each error is logged as raised.
 """
 
 import dataclasses
 import math
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from typing import Final, Literal
@@ -1494,3 +1500,159 @@ def test_a_prediction_for_a_series_with_no_scale_is_refused() -> None:
     prediction = State(x=Fraction(WORKED), y=0.0)
     with pytest.raises(FilterError, match="no scale"):
         estimator.filter_step(NEXT, params(), last, prediction, pair(WORKED))
+
+
+# ------------------------------------------------- edges and what is logged
+
+
+def test_classify_fits_the_slope_as_the_design_writes_it() -> None:
+    """Give s as sum((t - tbar)(v - vbar)) / sum((t - tbar)^2), to the last bit."""
+    values = (31.3, 60.7, 90.1)
+    classified = estimator.classify(buffer(*values), 3.0)
+    ts = [0.0, T, 2 * T]
+    vbar, tbar = sum(values) / 3, sum(ts) / 3
+    s = sum((t - tbar) * (v - vbar) for t, v in zip(ts, values, strict=True)) / sum(
+        (t - tbar) ** 2 for t in ts
+    )
+    assert classified.kind == "frequency"
+    assert classified.s == s
+    assert classified.a == vbar - s * tbar
+
+
+def test_a_phase_step_needs_the_rejects_strictly_within_three_scales() -> None:
+    """Give no phase step when the furthest reject is exactly 3 scales from the mean."""
+    assert estimator.classify(buffer(100.0, 100.0, 109.0), 2.0).kind == "frequency"
+
+
+def test_a_frequency_step_needs_the_rejects_strictly_within_three_scales() -> None:
+    """Give no step when the furthest reject is exactly 3 scales from the line."""
+    assert estimator.classify(buffer(0.0, 0.0, 18.0), 2.0).kind is None
+
+
+def test_acquisition_takes_a_second_difference_at_its_limit() -> None:
+    """Cold-start when the second difference is exactly the acquisition limit."""
+    sigma0 = 40 / estimator._ACQUIRE_LIMIT
+    assert estimator._ACQUIRE_LIMIT * sigma0 == 40.0
+    last = dormant_row(1_000.0, 2_000.0)
+    row = estimator.acquire(moved_on(last), 3_040, params(sigma0=sigma0))
+    assert row.flags == "ANU"
+
+
+@pytest.mark.parametrize("model", [2, 3])
+def test_a_time_constant_of_one_epoch_has_gains(model: int) -> None:
+    """Give the gains for M = 1, the shortest time constant."""
+    lam = math.exp(-1.0)
+    expected = (
+        (1 - lam**2, (1 - lam) ** 2 / T, 0.0)
+        if model == 2
+        else (1 - lam**3, 1.5 * (1 - lam) ** 2 * (1 + lam) / T, (1 - lam) ** 3 / T**2)
+    )
+    assert estimator.gains(model, 1.0) == expected
+
+
+DRIFT: Final = 2.5e-12
+"""A drift, ps/s^2, for rows whose d must be carried."""
+
+
+def test_a_held_row_carries_the_drift() -> None:
+    """Store the predicted d in a held row."""
+    last = last_row(d=DRIFT)
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    assert prediction.d != 0.0
+    row = estimator.hold(moved_on(last, innovation=None), prediction, "P", params())
+    assert row.d == prediction.d
+
+
+def test_a_phase_step_keeps_the_drift() -> None:
+    """Correct only the phase in a phase step, the drift carried into the update."""
+    last = last_row(d=DRIFT)
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    draft = moved_on(last, rejects=buffer(100.0, 100.0, 100.0), consecutive_rejects=3)
+    z = round_even(prediction.x) + 100
+    row = estimator.phase_step(draft, prediction, z, 3)
+    corrected = State(x=prediction.x + 100, y=prediction.y, d=prediction.d)
+    expected = estimator.update(corrected, z - corrected.x, 3, 100.0)
+    assert row.d == expected.d
+
+
+def test_a_frequency_step_keeps_the_drift() -> None:
+    """Correct phase and rate in a frequency step, the drift carried into the update."""
+    last = last_row(d=DRIFT)
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    draft = moved_on(last, rejects=buffer(30.0, 60.0, 90.0), consecutive_rejects=3)
+    z = round_even(prediction.x) + 90
+    row = estimator.frequency_step(draft, prediction, 30.0, 0.05, z, 3, params())
+    corrected = State(
+        x=prediction.x + 30 + exact(0.05) * 2 * T,
+        y=prediction.y + 0.05,
+        d=prediction.d,
+    )
+    expected = estimator.update(corrected, z - corrected.x, 3, 100.0)
+    assert row.d == expected.d
+
+
+def test_a_configuration_change_in_the_filter_step_keeps_the_step_offset() -> None:
+    """Carry step_offset into the warm segment a settings change starts (8.7)."""
+    last = last_row(step_offset=25)
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    measured = estimator.Measured(z=round_even(prediction.x), rms=3)
+    changed = params(M=150.0, M_sigma=60.0)
+    row = estimator.filter_step(NEXT, changed, last, prediction, measured).row
+    assert (row.segment, row.step_offset) == (5, 25)
+    assert "N" in row.flags
+
+
+def test_an_excluded_measurement_in_the_gate_is_written_x() -> None:
+    """Write X alone for a measurement in the gate that screening excluded."""
+    last = last_row()
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    measured = estimator.Measured(z=round_even(prediction.x), rms=3)
+    row = estimator.filter_step(
+        NEXT, params(), last, prediction, measured, excluded=True
+    ).row
+    assert row.flags == "X"
+
+
+def test_every_filter_error_is_logged_as_raised(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log each FilterError at ERROR in the words it is raised with."""
+    no_scale = moved_on(last_row(), innovation_scale=None)
+    prediction = State(x=Fraction(0), y=0.0)
+    calls: list[Callable[[], object]] = [
+        lambda: estimator.accept(no_scale, prediction, Fraction(0), 3),
+        lambda: estimator.accept_step(
+            dataclasses.replace(no_scale, consecutive_rejects=3),
+            prediction,
+            0,
+            3,
+            params(),
+        ),
+        lambda: estimator.classify(buffer(1.0), 3.0),
+        lambda: estimator.gains(2, 0.5),
+        lambda: estimator._gate(
+            no_scale,
+            prediction,
+            estimator.Measured(z=0, rms=3),
+            params(),
+            excluded=False,
+        ),
+        lambda: estimator.start_segment(
+            moved_on(last_row()), params(model=2, M=30.0), keep_offset=True
+        ),
+    ]
+    for call in calls:
+        caplog.clear()
+        with pytest.raises(FilterError) as raised:
+            call()
+        assert [r.getMessage() for r in caplog.records] == [str(raised.value)]
+        assert str(raised.value)
+    caplog.clear()
+    with pytest.raises(FilterError) as raised:
+        estimator.gains(2, 0.5)
+    assert str(raised.value) == "no gains for a 2-state model with time constant 0.5"

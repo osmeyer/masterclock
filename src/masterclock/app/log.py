@@ -108,6 +108,8 @@ class MasterClockLogger(logging.Logger):
     for loggers created after that point.
     """
 
+    # mutmut wraps each function it changes in one that calls it. That adds a
+    # frame and moves the caller these two methods name, so it leaves them be.
     def trace(
         self,
         msg: object,
@@ -116,7 +118,7 @@ class MasterClockLogger(logging.Logger):
         stack_info: bool = False,
         stacklevel: int = 1,
         extra: Mapping[str, object] | None = None,
-    ) -> None:
+    ) -> None:  # pragma: no mutate block
         """Log ``msg % args`` at the :data:`TRACE` level.
 
         Takes the same keywords as :meth:`logging.Logger.debug`, with the
@@ -158,7 +160,7 @@ class MasterClockLogger(logging.Logger):
         stack_info: bool = False,
         stacklevel: int = 1,
         extra: Mapping[str, object] | None = None,
-    ) -> None:
+    ) -> None:  # pragma: no mutate block
         """Log ``msg % args`` at ``DEBUG`` level, prefixed with ``"TODO: "``.
 
         Use for work-remaining markers that should surface in debug output.

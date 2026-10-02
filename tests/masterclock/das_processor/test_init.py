@@ -8,6 +8,9 @@ MasterClockError exits 1, logged once where it was raised; a second run of
 the same channel is refused by the run lock; a redo deletes the rows from
 its epoch before the run, which computes them again; and logging set to
 None logs nothing.
+
+A usage error ends with the missing setting; the logging settings reach the
+logging; and a redo computes its rows again with the settings in force now.
 """
 
 import logging
@@ -21,6 +24,7 @@ import pytest
 from masterclock import das_processor
 from masterclock.app.lock import RunLock
 from masterclock.app.timeutil import datetime_to_mjd
+from masterclock.das_processor import files
 from masterclock.das_processor.read_cd5m5m import DASMeasurement
 
 START: Final = datetime(2025, 9, 23, 23, 20, tzinfo=UTC)
@@ -186,3 +190,52 @@ def test_the_steps_option_limits_the_run(tmp_path: Path) -> None:
     size = len(archive(tmp_path)["das_a.mc1.mc1.dat"])
     assert das_processor.main(argv) == 0
     assert len(archive(tmp_path)["das_a.mc1.mc1.dat"]) > size
+
+
+def test_a_usage_error_names_the_missing_setting(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End a usage error with the setting neither source gave, word for word."""
+    argv = deployment(tmp_path)
+    index = argv.index("--rf")
+    with pytest.raises(SystemExit):
+        das_processor.main(argv[:index] + argv[index + 2 :])
+    assert capsys.readouterr().err.endswith(
+        "das_processor: error: these settings must be provided by the config file"
+        " or the command line: [DAS] rf (--rf)\n"
+    )
+
+
+def test_the_logging_settings_reach_the_logging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start logging with the run's level, log file and backup count."""
+    argv = deployment(tmp_path)
+    argv[argv.index("--log-file") + 1] = str(tmp_path / "run.log")
+    argv[argv.index("--backup-count") + 1] = "3"
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        das_processor, "configure_logging", lambda **kwargs: calls.append(kwargs)
+    )
+    assert das_processor.main(argv) == 0
+    assert calls == [
+        {"level": logging.INFO, "log_file": tmp_path / "run.log", "backup_count": 3}
+    ]
+
+
+def test_a_redo_recomputes_its_rows_with_the_settings_now(tmp_path: Path) -> None:
+    """Compute the rows from the redo's epoch again, with today's clock settings."""
+    argv = deployment(tmp_path)
+    assert das_processor.main(argv) == 0
+    before = archive(tmp_path)["das_a.mc1.ox23.dat"]
+    (tmp_path / "clock_config.yaml").write_text(
+        CLOCKS.replace("time_constant: 100.0", "time_constant: 50.0"), encoding="utf-8"
+    )
+    redo = [*argv, "--redo-from-mjd", f"{datetime_to_mjd(START + 2 * T):.6f}"]
+    assert das_processor.main(redo) == 0
+    after = archive(tmp_path)["das_a.mc1.ox23.dat"]
+    assert len(after) == len(before)
+    assert after != before
+    size = files.MEAS_WIDTH + 1
+    kept = (files.MEAS_HEADER_LINES + 2) * size
+    assert after[:kept] == before[:kept]

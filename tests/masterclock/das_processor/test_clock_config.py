@@ -9,6 +9,10 @@ between two marks from the next mark; every check of design 15.2 refuses
 the file with ConfigError; the RMS limit of a pair is its own, else its
 reference's, else the default; a series takes the settings of its clock
 side, a pair the RMS limit too; and the committed example file loads.
+
+Every refusal names the file, then the problem, a merge or repeated key with
+its line and column, and is logged as raised; undated entries come first
+wherever listed; and rejects_before_restart may equal the gap limit.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -339,3 +343,72 @@ def test_the_example_file_loads() -> None:
     mark = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
     for clock in config.clocks:
         assert config.entry_for(clock, mark).gap_limit >= config.rejects_before_restart
+
+
+# ------------------------------------------------- what a person reads, exactly
+
+
+def message_for(tmp_path: Path, text: str) -> str:
+    """Give the message a file holding ``text`` is refused with."""
+    with pytest.raises(ConfigError) as raised:
+        load(tmp_path, text)
+    return str(raised.value)
+
+
+def test_a_refusal_names_the_file_and_the_problem(tmp_path: Path) -> None:
+    """Start every refusal with the file, then say what is wrong (15.2)."""
+    path = tmp_path / "clock_config.yaml"
+    assert message_for(tmp_path, "[1, 2]\n") == (
+        f"clock configuration {path}: is not a mapping of the sections"
+    )
+    assert message_for(tmp_path, "rejects_before_restart: [\n").startswith(
+        f"clock configuration {path}: while parsing"
+    )
+    assert message_for(tmp_path, "rejects_before_restart: x\n").startswith(
+        f"clock configuration {path}: rejects_before_restart: Input should be"
+    )
+    with pytest.raises(ConfigError) as raised:
+        clock_config.read_clock_config(tmp_path / "missing.yaml")
+    assert str(raised.value).startswith(
+        f"clock configuration {tmp_path / 'missing.yaml'}: cannot read: "
+    )
+
+
+def test_a_merge_or_repeated_key_is_named_where_it_stands(tmp_path: Path) -> None:
+    """Say which line and column of the file hold the key refused."""
+    merge = message_for(tmp_path, "a: 1\nb: &x {k: 1}\nc: {<<: *x}\n")
+    assert ": merge keys are not read\\n" in merge
+    assert "line 3, column 5" in merge
+    repeated = message_for(tmp_path, "a: 1\na: 2\n")
+    assert ": repeated key 'a'\\n" in repeated
+    assert "line 2, column 1" in repeated
+
+
+def test_every_refusal_is_logged_as_raised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log each ConfigError at ERROR in the words it is raised with."""
+    message = message_for(tmp_path, "[1, 2]\n")
+    assert [r.getMessage() for r in caplog.records] == [message]
+    caplog.clear()
+    with pytest.raises(ConfigError) as raised:
+        load(tmp_path).entry_for("ox23", AT.replace(tzinfo=None))
+    assert [r.getMessage() for r in caplog.records] == [str(raised.value)]
+
+
+def test_an_undated_entry_listed_last_still_comes_first(tmp_path: Path) -> None:
+    """Apply undated entries before dated ones, wherever the file lists them."""
+    text = BASE.replace(
+        "    - {effective_mjd: 60980.0, time_constant: 150.0}\n",
+        "    - {effective_mjd: 60980.0, time_constant: 150.0}\n"
+        "    - {time_constant: 120.0}\n",
+    )
+    config = load(tmp_path, text)
+    assert config.entry_for("ox23", BEFORE).time_constant == 120.0
+    assert config.entry_for("ox23", AT).time_constant == 150.0
+
+
+def test_rejects_before_restart_may_equal_the_gap_limit(tmp_path: Path) -> None:
+    """Take a gap limit equal to rejects_before_restart (15.2)."""
+    text = BASE.replace("rejects_before_restart: 36", "rejects_before_restart: 432")
+    assert load(tmp_path, text).rejects_before_restart == 432

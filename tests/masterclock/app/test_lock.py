@@ -7,10 +7,15 @@ the file; a refusal names the lock and, when it can be read, the holder; a
 failure that is not another holder is reported as what it is and leaves
 nothing held; the name must be a plain file name in the directory; and a
 with block cannot enter a lock that is already held.
+
+A holder file that is not ASCII digits names no PID; the lock file is made
+0o644; taking and giving back the lock are logged at DEBUG, and entering a
+held lock is refused, word for word.
 """
 
 import errno
 import fcntl
+import logging
 import os
 import subprocess
 import sys
@@ -263,3 +268,57 @@ def test_a_pid_that_cannot_be_written_leaves_nothing_held(
     assert not holding(held)
     monkeypatch.undo()
     assert try_from_another_process(tmp_path) == "acquired"
+
+
+@pytest.mark.parametrize("content", ["١٢٣\n".encode(), b"\xff\xfe\n"])
+def test_a_holder_file_that_is_not_ascii_is_not_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: bytes
+) -> None:
+    """Leave out the PID when the file holds anything but ASCII digits."""
+    (tmp_path / NAME).write_bytes(content)
+    monkeypatch.setattr(fcntl, "flock", failing_flock(errno.EWOULDBLOCK))
+    with pytest.raises(RunLockError, match=r"^another run already holds"):
+        lock.RunLock(tmp_path, NAME).acquire()
+
+
+def test_the_lock_file_is_made_readable_by_all_writable_by_its_owner(
+    tmp_path: Path,
+) -> None:
+    """Create the lock file with mode 0o644, under the usual umask."""
+    old = os.umask(0o022)
+    try:
+        held = lock.RunLock(tmp_path, NAME)
+        held.acquire()
+        held.release()
+    finally:
+        os.umask(old)
+    assert (tmp_path / NAME).stat().st_mode & 0o777 == 0o644
+
+
+def test_taking_and_giving_back_the_lock_is_logged_at_debug(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Say at DEBUG which lock was taken and given back, word for word."""
+    caplog.set_level(logging.DEBUG)
+    held = lock.RunLock(tmp_path, NAME)
+    held.acquire()
+    held.release()
+    assert [r.getMessage() for r in caplog.records if r.levelname == "DEBUG"] == [
+        f"acquired run lock {tmp_path / NAME}",
+        f"released run lock {tmp_path / NAME}",
+    ]
+
+
+def test_entering_a_held_lock_is_refused_in_words(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Say why a with block cannot enter a held lock, and log it as raised."""
+    held = lock.RunLock(tmp_path, NAME)
+    with held, pytest.raises(RunLockError) as raised:
+        held.__enter__()
+    assert str(raised.value) == (
+        f"run lock {tmp_path / NAME} is already held by this lock;"
+        " a with block cannot enter it again"
+    )
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert errors == [str(raised.value)]

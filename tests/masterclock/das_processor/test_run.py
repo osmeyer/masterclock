@@ -25,8 +25,15 @@ The next epoch is one after the oldest epoch every file is good through,
 every file rolled back to it, or one before the epoch a write journal
 names, the journal then deleted; with no file, the epoch containing
 start_from_mjd.
+
+Each series takes the settings in force at its epoch; a link not accepted
+does not make its triple cold; the TRACE lines, steps with a settings
+change, and the switch read from a file are logged as they are; a remote
+triple goes on when its reference is missing; a run with no data and no
+files does nothing; and a gap at the start of a run is predicted.
 """
 
+import logging
 import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1219,3 +1226,222 @@ def test_a_first_run_starts_at_the_first_data(tmp_path: Path) -> None:
     ]
     run.run(config, clocks, 1, ShutdownHandler())
     assert len(rows_of(config, ("mc1", "mc1"))) == 2
+
+
+def test_a_link_not_accepted_does_not_make_the_triple_cold(tmp_path: Path) -> None:
+    """Take a link rejected for its RMS by its prediction, not marked cold (12.6)."""
+    last = {
+        **REFERENCE_LAST,
+        ("mc2", "ox23"): WORKED_LAST,
+        ("mc1", "mc2", "ox23"): triple_last(x_fs=1_239_577_000),
+    }
+    link = REFERENCE_MEASURED[3]
+    noisy = DASMeasurement.model_validate(
+        {
+            "measurement_mjd": link.measurement_mjd,
+            "measured_phase": link.measured_phase,
+            "rms": 99,
+            "switch": link.switch,
+            "clock": link.clock,
+        }
+    )
+    epoch = epoch_of([*REFERENCE_MEASURED[:3], noisy, WORKED_RAW], last, tmp_path)
+    pairs = run.process_pairs(epoch, last)
+    assert "A" not in pairs.results[("mc2", "mc1")].row.flags
+    done = run.process_triples(epoch, last, pairs)
+    remote = done.measurements[("mc1", "mc2", "ox23")]
+    assert (remote.components_used, remote.cold) == ("110", False)
+    assert done.results[("mc1", "mc2", "ox23")].row.flags == "A"
+
+
+def test_each_series_takes_the_settings_in_force_at_its_epoch(tmp_path: Path) -> None:
+    """Give the clock entry that took effect at or before E, not a later one (8.1)."""
+    config, _ = deployment(tmp_path)
+    dated = CLOCKS.replace(
+        "  ox23: [{type: maser}]\n",
+        "  ox23: [{type: maser},"
+        f" {{effective_mjd: {datetime_to_mjd(E)}, time_constant: 150.0}},"
+        f" {{effective_mjd: {datetime_to_mjd(E + T)}, time_constant: 200.0}}]\n",
+    )
+    path = tmp_path / "dated.yaml"
+    path.write_text(dated, encoding="utf-8")
+    epoch = run.build_epoch(E, block(MEASURED), NONE, config, read_clock_config(path))
+    assert epoch.params[("mc2", "ox23")].M == 150.0
+
+
+def test_the_prediction_and_update_are_logged_in_full(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log at TRACE each series' prediction, innovation, x, y and d, as they are."""
+    last = {
+        **REFERENCE_LAST,
+        ("mc2", "ox23"): WORKED_LAST,
+        ("mc1", "mc2", "ox23"): triple_last(x_fs=1_239_577_000),
+    }
+    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
+    trace = at(logged(caplog, epoch, last), "TRACE")
+    assert (
+        "das_a.mc2.ox23: prediction 1234574.38, innovation 2.62, x 1234574.457,"
+        " y 0.01230129052352643, d 7.169515400974333e-12"
+    ) in trace
+    assert (
+        "das_a.mc1.mc2.ox23: prediction 1239577.0, innovation 0.0, x 1239577.000,"
+        " y 0.0, d 0.0"
+    ) in trace
+
+
+def test_a_phase_step_logs_the_step_alone_and_the_new_offset(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log the step as the change in offset, and the offset it reaches (16.2)."""
+    stepping = WORKED_LAST.model_copy(
+        update={
+            "flags": "R",
+            "consecutive_rejects": 2,
+            "rejects": ((PREVIOUS - T, 150.0), (PREVIOUS, 150.0)),
+            "epochs_since_accept": 2,
+            "step_offset": 40,
+        }
+    )
+    last = {**REFERENCE_LAST, ("mc2", "ox23"): stepping}
+    moved = DASMeasurement(
+        measurement_mjd=60941.251588,
+        measured_phase=34579 + 150 - 3,
+        rms=3,
+        switch="2B07",
+        clock="ox23",
+    )
+    records = logged(
+        caplog, epoch_of([*REFERENCE_MEASURED, moved], last, tmp_path), last
+    )
+    assert "das_a.mc2.ox23 phase step of 150 ps; step offset 190 ps" in at(
+        records, "INFO"
+    )
+
+
+def test_a_frequency_step_with_a_configuration_change_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log both when new settings and a frequency step come in one epoch (16.2)."""
+    ramping = WORKED_LAST.model_copy(
+        update={
+            "flags": "R",
+            "consecutive_rejects": 2,
+            "rejects": ((PREVIOUS - T, 30.0), (PREVIOUS, 60.0)),
+            "epochs_since_accept": 2,
+            "time_constant": 80.0,
+        }
+    )
+    last = {**REFERENCE_LAST, ("mc2", "ox23"): ramping}
+    moved = DASMeasurement(
+        measurement_mjd=60941.251588,
+        measured_phase=34579 + 90 - 3,
+        rms=3,
+        switch="2B07",
+        clock="ox23",
+    )
+    info = at(
+        logged(caplog, epoch_of([*REFERENCE_MEASURED, moved], last, tmp_path), last),
+        "INFO",
+    )
+    assert any(m.startswith("das_a.mc2.ox23 configuration change") for m in info)
+    assert "das_a.mc2.ox23 frequency step: segment 6" in info
+
+
+def test_a_cold_start_logs_no_step(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a cold start from dormancy as a cold start, never as a step (16.2)."""
+    acquiring = last_row(
+        x_fs=None,
+        y=None,
+        d=None,
+        innovation_scale=None,
+        flags="RD",
+        filter_states=3,
+        time_constant=100.0,
+        scale_time_constant=50.0,
+        rejects=((PREVIOUS - T, 1_234_579.0), (PREVIOUS, 1_234_579.0)),
+    )
+    last = {**REFERENCE_LAST, ("mc2", "ox23"): acquiring}
+    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
+    info = at(logged(caplog, epoch, last), "INFO")
+    mine = [m for m in info if m.startswith("das_a.mc2.ox23 ")]
+    assert mine == ["das_a.mc2.ox23 cold start: segment 2"]
+
+
+def test_an_epoch_s_log_names_the_series_of_its_channel(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Name each series in the log by the run's RF channel."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE])
+    (first,) = read_all_blocks(tmp_path / "das", datetime_to_mjd(LATE))
+    files.ensure_archives(config.processed.processed_path)
+    with caplog.at_level(logging.DEBUG, logger=RUN_LOGGER):
+        run.process_epoch(LATE, first, files.DayBuffer("a"), config, clocks)
+    debug = [r.getMessage() for r in caplog.records if r.levelname == "DEBUG"]
+    assert "das_a.mc1.mc1: RD" in debug
+
+
+def test_the_last_switch_of_each_pair_is_read_from_its_file(tmp_path: Path) -> None:
+    """Give each pair's switch at its last measurement, as the file holds it."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE])
+    run.run(config, clocks, None, ShutdownHandler())
+    _, switches = run.read_last_state(config)
+    assert switches == {("mc1", "mc1"): "1A01", ("mc1", "ox23"): "1A02"}
+
+
+def das_lines(tmp_path: Path, epochs: list[list[tuple[str, str, int]]]) -> None:
+    """Write one DAS day file: each epoch's (reference, clock, phase) from LATE."""
+    lines = []
+    for index, measured_here in enumerate(epochs):
+        start = datetime_to_mjd(LATE + index * T)
+        for slot, (reference, clock, phase) in enumerate(measured_here):
+            raw = DASMeasurement(
+                measurement_mjd=round(start + (slot + 1) * 2e-5, 6),
+                measured_phase=phase,
+                rms=3,
+                switch=f"{reference[-1]}A{slot:02d}",
+                clock=clock,
+            )
+            lines.append(f"{raw}\n")
+    day = int(datetime_to_mjd(LATE))
+    (tmp_path / "das" / f"cd5m5m_{day}.dat").write_text("".join(lines))
+
+
+def test_a_remote_triple_goes_on_when_its_reference_is_missing(
+    tmp_path: Path,
+) -> None:
+    """Give an existing triple a row at an epoch its reference r was not measured."""
+    config, clocks = loop_deployment(tmp_path)
+    both = [
+        ("mc1", "mc1", 1000),
+        ("mc1", "mc2", 5000),
+        ("mc2", "mc1", PHASE_PERIOD - 5000),
+        ("mc2", "mc2", 2000),
+        ("mc2", "ox23", 50_000),
+    ]
+    das_lines(tmp_path, [both, both, [both[3], both[4]]])
+    run.run(config, clocks, None, ShutdownHandler())
+    rows = rows_of(config, ("mc1", "mc2", "ox23"))
+    assert [row.interpolated_datetime for row in rows] == [LATE, LATE + T, LATE + 2 * T]
+
+
+def test_a_run_with_no_data_and_no_series_does_nothing(tmp_path: Path) -> None:
+    """Finish without a row when there is neither data nor a file yet."""
+    config, clocks = loop_deployment(tmp_path)
+    run.run(config, clocks, None, ShutdownHandler())
+    assert run.data_series(config) == []
+
+
+def test_a_gap_at_the_start_of_a_run_is_predicted_not_skipped(tmp_path: Path) -> None:
+    """Give the epoch after the files' end a row, though the DAS skipped it (6.2)."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE, LATE + 2 * T])
+    run.run(config, clocks, 1, ShutdownHandler())
+    run.run(config, clocks, 1, ShutdownHandler())
+    rows = rows_of(config, ("mc1", "mc1"))
+    assert [row.interpolated_datetime for row in rows] == [LATE, LATE + T]
+    assert "P" in rows[1].flags

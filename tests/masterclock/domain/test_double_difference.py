@@ -11,6 +11,9 @@ a local triple (r, r, c) needs only (r, c), collapses to z(r, c) exactly and
 stops with PhaseError when it does not; the value is marked cold when any
 component cold-started; and a constant link offset keeps the value
 continuous as the components used change.
+
+The 110 sigma squares the forward rms, and a local triple that does not
+collapse says so in full.
 """
 
 import math
@@ -260,3 +263,28 @@ def test_a_value_names_the_components_it_used() -> None:
         TripleValue.model_validate(
             {"z": 1, "sigma": 1.0, "components_used": "011", "cold": False}
         )
+
+
+def test_a_missing_back_direction_squares_the_forward_rms() -> None:
+    """Combine the clock pair's and the forward link's rms in quadrature (110)."""
+    value = double_difference(
+        REMOTE,
+        SC,
+        link(5_432_100, rms=5, predicted=PREDICTED_RS),
+        missing(PREDICTED_SR),
+    )
+    assert value is not None
+    assert value.sigma == math.sqrt(9 + 25)
+
+
+def test_a_local_triple_that_does_not_collapse_says_so_in_full(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Name the triple and both values, and log it at ERROR as raised (U19)."""
+    with pytest.raises(PhaseError) as raised:
+        double_difference(LOCAL, SC, link(5_432_106), link(5_432_100))
+    assert str(raised.value) == (
+        "local triple ('mc2', 'mc2', 'ox23') does not collapse to its pair:"
+        " 1234580 != 1234577"
+    )
+    assert [r.getMessage() for r in caplog.records] == [str(raised.value)]

@@ -884,7 +884,7 @@ def _pair_measurement(
 def _attempt[RecordT: (MeasRecord, DdiffRecord)](
     line: str, build: Callable[[], RecordT], again: Callable[[RecordT], str]
 ) -> tuple[RecordT | None, str, Exception | None]:
-    """Build a record from a line, and check it gives the line back, quietly.
+    """Build a record from a line, and check it gives the line back.
 
     Parameters
     ----------
@@ -899,7 +899,8 @@ def _attempt[RecordT: (MeasRecord, DdiffRecord)](
     -------
     tuple of (record or None, str, Exception or None)
         The record, or ``None`` with what is wrong with the line and the
-        error that showed it. Nothing is logged.
+        error that showed it. Nothing is logged here; a record's own
+        check logs the rule a line breaks.
     """
     try:
         record = build()
@@ -907,6 +908,7 @@ def _attempt[RecordT: (MeasRecord, DdiffRecord)](
         ValueError,
         FilterError,
         PhaseError,
+        DataFileError,
     ) as exc:
         return None, f"row {line[:25]!r} does not parse: {describe_error(exc)}", exc
     if again(record) != line:
@@ -1099,8 +1101,10 @@ def row_epoch(line: bytes, kind: FileKind, key: SeriesKey) -> datetime | None:
     datetime or None
         The row's epoch when the slot is a whole line, ending in its
         newline, that is ASCII and parses as a row of the file; otherwise
-        ``None``. A header line never parses as a row. Nothing is logged:
-        a damaged line is reported by the roll-back that removes it.
+        ``None``. A header line never parses as a row. A damaged line is
+        reported by the roll-back that removes it; only a line that parses
+        but breaks a record's rules, such as a measurement on a P row, is
+        also logged, by the record's check.
     """
     if not line.endswith(b"\n"):
         return None

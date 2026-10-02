@@ -11,6 +11,10 @@ for the first pair of a D and +m for the second; an undecided case corrects
 nothing and excludes every clock pair in a flagged D; pairs without an
 innovation, or excluded by screening, and links not usable both ways are
 not used; and each correction or undecided case gives an event.
+
+The D scale combines as the design writes it and a slip lies strictly inside
+five of them; a D that cannot be worked out does not stop the rest; and
+every undecided clock's pairs are excluded.
 """
 
 from fractions import Fraction
@@ -244,3 +248,68 @@ def test_an_event_names_a_known_kind() -> None:
         slips.SlipEvent.model_validate(
             {"kind": "other", "clock": "ox1", "pairs": (), "cycles": 0}
         )
+
+
+# ------------------------------------------ tolerances and gathering, exactly
+
+
+SCALES: Final = {
+    ("mc1", "ox1"): 2.0,
+    ("mc2", "ox1"): 14.0,
+    ("mc1", "mc2"): 6.0,
+    ("mc2", "mc1"): 8.0,
+}
+"""Scales whose combined D scale is exactly 15 ps: 4 + 196 + (36 + 64) / 4 = 225."""
+
+WEAK_FIRST: Final = {
+    ("mc1", "ox1"): "R",
+    ("mc2", "ox1"): "A",
+    ("mc1", "mc2"): "A",
+    ("mc2", "mc1"): "A",
+}
+"""Last flags that name (mc1, ox1) the weak pair of two."""
+
+
+@pytest.mark.parametrize(("offset", "slipped"), [(74, True), (75, False)])
+def test_a_slip_lies_strictly_within_five_d_scales_of_a_period(
+    offset: int, slipped: bool
+) -> None:
+    """Combine the clock pairs' scales and a quarter of the links' (11.1)."""
+    innovations = epoch(TWO, {"mc1": P + offset, "mc2": 0})
+    found = check(innovations, TWO, WEAK_FIRST, scales=SCALES)
+    assert found.corrections == ({("mc1", "ox1"): -1} if slipped else {})
+
+
+@pytest.mark.parametrize("offset", [60, 70])
+def test_a_slip_well_inside_the_tolerance_is_found(offset: int) -> None:
+    """Find a slip at 4 and at 4.7 D scales from a period."""
+    innovations = epoch(TWO, {"mc1": P + offset, "mc2": 0})
+    found = check(innovations, TWO, WEAK_FIRST, scales=SCALES)
+    assert found.corrections == {("mc1", "ox1"): -1}
+
+
+def test_a_link_that_gives_no_d_does_not_stop_the_others() -> None:
+    """Work out every later D after a pair of references with no usable link."""
+    innovations = epoch(THREE, {"mc1": 0, "mc2": 0, "mc3": P})
+    del innovations[("mc1", "mc2")], innovations[("mc2", "mc1")]
+    found = check(innovations, THREE)
+    assert found.corrections == {("mc3", "ox1"): -1}
+
+
+def test_every_undecided_clock_s_pairs_are_excluded() -> None:
+    """Exclude the clock pairs of each undecided slip, every clock's together."""
+    innovations = epoch(TWO, {"mc1": P, "mc2": 0})
+    innovations |= {("mc1", "ox2"): Fraction(P), ("mc2", "ox2"): Fraction(0)}
+    found = check(innovations, TWO)
+    assert found.excluded == frozenset(
+        {("mc1", "ox1"), ("mc2", "ox1"), ("mc1", "ox2"), ("mc2", "ox2")}
+    )
+
+
+def test_a_missing_scale_is_logged_as_raised(caplog: pytest.LogCaptureFixture) -> None:
+    """Log the FilterError for an innovation without a scale, in its own words."""
+    with pytest.raises(FilterError) as raised:
+        slips.slip_check(
+            {("mc1", "ox1"): Fraction(0)}, {}, {}, frozenset({"mc1"}), frozenset()
+        )
+    assert [r.getMessage() for r in caplog.records] == [str(raised.value)]

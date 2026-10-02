@@ -8,6 +8,9 @@ DEFAULT section included, is refused, and so is a value over more than one
 line; a file that cannot be read or parsed is a ConfigError; a program's
 table of settings names each setting once; and the logging settings refuse
 unknown fields, relative paths, and number text the command line refuses.
+
+A refused relative path is named, and a value over several lines is judged
+as written, so the entry holding the lines is named.
 """
 
 import argparse
@@ -369,3 +372,25 @@ def test_a_count_refused_names_the_command_line_reason() -> None:
         ValidationError, match=re.escape("invalid positive int value: '5.0'")
     ):
         file_count("5.0")
+
+
+def test_a_relative_log_file_is_named_in_the_refusal() -> None:
+    """Say which path is not absolute."""
+    with pytest.raises(
+        ValidationError, match=re.escape("path must be absolute: 'run.log'")
+    ):
+        config.LoggingConfig.model_validate(
+            {"log_file": "run.log", "log_level": "INFO", "backup_count": None}
+        )
+
+
+def test_the_entry_holding_the_lines_is_named_not_one_that_names_it(
+    tmp_path: Path,
+) -> None:
+    """Judge each value as written, before another entry's value is put in it."""
+    path = ini(tmp_path, "[input]\nchannel = %(label)s\nlabel = two\n  lines\n")
+    with pytest.raises(ConfigError) as raised:
+        config.read_entries(path, SETTINGS)
+    assert str(raised.value) == (
+        f"config file {path} gives [input] label on more than one line"
+    )

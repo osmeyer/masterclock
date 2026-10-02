@@ -16,10 +16,15 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
 
 from masterclock.das_processor.clock_config import ClockConfig
 from masterclock.das_processor.config import AppConfig
-from masterclock.das_processor.measurements import PairMeasurement, measure_pair
+from masterclock.das_processor.measurements import (
+    PairMeasurement,
+    TripleMeasurement,
+    measure_pair,
+)
 from masterclock.das_processor.read_cd5m5m import DASData
 from masterclock.das_processor.read_steering import read_steering
 from masterclock.das_processor.registry import Existing, build_registry, refs_of
+from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.filter import StepResult, anchor_of, filter_step, predict
 from masterclock.domain.phase import EPOCH_SECONDS
 from masterclock.domain.screening import Screening, screen_references
@@ -316,3 +321,105 @@ def process_pairs(epoch: Epoch, last: Mapping[SeriesKey, Row]) -> PairStep:
         screening=screening,
         slips=slips,
     )
+
+
+class TripleStep(BaseModel):
+    """What the triples of an epoch gave (design 12).
+
+    Parameters
+    ----------
+    results : dict of (str, str, str) to StepResult
+        Each triple's row, and whether it cold-started.
+    measurements : dict of (str, str, str) to TripleMeasurement
+        Each triple's double difference, where it has one.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    results: dict[TripleKey, StepResult]
+    measurements: dict[TripleKey, TripleMeasurement]
+
+
+def _component(pairs: PairStep, pair: PairKey) -> Component:
+    """Give a pair's part in a triple: its accepted measurement, never its estimate.
+
+    Parameters
+    ----------
+    pairs : PairStep
+        What the epoch's pairs gave.
+    pair : (str, str)
+        The pair.
+
+    Returns
+    -------
+    Component
+        Whether the pair's row was accepted, its z and rms when it was, its
+        prediction, and whether it cold-started.
+    """
+    result = pairs.results.get(pair)
+    prediction = pairs.predictions.get(pair)
+    predicted = None if prediction is None else prediction.x
+    measurement = pairs.measurements.get(pair)
+    if result is None or "A" not in result.row.flags or measurement is None:
+        cold = result is not None and result.cold
+        return Component(accepted=False, predicted=predicted, cold=cold)
+    return Component(
+        accepted=True,
+        z=measurement.z,
+        rms=measurement.measurement.rms,
+        predicted=predicted,
+        cold=result.cold,
+    )
+
+
+def process_triples(
+    epoch: Epoch, last: Mapping[SeriesKey, Row], pairs: PairStep
+) -> TripleStep:
+    """Process an epoch's triples: double differences, then the filter (design 12).
+
+    Parameters
+    ----------
+    epoch : Epoch
+        The epoch.
+    last : Mapping of series key to Row
+        Each series' last row; a series missing here is new.
+    pairs : PairStep
+        What the epoch's pairs gave.
+
+    Returns
+    -------
+    TripleStep
+        Every triple's row and double difference, in sorted key order. A
+        local triple (r, r, c) is given its self pair for both links, so
+        the check that it collapses to its pair runs every epoch.
+
+    Raises
+    ------
+    PhaseError
+        If a local triple does not collapse to its pair.
+    FilterError
+        If a row breaks a rule of a row.
+    """
+    mark = epoch.interpolated_datetime
+    results: dict[TripleKey, StepResult] = {}
+    measurements: dict[TripleKey, TripleMeasurement] = {}
+    for triple in epoch.triples:
+        r, s, c = triple
+        value = double_difference(
+            triple,
+            _component(pairs, (s, c)),
+            _component(pairs, (r, s)),
+            _component(pairs, (s, r)),
+        )
+        measurement = None if value is None else TripleMeasurement.from_value(value)
+        if measurement is not None:
+            measurements[triple] = measurement
+        prediction = predict(last.get(triple), steer_u(triple, mark, epoch.steering))
+        results[triple] = filter_step(
+            mark,
+            epoch.params[triple],
+            last.get(triple),
+            prediction,
+            None if measurement is None else measurement.measured(),
+        )
+    return TripleStep(results=results, measurements=measurements)

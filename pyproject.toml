@@ -48,6 +48,12 @@ select = ["A", "ARG", "B", "C4", "C90", "D", "E", "F", "I", "N", "PTH", "RET", "
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"
 
+[tool.ruff.lint.pep8-naming]
+# Commonly accepted one-letter names of mathematical and scientific terms
+# keep the form the science writes them in, so the naming rules let these
+# through wherever they appear: M, the estimator's time constant.
+ignore-names = ["M"]
+
 [tool.ruff.lint.mccabe]
 max-complexity = 12
 

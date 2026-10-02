@@ -6,11 +6,12 @@ a time constant exactly when the model has more than one state, and limits
 in their ranges; a row's flags are letters of ARXPDSNU in that order, with
 exactly one outcome, a dormant row never accepted and an unsettled row
 never dormant or one-state; a dormant row has no state and every other row
-a whole one, with no rate or drift where its model has none; at most three
-rejects are held, oldest first; a time constant is held exactly when the
-model has more than one state; every float is finite; every model is frozen
-and strict and refuses unknown fields; and replace builds a changed row and
-checks it again.
+a whole one, its phase in whole femtoseconds, with no rate or drift where
+its model has none; at most three rejects are held, oldest first; a time
+constant is held exactly when the model has more than one state; every
+float is finite; a row gives its state unless it is dormant; every model is
+frozen and strict and refuses unknown fields; and replace builds a changed
+row and checks it again.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -35,7 +36,7 @@ def row(**changes: object) -> series.Row:
     values: dict[str, object] = {
         "interpolated_datetime": MARK,
         "innovation": 2.62,
-        "x": 1_234_574,
+        "x_fs": 1_234_574_457,
         "y": 0.01230129052352643,
         "d": 7.169515400974333e-12,
         "innovation_scale": 3.0,
@@ -55,7 +56,7 @@ def row(**changes: object) -> series.Row:
 
 
 DORMANT: Final[dict[str, object]] = {
-    "x": None,
+    "x_fs": None,
     "y": None,
     "d": None,
     "innovation_scale": None,
@@ -227,15 +228,15 @@ def test_a_one_state_row_is_never_unsettled() -> None:
         row(flags="AU", **ONE_STATE)
 
 
-@pytest.mark.parametrize("field", ["x", "y", "d", "innovation_scale"])
+@pytest.mark.parametrize("field", ["x_fs", "y", "d", "innovation_scale"])
 def test_a_dormant_row_has_no_state(field: str) -> None:
     """Refuse a dormant row that holds any part of a state."""
-    values = {**DORMANT, field: 1 if field == "x" else 1.0}
+    values = {**DORMANT, field: 1 if field == "x_fs" else 1.0}
     with pytest.raises(ValidationError, match="dormant"):
         row(flags="RD", **values)
 
 
-@pytest.mark.parametrize("field", ["x", "y", "d", "innovation_scale"])
+@pytest.mark.parametrize("field", ["x_fs", "y", "d", "innovation_scale"])
 def test_a_row_that_is_not_dormant_has_a_whole_state(field: str) -> None:
     """Refuse a row without D that lacks any part of its state."""
     with pytest.raises(ValidationError, match="dormant"):
@@ -326,7 +327,7 @@ def test_every_reject_value_is_finite() -> None:
         ("epochs_since_accept", -1),
         ("consecutive_rejects", -1),
         ("filter_states", 4),
-        ("x", 1.5),
+        ("x_fs", 1.5),
         ("segment", True),
         ("filter_states", True),
         ("interpolated_datetime", MARK.replace(tzinfo=None)),
@@ -353,7 +354,22 @@ def test_every_model_is_frozen() -> None:
     with pytest.raises(ValidationError, match="frozen"):
         params().M = 1.0  # type: ignore[misc]
     with pytest.raises(ValidationError, match="frozen"):
-        row().x = 0  # type: ignore[misc]
+        row().x_fs = 0  # type: ignore[misc]
+
+
+def test_a_row_gives_its_state() -> None:
+    """Give x, y and d of a row that is not dormant."""
+    assert row().known_state() == (
+        1_234_574_457,
+        0.01230129052352643,
+        7.169515400974333e-12,
+    )
+
+
+def test_a_dormant_row_gives_no_state() -> None:
+    """Raise FilterError when asked for the state of a dormant row."""
+    with pytest.raises(FilterError, match="holds no state"):
+        row(flags="RD", **DORMANT).known_state()
 
 
 # ----------------------------------------------------------------- replace
@@ -374,7 +390,7 @@ def test_replace_builds_a_changed_row() -> None:
     "changes",
     [
         {"flags": "AR"},
-        {"x": None},
+        {"x_fs": None},
         {"colour": "red"},
         {"segment": -1},
     ],

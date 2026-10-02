@@ -53,14 +53,14 @@ def link(
         accepted=accepted,
         z=z if accepted else None,
         rms=rms if accepted else None,
-        predicted=predicted,
-        cold=cold,
+        predicted_phase=predicted,
+        cold_started=cold,
     )
 
 
 def missing(predicted: Fraction | None = None) -> Component:
     """Give a link direction that was not accepted at the epoch."""
-    return Component(accepted=False, predicted=predicted)
+    return Component(accepted=False, predicted_phase=predicted)
 
 
 # ----------------------------------------------------------- both directions
@@ -73,7 +73,7 @@ def test_the_worked_epoch_gives_its_double_difference() -> None:
         z=6_666_667,
         sigma=math.sqrt(9 + 0.25 * (4 + 4)),
         components_used="111",
-        cold=False,
+        pair_cold_started=False,
     )
     assert round(value.sigma, 5) == 3.31662
 
@@ -106,7 +106,7 @@ def test_a_missing_back_direction_uses_the_round_trip() -> None:
         z=round(1_234_577 + 5_432_100 - rho / 2),
         sigma=math.sqrt(9 + 4),
         components_used="110",
-        cold=False,
+        pair_cold_started=False,
     )
 
 
@@ -123,7 +123,7 @@ def test_a_missing_forward_direction_uses_the_round_trip() -> None:
         z=round(1_234_577 + 5_432_080 + rho / 2),
         sigma=math.sqrt(9 + 25),
         components_used="101",
-        cold=False,
+        pair_cold_started=False,
     )
 
 
@@ -150,7 +150,7 @@ def test_no_value_without_either_direction() -> None:
 
 def test_no_value_without_the_clock_pair() -> None:
     """Give no value when (s, c) is not accepted."""
-    sc = Component(accepted=False, predicted=Fraction(1_234_574))
+    sc = Component(accepted=False, predicted_phase=Fraction(1_234_574))
     assert double_difference(REMOTE, sc, link(5_432_100), link(-5_432_080)) is None
 
 
@@ -195,7 +195,7 @@ def test_a_local_triple_is_its_pair_exactly(z: int) -> None:
     sc = Component(accepted=True, z=z, rms=4)
     rr = link(5_432_101, rms=9)
     assert double_difference(LOCAL, sc, rr, rr) == TripleValue(
-        z=z, sigma=4.0, components_used="111", cold=False
+        z=z, sigma=4.0, components_used="111", pair_cold_started=False
     )
 
 
@@ -204,7 +204,7 @@ def test_a_local_triple_needs_only_its_pair() -> None:
     rr = missing()
     value = double_difference(LOCAL, SC, rr, rr)
     assert value == TripleValue(
-        z=1_234_577, sigma=3.0, components_used="111", cold=False
+        z=1_234_577, sigma=3.0, components_used="111", pair_cold_started=False
     )
 
 
@@ -220,20 +220,20 @@ def test_a_local_triple_that_does_not_collapse_stops_the_run() -> None:
 @pytest.mark.parametrize("which", ["sc", "rs", "sr"])
 def test_a_component_cold_start_marks_the_value_cold(which: str) -> None:
     """Mark the value cold when any of its pairs cold-started (12.6)."""
-    sc = Component(accepted=True, z=1_234_577, rms=3, cold=which == "sc")
+    sc = Component(accepted=True, z=1_234_577, rms=3, cold_started=which == "sc")
     rs = link(5_432_100, cold=which == "rs")
     sr = link(-5_432_080, cold=which == "sr")
     value = double_difference(REMOTE, sc, rs, sr)
     assert value is not None
-    assert value.cold is True
+    assert value.pair_cold_started is True
 
 
 def test_a_local_triple_is_cold_when_its_pair_is() -> None:
     """Mark a local triple cold when its pair cold-started."""
-    sc = Component(accepted=True, z=1_234_577, rms=3, cold=True)
+    sc = Component(accepted=True, z=1_234_577, rms=3, cold_started=True)
     value = double_difference(LOCAL, sc, missing(), missing())
     assert value is not None
-    assert value.cold is True
+    assert value.pair_cold_started is True
 
 
 # --------------------------------------------------------------- the models
@@ -261,7 +261,7 @@ def test_a_value_names_the_components_it_used() -> None:
     """Refuse components_used other than 111, 110 or 101."""
     with pytest.raises(ValidationError):
         TripleValue.model_validate(
-            {"z": 1, "sigma": 1.0, "components_used": "011", "cold": False}
+            {"z": 1, "sigma": 1.0, "components_used": "011", "pair_cold_started": False}
         )
 
 

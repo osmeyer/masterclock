@@ -45,7 +45,9 @@ SETTINGS = (
 
 def options(**given_: object) -> types.SimpleNamespace:
     """Return parsed options with every setting left out except those given."""
-    fields: dict[str, object] = {setting.attribute: cli.UNSET for setting in SETTINGS}
+    fields: dict[str, object] = {
+        setting.options_field: cli.UNSET for setting in SETTINGS
+    }
     fields.update(given_)
     return types.SimpleNamespace(**fields)
 
@@ -400,7 +402,9 @@ def test_the_entry_holding_the_lines_is_named_not_one_that_names_it(
 
 def test_some_groups_can_be_merged_alone() -> None:
     """Merge only the groups asked for, a required setting of another not missed."""
-    merged = config.merge(SETTINGS, options(log_level="INFO"), None, groups={"logging"})
+    merged = config.merge(
+        SETTINGS, options(log_level="INFO"), None, config_groups={"logging"}
+    )
     assert merged == {
         "logging": {"log_file": None, "log_level": "INFO", "backup_count": None}
     }
@@ -412,4 +416,6 @@ def test_merging_some_groups_still_checks_the_whole_file(tmp_path: Path) -> None
     """Refuse a file naming what the program does not read, whatever is merged."""
     path = ini(tmp_path, "[input]\ncolour = red\n")
     with pytest.raises(ConfigError, match="colour"):
-        config.merge(SETTINGS, options(log_level="INFO"), path, groups={"logging"})
+        config.merge(
+            SETTINGS, options(log_level="INFO"), path, config_groups={"logging"}
+        )

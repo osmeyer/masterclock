@@ -273,7 +273,7 @@ def test_the_double_difference_example_rows_come_out_byte_for_byte() -> None:
             z=6_666_667,
             double_difference_sigma=3.3166247903553998,
             components_used="111",
-            cold=False,
+            pair_cold_started=False,
         ),
         row=row(
             innovation=-0.29999999981373549,
@@ -287,7 +287,10 @@ def test_the_double_difference_example_rows_come_out_byte_for_byte() -> None:
     )
     local = files.DdiffRecord(
         measurement=TripleMeasurement(
-            z=1_234_577, double_difference_sigma=3.0, components_used="111", cold=False
+            z=1_234_577,
+            double_difference_sigma=3.0,
+            components_used="111",
+            pair_cold_started=False,
         ),
         row=row(innovation=2.62),
     )
@@ -431,7 +434,7 @@ def test_a_record_has_a_measurement_exactly_when_its_row_is_not_predicted() -> N
     with pytest.raises(DataFileError, match="measurement"):
         files.MeasRecord(measurement=None, row=row())
     triple = TripleMeasurement(
-        z=1, double_difference_sigma=1.0, components_used="111", cold=False
+        z=1, double_difference_sigma=1.0, components_used="111", pair_cold_started=False
     )
     with pytest.raises(DataFileError, match="measurement"):
         files.DdiffRecord(measurement=triple, row=row(flags="P"))
@@ -446,7 +449,7 @@ def test_a_slip_correction_and_the_s_flag_go_together() -> None:
     with pytest.raises(DataFileError, match="S"):
         files.MeasRecord(measurement=PAIR, row=row(flags="AS"))
     triple = TripleMeasurement(
-        z=1, double_difference_sigma=1.0, components_used="111", cold=False
+        z=1, double_difference_sigma=1.0, components_used="111", pair_cold_started=False
     )
     with pytest.raises(DataFileError, match="S"):
         files.DdiffRecord(measurement=triple, row=row(flags="AS"))
@@ -547,7 +550,7 @@ def ddiff_records(draw: st.DrawFn) -> files.DdiffRecord:
         z=draw(st.integers(-(10**14), 10**14)),
         double_difference_sigma=draw(st.floats(min_value=1e-99, max_value=1e99)),
         components_used=draw(st.sampled_from(["111", "110", "101"])),
-        cold=False,
+        pair_cold_started=False,
     )
     return files.DdiffRecord(measurement=triple, row=drawn)
 
@@ -855,8 +858,8 @@ def test_after_a_write_the_text_is_empty_and_the_last_rows_remain(
     """Empty the buffer's text and keep each series' newest row (5.8)."""
     buffer, _, _ = filled(tmp_path)
     files.write_buffer(buffer)
-    assert buffer.texts == {}
-    assert buffer.last == {KEY: predicted(1).row, TRIPLE: triple_record(1).row}
+    assert buffer.file_texts == {}
+    assert buffer.last_rows == {KEY: predicted(1).row, TRIPLE: triple_record(1).row}
 
 
 def test_the_newest_row_is_the_one_read_back(tmp_path: Path) -> None:
@@ -865,8 +868,8 @@ def test_the_newest_row_is_the_one_read_back(tmp_path: Path) -> None:
     buffer = files.DayBuffer("a")
     record = files.MeasRecord(measurement=PAIR, row=row(innovation=2.62))
     buffer.add(meas / "das_a.mc2.ox23.dat", KEY, record)
-    assert buffer.last[KEY].innovation is None
-    assert buffer.last[KEY] == row()
+    assert buffer.last_rows[KEY].innovation is None
+    assert buffer.last_rows[KEY] == row()
 
 
 def test_a_row_too_wide_is_refused_before_it_is_buffered(tmp_path: Path) -> None:
@@ -876,7 +879,7 @@ def test_a_row_too_wide_is_refused_before_it_is_buffered(tmp_path: Path) -> None
     record = files.MeasRecord(measurement=None, row=row(step_offset=10**16, flags="P"))
     with pytest.raises(DataFileError, match="does not fit"):
         buffer.add(meas / "das_a.mc2.ox23.dat", KEY, record)
-    assert buffer.texts == {}
+    assert buffer.file_texts == {}
 
 
 def test_a_file_keeps_one_series(tmp_path: Path) -> None:
@@ -1017,7 +1020,7 @@ def test_a_failed_check_changes_no_file(
     elif problem == "no_space":
         monkeypatch.setattr(shutil, "disk_usage", lambda _: SimpleNamespace(free=10))
     else:
-        buffer.texts[pair_path] += "é\n"
+        buffer.file_texts[pair_path] += "é\n"
     before = {
         path: path.read_bytes() for path in (pair_path, triple_path) if path.is_file()
     }
@@ -1286,21 +1289,21 @@ def test_a_buffer_takes_another_s_rows(tmp_path: Path) -> None:
     epoch.add(pair_path, KEY, predicted(2))
     epoch.add(triple_path, TRIPLE, triple_record(2))
     day.take(epoch)
-    assert day.texts[pair_path].count("\n") == 3
-    assert day.last[KEY] == predicted(2).row
+    assert day.file_texts[pair_path].count("\n") == 3
+    assert day.last_rows[KEY] == predicted(2).row
     assert day.series_of(triple_path) == ("ddiff", TRIPLE)
 
 
 def test_a_buffer_takes_nothing_from_a_clashing_one(tmp_path: Path) -> None:
     """Refuse rows of another series for a path, leaving the buffer as it was."""
     day, pair_path, _ = filled(tmp_path)
-    before = dict(day.texts), dict(day.last)
+    before = dict(day.file_texts), dict(day.last_rows)
     epoch = files.DayBuffer("a")
     epoch.add(pair_path.parent / "das_a.mc2.cs7.dat", ("mc2", "cs7"), predicted(2))
     epoch.add(pair_path, ("mc2", "hm1"), predicted(2))
     with pytest.raises(DataFileError, match="series"):
         day.take(epoch)
-    assert (dict(day.texts), dict(day.last)) == before
+    assert (dict(day.file_texts), dict(day.last_rows)) == before
 
 
 # ---------------------------------------------------------- the write journal
@@ -1318,15 +1321,15 @@ def journaled(tmp_path: Path) -> tuple[files.DayBuffer, Path, Path]:
 def test_a_buffer_knows_its_first_epoch(tmp_path: Path) -> None:
     """Keep the earliest epoch buffered since the last write, and forget it after."""
     buffer, _, pair_path = journaled(tmp_path)
-    assert buffer.start == E
+    assert buffer.earliest_epoch == E
     later = files.DayBuffer("a")
     later.add(pair_path, KEY, predicted(2))
     buffer.take(later)
-    assert buffer.start == E
+    assert buffer.earliest_epoch == E
     files.write_buffer(buffer)
-    assert [buffer.start] == [None]
+    assert [buffer.earliest_epoch] == [None]
     buffer.add(pair_path, KEY, predicted(3))
-    assert buffer.start == E + 3 * STEP
+    assert buffer.earliest_epoch == E + 3 * STEP
 
 
 def test_the_journal_is_there_exactly_while_the_files_are_written(
@@ -1526,7 +1529,7 @@ def test_a_failed_check_says_which_file_and_why(
     elif problem == "no_directory":
         buffer.add(gone, ("mc2", "cs7"), predicted(3))
     else:
-        buffer.texts[pair_path] += "é\n"
+        buffer.file_texts[pair_path] += "é\n"
     expected = message.format(
         pair=pair_path,
         triple=triple_path,
@@ -1558,8 +1561,8 @@ def test_free_space_just_enough_is_enough(
 ) -> None:
     """Write when the free space is exactly the bytes to write, refuse one less."""
     buffer, pair_path, triple_path = filled(tmp_path)
-    data = files.header("meas", "a", KEY) + buffer.texts[pair_path]
-    data2 = files.header("ddiff", "a", TRIPLE) + buffer.texts[triple_path]
+    data = files.header("meas", "a", KEY) + buffer.file_texts[pair_path]
+    data2 = files.header("ddiff", "a", TRIPLE) + buffer.file_texts[triple_path]
     total = len(data) + len(data2)
     monkeypatch.setattr(shutil, "disk_usage", lambda _: SimpleNamespace(free=total - 1))
     with pytest.raises(DataFileError) as raised:
@@ -1578,9 +1581,11 @@ def test_free_space_is_counted_per_device(
     """Weigh each device's bytes against that device's free space alone."""
     buffer, pair_path, triple_path = filled(tmp_path)
     sizes = {
-        pair_path.parent: len(files.header("meas", "a", KEY) + buffer.texts[pair_path]),
+        pair_path.parent: len(
+            files.header("meas", "a", KEY) + buffer.file_texts[pair_path]
+        ),
         triple_path.parent: len(
-            files.header("ddiff", "a", TRIPLE) + buffer.texts[triple_path]
+            files.header("ddiff", "a", TRIPLE) + buffer.file_texts[triple_path]
         ),
     }
     devices = {pair_path.parent: 1, triple_path.parent: 2}
@@ -1805,7 +1810,7 @@ def test_a_damaged_first_row_is_explained_in_its_refusal(
         " the line is cut short, with no newline"
     )
     caplog.clear()
-    assert files.check_file(path, "meas", stopped_write=True).through is None
+    assert files.check_file(path, "meas", stopped_write=True).good_through is None
     (error,) = errors_of(caplog)
     assert error.startswith(f"data file {path} is damaged from its first row: ")
 

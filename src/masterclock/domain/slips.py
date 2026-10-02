@@ -51,7 +51,7 @@ class SlipEvent(BaseModel):
 
     Parameters
     ----------
-    kind : {'slip_corrected', 'slip_undecided'}
+    finding : {'slip_corrected', 'slip_undecided'}
         A slip corrected, or one no pair could be named for.
     clock : str
         The clock.
@@ -63,7 +63,7 @@ class SlipEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    kind: Literal["slip_corrected", "slip_undecided"]
+    finding: Literal["slip_corrected", "slip_undecided"]
     clock: str
     pairs: tuple[PairKey, ...]
     cycles: int
@@ -136,24 +136,29 @@ def slip_check(
     >>> slip_check(innovations, scales, flags, frozenset(refs), frozenset()).corrections
     {('mc1', 'ox1'): -1}
     """
-    missing = sorted(set(innovations) - set(scales))
-    if missing:
-        message = f"pairs with an innovation have no innovation scale: {missing}"
+    unscaled_pairs = sorted(set(innovations) - set(scales))
+    if unscaled_pairs:
+        message = f"pairs with an innovation have no innovation scale: {unscaled_pairs}"
         _log.error(message)
         raise FilterError(message)
-    epoch = _Epoch(innovations, scales, excluded)
-    ordered = tuple(sorted(refs))
-    clocks = sorted({pair[1] for pair in innovations})
-    found = [_check_clock(epoch, ordered, c, last_flags) for c in clocks]
-    return _decided(tuple(event for event in found if event is not None))
+    epoch_innovations = _EpochInnovations(innovations, scales, excluded)
+    sorted_refs = tuple(sorted(refs))
+    measured_clocks = sorted({pair[1] for pair in innovations})
+    clock_events = [
+        _check_clock(epoch_innovations, sorted_refs, c, last_flags)
+        for c in measured_clocks
+    ]
+    return _decided(
+        tuple(clock_event for clock_event in clock_events if clock_event is not None)
+    )
 
 
-def _decided(events: tuple[SlipEvent, ...]) -> Slips:
+def _decided(clock_events: tuple[SlipEvent, ...]) -> Slips:
     """Gather what the clocks' events decided.
 
     Parameters
     ----------
-    events : tuple of SlipEvent
+    clock_events : tuple of SlipEvent
         Every clock's event, in clock order.
 
     Returns
@@ -163,23 +168,30 @@ def _decided(events: tuple[SlipEvent, ...]) -> Slips:
         undecided ones to exclude, and the events.
     """
     corrections: dict[PairKey, int] = {}
-    extra: set[PairKey] = set()
-    for event in events:
-        if event.kind == "slip_corrected":
-            corrections[event.pairs[0]] = event.cycles
+    undecided_pairs: set[PairKey] = set()
+    for clock_event in clock_events:
+        if clock_event.finding == "slip_corrected":
+            corrections[clock_event.pairs[0]] = clock_event.cycles
         else:
-            extra |= set(event.pairs)
-    return Slips(corrections=corrections, excluded=frozenset(extra), events=events)
+            undecided_pairs |= set(clock_event.pairs)
+    return Slips(
+        corrections=corrections,
+        excluded=frozenset(undecided_pairs),
+        events=clock_events,
+    )
 
 
 def _check_clock(
-    epoch: _Epoch, refs: tuple[str, ...], c: str, last_flags: Mapping[PairKey, str]
+    epoch_innovations: _EpochInnovations,
+    refs: tuple[str, ...],
+    c: str,
+    last_flags: Mapping[PairKey, str],
 ) -> SlipEvent | None:
     """Check one clock's pairs for a slip.
 
     Parameters
     ----------
-    epoch : _Epoch
+    epoch_innovations : _EpochInnovations
         The epoch's values.
     refs : tuple of str
         Every reference of the epoch, sorted.
@@ -194,22 +206,26 @@ def _check_clock(
         The slip corrected, or undecided with every clock pair of a flagged
         D to exclude; ``None`` when no D is flagged.
     """
-    against = [r for r in refs if epoch.usable((r, c))]
-    flagged, clean = _ds(epoch, against, c)
-    if not flagged:
+    usable_refs = [r for r in refs if epoch_innovations.usable((r, c))]
+    flagged_ds, clean_ds = _ds(epoch_innovations, usable_refs, c)
+    if not flagged_ds:
         return None
-    if len(against) >= _MANY:
-        named = _attribute_many(flagged, clean)
+    if len(usable_refs) >= _MANY:
+        slipped = _attribute_many(flagged_ds, clean_ds)
     else:
-        named = _attribute_two(c, flagged[0], last_flags)
-    if named is None:
-        pairs = tuple(sorted({(x, c) for r, s, _ in flagged for x in (r, s)}))
-        return SlipEvent(kind="slip_undecided", clock=c, pairs=pairs, cycles=0)
-    q, k = named
-    return SlipEvent(kind="slip_corrected", clock=c, pairs=((q, c),), cycles=k)
+        slipped = _attribute_two(c, flagged_ds[0], last_flags)
+    if slipped is None:
+        excluded_pairs = tuple(
+            sorted({(x, c) for r, s, _ in flagged_ds for x in (r, s)})
+        )
+        return SlipEvent(
+            finding="slip_undecided", clock=c, pairs=excluded_pairs, cycles=0
+        )
+    q, k = slipped
+    return SlipEvent(finding="slip_corrected", clock=c, pairs=((q, c),), cycles=k)
 
 
-class _Epoch:
+class _EpochInnovations:
     """One epoch's innovations and scales, and the pairs screening excluded."""
 
     def __init__(
@@ -264,14 +280,16 @@ class _Epoch:
         return float(self.innovations[pair])
 
 
-def _ds(epoch: _Epoch, against: list[str], c: str) -> tuple[list[_D], list[_D]]:
+def _ds(
+    epoch_innovations: _EpochInnovations, usable_refs: list[str], c: str
+) -> tuple[list[_D], list[_D]]:
     """Work out D for every two references a clock is measured against (design 11.1).
 
     Parameters
     ----------
-    epoch : _Epoch
+    epoch_innovations : _EpochInnovations
         The epoch's values.
-    against : list of str
+    usable_refs : list of str
         The references whose pair with ``c`` is usable, sorted.
     c : str
         The clock.
@@ -282,25 +300,29 @@ def _ds(epoch: _Epoch, against: list[str], c: str) -> tuple[list[_D], list[_D]]:
         The flagged Ds and the unflagged ones, each as (r, s, m), for every
         r < s whose link is usable both ways.
     """
-    flagged: list[_D] = []
-    clean: list[_D] = []
-    for r, s in combinations(against, 2):
-        if not (epoch.usable((r, s)) and epoch.usable((s, r))):
+    flagged_ds: list[_D] = []
+    clean_ds: list[_D] = []
+    for r, s in combinations(usable_refs, 2):
+        if not (epoch_innovations.usable((r, s)) and epoch_innovations.usable((s, r))):
             continue
-        two_way = 0.5 * (epoch.nu((r, s)) - epoch.nu((s, r)))
-        d = epoch.nu((r, c)) - epoch.nu((s, c)) - two_way
+        two_way = 0.5 * (epoch_innovations.nu((r, s)) - epoch_innovations.nu((s, r)))
+        d = epoch_innovations.nu((r, c)) - epoch_innovations.nu((s, c)) - two_way
         sigma = math.sqrt(
-            epoch.scales[(r, c)] ** 2
-            + epoch.scales[(s, c)] ** 2
-            + 0.25 * (epoch.scales[(r, s)] ** 2 + epoch.scales[(s, r)] ** 2)
+            epoch_innovations.scales[(r, c)] ** 2
+            + epoch_innovations.scales[(s, c)] ** 2
+            + 0.25
+            * (
+                epoch_innovations.scales[(r, s)] ** 2
+                + epoch_innovations.scales[(s, r)] ** 2
+            )
         )
         m = round(d / PHASE_PERIOD)
         slipped = m != 0 and abs(d - m * PHASE_PERIOD) < K_OUT * sigma
-        (flagged if slipped else clean).append((r, s, m))
-    return flagged, clean
+        (flagged_ds if slipped else clean_ds).append((r, s, m))
+    return flagged_ds, clean_ds
 
 
-def _attribute_many(flagged: list[_D], clean: list[_D]) -> tuple[str, int] | None:
+def _attribute_many(flagged_ds: list[_D], clean_ds: list[_D]) -> tuple[str, int] | None:
     """Name a slipped pair from three or more references (design 11.2).
 
     Parameters
@@ -316,17 +338,17 @@ def _attribute_many(flagged: list[_D], clean: list[_D]) -> tuple[str, int] | Non
         is the second. ``None`` when there is no such reference, or the
         flagged Ds give it different corrections.
     """
-    common = set.intersection(*({r, s} for r, s, _ in flagged))
-    common -= {x for r, s, _ in clean for x in (r, s)}
-    if len(common) != 1:
+    common_refs = set.intersection(*({r, s} for r, s, _ in flagged_ds))
+    common_refs -= {x for r, s, _ in clean_ds for x in (r, s)}
+    if len(common_refs) != 1:
         return None
-    q = common.pop()
-    ks = {-m if q == r else m for r, _, m in flagged}
+    q = common_refs.pop()
+    ks = {-m if q == r else m for r, _, m in flagged_ds}
     return (q, ks.pop()) if len(ks) == 1 else None
 
 
 def _attribute_two(
-    c: str, flagged: _D, last_flags: Mapping[PairKey, str]
+    c: str, flagged_d: _D, last_flags: Mapping[PairKey, str]
 ) -> tuple[str, int] | None:
     """Name a slipped pair from two references (design 11.2).
 
@@ -334,7 +356,7 @@ def _attribute_two(
     ----------
     c : str
         The clock.
-    flagged : (str, str, int)
+    flagged_d : (str, str, int)
         The one flagged D.
     last_flags : Mapping of (str, str) to str
         The flags of each pair's last row; missing for a new pair.
@@ -346,13 +368,13 @@ def _attribute_two(
         acceptance (new, or flagged P, R, X or U), and its correction.
         ``None`` when both or neither are.
     """
-    r, s, m = flagged
-    weak = [
+    r, s, m = flagged_d
+    unsettled_refs = [
         x
         for x in (r, s)
         if (x, c) not in last_flags or SETTLED_NOT & set(last_flags[(x, c)])
     ]
-    if len(weak) != 1:
+    if len(unsettled_refs) != 1:
         return None
-    q = weak[0]
+    q = unsettled_refs[0]
     return q, -m if q == r else m

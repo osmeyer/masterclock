@@ -58,12 +58,12 @@ class RunLock:
 
     Parameters
     ----------
-    directory : Path
+    lock_directory : Path
         The directory the lock file lives in, which is the parent of the
         output subdirectories rather than one of them.
-    name : str
+    lock_file_name : str
         What the lock file is called: a plain file name, so the file sits
-        directly in ``directory``. Two runs exclude each other exactly when
+        directly in ``lock_directory``. Two runs exclude each other exactly when
         they ask for the same name in the same directory.
 
     Examples
@@ -81,7 +81,7 @@ class RunLock:
             run_the_processing()
     """
 
-    def __init__(self, directory: Path, name: str) -> None:
+    def __init__(self, lock_directory: Path, lock_file_name: str) -> None:
         """Initialize the lock without acquiring it.
 
         The class docstring describes each argument. A lock built here holds
@@ -90,18 +90,18 @@ class RunLock:
         Raises
         ------
         ValueError
-            If ``name`` is not a plain file name: empty, ``.`` or ``..``, or
+            If ``lock_file_name`` is not a plain file name: empty, ``.`` or ``..``, or
             containing a path separator or a NUL character.
         """
         if (
-            name in {"", ".", ".."}
-            or os.sep in name
-            or (os.altsep is not None and os.altsep in name)
-            or "\0" in name
+            lock_file_name in {"", ".", ".."}
+            or os.sep in lock_file_name
+            or (os.altsep is not None and os.altsep in lock_file_name)
+            or "\0" in lock_file_name
         ):
-            msg = f"run lock name {name!r} is not a plain file name"
+            msg = f"run lock name {lock_file_name!r} is not a plain file name"
             raise ValueError(msg)
-        self._path: Final[Path] = directory / name
+        self._path: Final[Path] = lock_directory / lock_file_name
         self._fd: int | None = None
 
     @property

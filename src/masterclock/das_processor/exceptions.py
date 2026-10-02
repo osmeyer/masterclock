@@ -34,7 +34,7 @@ class DataFileError(MasterClockError):
 class RefusedLineError(MasterClockError):
     """Raised when a line of a data file must not be used.
 
-    Every reason is a subclass carrying :attr:`kind`, the word a log
+    Every reason is a subclass carrying :attr:`refusal_kind`, the word a log
     describes such a line by, so a reader of the log is told why the line
     was refused rather than being given one word for every reason - which
     tells a reader of a duplicate to go looking for a fault in the file that
@@ -43,12 +43,12 @@ class RefusedLineError(MasterClockError):
     Notes
     -----
     Never raised itself. It is what one ``except`` clause catches when the
-    reason does not matter, and it carries no ``kind`` of its own so that a
+    reason does not matter, and it carries no ``refusal_kind`` of its own so that a
     subclass that forgot to name one fails where it is logged rather than
     quietly describing itself as something else.
     """
 
-    kind: ClassVar[str]
+    refusal_kind: ClassVar[str]
     """The word a log describes a line refused for this reason by."""
 
 
@@ -64,11 +64,11 @@ class MalformedLineError(RefusedLineError):
     >>> try:
     ...     raise MalformedLineError("expected 5 fields, found 3")
     ... except MasterClockError as exc:
-    ...     f"{MalformedLineError.kind}: {exc}"
+    ...     f"{MalformedLineError.refusal_kind}: {exc}"
     'malformed: expected 5 fields, found 3'
     """
 
-    kind: ClassVar[str] = "malformed"
+    refusal_kind: ClassVar[str] = "malformed"
 
 
 class InconsistentLineError(RefusedLineError):
@@ -83,11 +83,11 @@ class InconsistentLineError(RefusedLineError):
     >>> try:
     ...     raise InconsistentLineError("interpolated MJD column reads '1'")
     ... except MasterClockError as exc:
-    ...     f"{InconsistentLineError.kind}: {exc}"
+    ...     f"{InconsistentLineError.refusal_kind}: {exc}"
     "inconsistent: interpolated MJD column reads '1'"
     """
 
-    kind: ClassVar[str] = "inconsistent"
+    refusal_kind: ClassVar[str] = "inconsistent"
 
 
 class WrongDayError(RefusedLineError):
@@ -98,11 +98,11 @@ class WrongDayError(RefusedLineError):
     >>> try:
     ...     raise WrongDayError("MJD 58854.01 is not in day 58853")
     ... except MasterClockError as exc:
-    ...     f"{WrongDayError.kind}: {exc}"
+    ...     f"{WrongDayError.refusal_kind}: {exc}"
     'wrong-day: MJD 58854.01 is not in day 58853'
     """
 
-    kind: ClassVar[str] = "wrong-day"
+    refusal_kind: ClassVar[str] = "wrong-day"
 
 
 class OutOfOrderError(RefusedLineError):
@@ -113,11 +113,11 @@ class OutOfOrderError(RefusedLineError):
     >>> try:
     ...     raise OutOfOrderError("MJD 58853.11 is earlier than the preceding")
     ... except MasterClockError as exc:
-    ...     f"{OutOfOrderError.kind}: {exc}"
+    ...     f"{OutOfOrderError.refusal_kind}: {exc}"
     'out-of-order: MJD 58853.11 is earlier than the preceding'
     """
 
-    kind: ClassVar[str] = "out-of-order"
+    refusal_kind: ClassVar[str] = "out-of-order"
 
 
 class DuplicatePairError(RefusedLineError):
@@ -128,11 +128,11 @@ class DuplicatePairError(RefusedLineError):
     >>> try:
     ...     raise DuplicatePairError("clka-clkb was already measured")
     ... except MasterClockError as exc:
-    ...     f"{DuplicatePairError.kind}: {exc}"
+    ...     f"{DuplicatePairError.refusal_kind}: {exc}"
     'duplicate: clka-clkb was already measured'
     """
 
-    kind: ClassVar[str] = "duplicate"
+    refusal_kind: ClassVar[str] = "duplicate"
 
 
 class LateLineError(RefusedLineError):
@@ -147,8 +147,8 @@ class LateLineError(RefusedLineError):
     >>> try:
     ...     raise LateLineError("measured 3 s before the next epoch")
     ... except MasterClockError as exc:
-    ...     f"{LateLineError.kind}: {exc}"
+    ...     f"{LateLineError.refusal_kind}: {exc}"
     'late: measured 3 s before the next epoch'
     """
 
-    kind: ClassVar[str] = "late"
+    refusal_kind: ClassVar[str] = "late"

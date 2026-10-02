@@ -159,12 +159,12 @@ part way and rolls every file back to before that epoch.
 """
 
 
-def _start_when_not_given(value: object) -> object:
+def _start_when_not_given(merged_start_mjd: object) -> object:
     """Give :data:`~masterclock.das_processor.cli.START_FROM_MJD` for no value.
 
     Parameters
     ----------
-    value : object
+    merged_start_mjd : object
         The merged ``start_from_mjd``: ``None`` when neither source gave it,
         since the setting does not accept the literal ``None``.
 
@@ -172,9 +172,9 @@ def _start_when_not_given(value: object) -> object:
     -------
     object
         :data:`~masterclock.das_processor.cli.START_FROM_MJD` for ``None``,
-        otherwise ``value`` unchanged.
+        otherwise ``merged_start_mjd`` unchanged.
     """
-    return START_FROM_MJD if value is None else value
+    return START_FROM_MJD if merged_start_mjd is None else merged_start_mjd
 
 
 type DayMjd = Annotated[DataMjd, as_on_command_line(data_mjd)]
@@ -257,48 +257,52 @@ class AppConfig(BaseModel):
     logging: LoggingConfig
 
 
-def _check_input_directory(path: Path, setting: str) -> None:
+def _check_input_directory(input_directory: Path, setting_place: str) -> None:
     """Refuse an input directory a run could not read.
 
     Parameters
     ----------
-    path : Path
+    input_directory : Path
         The configured directory.
-    setting : str
+    setting_place : str
         The setting that names it, as ``[SECTION] entry``, for the message.
 
     Raises
     ------
     ConfigError
-        If ``path`` is not a directory, or cannot be listed.
+        If ``input_directory`` is not a directory, or cannot be listed.
 
     Notes
     -----
     Listed rather than judged by its permission bits, so whatever would
     stop the run from listing it, stops it here.
     """
-    if not path.is_dir():
-        raise ConfigError(f"{setting}: {path} is not a directory to read from")
+    if not input_directory.is_dir():
+        raise ConfigError(
+            f"{setting_place}: {input_directory} is not a directory to read from"
+        )
     try:
-        next(path.iterdir(), None)
+        next(input_directory.iterdir(), None)
     except OSError as exc:
-        raise ConfigError(f"{setting}: {path} cannot be listed: {exc}") from exc
+        raise ConfigError(
+            f"{setting_place}: {input_directory} cannot be listed: {exc}"
+        ) from exc
 
 
-def _check_input_file(path: Path, setting: str) -> None:
+def _check_input_file(input_file: Path, setting_place: str) -> None:
     """Refuse an input file a run could not read.
 
     Parameters
     ----------
-    path : Path
+    input_file : Path
         The configured file.
-    setting : str
+    setting_place : str
         The setting that names it, as ``[SECTION] entry``, for the message.
 
     Raises
     ------
     ConfigError
-        If ``path`` is not a regular file, or a link to one, or cannot be
+        If ``input_file`` is not a regular file, or a link to one, or cannot be
         opened for reading.
 
     Notes
@@ -306,27 +310,29 @@ def _check_input_file(path: Path, setting: str) -> None:
     Opened rather than judged by its permission bits, so whatever would
     stop the run from reading it, stops it here.
     """
-    if not path.is_file():
-        raise ConfigError(f"{setting}: {path} is not a file to read from")
+    if not input_file.is_file():
+        raise ConfigError(f"{setting_place}: {input_file} is not a file to read from")
     try:
-        with path.open("rb"):
+        with input_file.open("rb"):
             pass
     except OSError as exc:
-        raise ConfigError(f"{setting}: {path} cannot be read: {exc}") from exc
+        raise ConfigError(
+            f"{setting_place}: {input_file} cannot be read: {exc}"
+        ) from exc
 
 
-def _check_processed_directory(path: Path) -> None:
+def _check_processed_directory(processed_path: Path) -> None:
     """Refuse a processed directory a run could not write into.
 
     Parameters
     ----------
-    path : Path
+    processed_path : Path
         The configured ``processed_path``.
 
     Raises
     ------
     ConfigError
-        If something other than a directory is at ``path``, or the directory
+        If something other than a directory is at ``processed_path``, or the directory
         there does not let this process make and open files in it.
 
     Notes
@@ -334,16 +340,16 @@ def _check_processed_directory(path: Path) -> None:
     A ``processed_path`` that is not there is not refused: a first run makes
     its own directory.
     """
-    if not path.exists():
+    if not processed_path.exists():
         return
-    if not path.is_dir():
+    if not processed_path.is_dir():
         raise ConfigError(
-            f"[PROCESSED] processed_path: {path} is not a directory to write "
+            f"[PROCESSED] processed_path: {processed_path} is not a directory to write "
             "processed files into"
         )
-    if not os.access(path, os.W_OK | os.X_OK):
+    if not os.access(processed_path, os.W_OK | os.X_OK):
         raise ConfigError(
-            f"[PROCESSED] processed_path: {path} is a directory this process "
+            f"[PROCESSED] processed_path: {processed_path} is a directory this process "
             "cannot write into"
         )
 
@@ -380,12 +386,12 @@ def check_paths(config: AppConfig) -> None:
     _check_processed_directory(config.processed.processed_path)
 
 
-def build_logging_config(options: CliOptions) -> LoggingConfig:
+def build_logging_config(cli_options: CliOptions) -> LoggingConfig:
     """Merge and validate the logging settings alone, so logging can start first.
 
     Parameters
     ----------
-    options : CliOptions
+    cli_options : CliOptions
         The parsed command-line options.
 
     Returns
@@ -401,16 +407,18 @@ def build_logging_config(options: CliOptions) -> LoggingConfig:
     MissingSettingsError
         If a required logging setting is given by neither source.
     """
-    values = merge(SETTINGS, options, options.config_file, groups={"logging"})
+    merged_values = merge(
+        SETTINGS, cli_options, cli_options.config_file, config_groups={"logging"}
+    )
     try:
-        return LoggingConfig.model_validate(values["logging"])
+        return LoggingConfig.model_validate(merged_values["logging"])
     except ValidationError as exc:
         raise ConfigError(
             f"invalid configuration values: logging: {describe_error(exc)}"
         ) from exc
 
 
-def build_config(options: CliOptions) -> AppConfig:
+def build_config(cli_options: CliOptions) -> AppConfig:
     """Merge and validate the effective configuration.
 
     Reads the INI file named by ``options.config_file``, if any, overlays the
@@ -419,7 +427,7 @@ def build_config(options: CliOptions) -> AppConfig:
 
     Parameters
     ----------
-    options : CliOptions
+    cli_options : CliOptions
         The parsed command-line options.
 
     Returns
@@ -437,9 +445,9 @@ def build_config(options: CliOptions) -> AppConfig:
         :class:`~masterclock.app.exceptions.ConfigError` itself, so an
         ``except ConfigError`` still catches it.
     """
-    values = merge(SETTINGS, options, options.config_file)
+    merged_values = merge(SETTINGS, cli_options, cli_options.config_file)
     try:
-        return AppConfig.model_validate(values)
+        return AppConfig.model_validate(merged_values)
     except ValidationError as exc:
         raise ConfigError(
             f"invalid configuration values: {describe_error(exc)}"

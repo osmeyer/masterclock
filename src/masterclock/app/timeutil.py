@@ -65,7 +65,7 @@ _CACHE_SIZE: Final[int] = 1024
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def ensure_utc(value: DatetimeLike) -> datetime:
+def ensure_utc(given_datetime: DatetimeLike) -> datetime:
     """Return the given datetime as a timezone-aware UTC datetime.
 
     Naive datetimes are assumed to already be in UTC and are tagged as such;
@@ -73,7 +73,7 @@ def ensure_utc(value: DatetimeLike) -> datetime:
 
     Parameters
     ----------
-    value : datetime or str
+    given_datetime : datetime or str
         The datetime, or an ISO 8601 string parseable by
         :meth:`datetime.datetime.fromisoformat`.
 
@@ -85,7 +85,7 @@ def ensure_utc(value: DatetimeLike) -> datetime:
     Raises
     ------
     ValueError
-        If ``value`` is a string that is not valid ISO 8601.
+        If ``given_datetime`` is a string that is not valid ISO 8601.
 
     Examples
     --------
@@ -95,19 +95,23 @@ def ensure_utc(value: DatetimeLike) -> datetime:
     >>> ensure_utc("2026-07-12 05:00:00+02:00")
     datetime.datetime(2026, 7, 12, 3, 0, tzinfo=datetime.timezone.utc)
     """
-    moment = datetime.fromisoformat(value) if isinstance(value, str) else value
-    if moment.tzinfo is None:
-        return moment.replace(tzinfo=UTC)
-    return moment.astimezone(UTC)
+    parsed_datetime = (
+        datetime.fromisoformat(given_datetime)
+        if isinstance(given_datetime, str)
+        else given_datetime
+    )
+    if parsed_datetime.tzinfo is None:
+        return parsed_datetime.replace(tzinfo=UTC)
+    return parsed_datetime.astimezone(UTC)
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def unix_to_mjd(value: NumberLike) -> float:
+def unix_to_mjd(unix_seconds: NumberLike) -> float:
     """Convert a Unix timestamp to a Modified Julian Day.
 
     Parameters
     ----------
-    value : float or str
+    unix_seconds : float or str
         Seconds since the Unix epoch.
 
     Returns
@@ -118,7 +122,7 @@ def unix_to_mjd(value: NumberLike) -> float:
     Raises
     ------
     ValueError
-        If ``value`` is a string that cannot be parsed as a float.
+        If ``unix_seconds`` is a string that cannot be parsed as a float.
 
     Examples
     --------
@@ -127,16 +131,16 @@ def unix_to_mjd(value: NumberLike) -> float:
     >>> unix_to_mjd("86400")
     40588.0
     """
-    return float(value) / SECONDS_PER_DAY + MJD_AT_UNIX_EPOCH
+    return float(unix_seconds) / SECONDS_PER_DAY + MJD_AT_UNIX_EPOCH
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def mjd_to_unix(value: NumberLike) -> float:
+def mjd_to_unix(mjd: NumberLike) -> float:
     """Convert a Modified Julian Day to a Unix timestamp.
 
     Parameters
     ----------
-    value : float or str
+    mjd : float or str
         The Modified Julian Day.
 
     Returns
@@ -147,18 +151,18 @@ def mjd_to_unix(value: NumberLike) -> float:
     Raises
     ------
     ValueError
-        If ``value`` is a string that cannot be parsed as a float.
+        If ``mjd`` is a string that cannot be parsed as a float.
     """
-    return (float(value) - MJD_AT_UNIX_EPOCH) * SECONDS_PER_DAY
+    return (float(mjd) - MJD_AT_UNIX_EPOCH) * SECONDS_PER_DAY
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def unix_to_jd(value: NumberLike) -> float:
+def unix_to_jd(unix_seconds: NumberLike) -> float:
     """Convert a Unix timestamp to a Julian Day.
 
     Parameters
     ----------
-    value : float or str
+    unix_seconds : float or str
         Seconds since the Unix epoch.
 
     Returns
@@ -169,18 +173,18 @@ def unix_to_jd(value: NumberLike) -> float:
     Raises
     ------
     ValueError
-        If ``value`` is a string that cannot be parsed as a float.
+        If ``unix_seconds`` is a string that cannot be parsed as a float.
     """
-    return float(value) / SECONDS_PER_DAY + JD_AT_UNIX_EPOCH
+    return float(unix_seconds) / SECONDS_PER_DAY + JD_AT_UNIX_EPOCH
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def jd_to_unix(value: NumberLike) -> float:
+def jd_to_unix(jd: NumberLike) -> float:
     """Convert a Julian Day to a Unix timestamp.
 
     Parameters
     ----------
-    value : float or str
+    jd : float or str
         The Julian Day.
 
     Returns
@@ -191,18 +195,18 @@ def jd_to_unix(value: NumberLike) -> float:
     Raises
     ------
     ValueError
-        If ``value`` is a string that cannot be parsed as a float.
+        If ``jd`` is a string that cannot be parsed as a float.
     """
-    return (float(value) - JD_AT_UNIX_EPOCH) * SECONDS_PER_DAY
+    return (float(jd) - JD_AT_UNIX_EPOCH) * SECONDS_PER_DAY
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def mjd_to_jd(value: NumberLike) -> float:
+def mjd_to_jd(mjd: NumberLike) -> float:
     """Convert a Modified Julian Day to a Julian Day.
 
     Parameters
     ----------
-    value : float or str
+    mjd : float or str
         The Modified Julian Day.
 
     Returns
@@ -213,23 +217,23 @@ def mjd_to_jd(value: NumberLike) -> float:
     Raises
     ------
     ValueError
-        If ``value`` is a string that cannot be parsed as a float.
+        If ``mjd`` is a string that cannot be parsed as a float.
 
     Examples
     --------
     >>> mjd_to_jd(51544.5)
     2451545.0
     """
-    return float(value) + JD_MINUS_MJD
+    return float(mjd) + JD_MINUS_MJD
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def jd_to_mjd(value: NumberLike) -> float:
+def jd_to_mjd(jd: NumberLike) -> float:
     """Convert a Julian Day to a Modified Julian Day.
 
     Parameters
     ----------
-    value : float or str
+    jd : float or str
         The Julian Day.
 
     Returns
@@ -240,18 +244,18 @@ def jd_to_mjd(value: NumberLike) -> float:
     Raises
     ------
     ValueError
-        If ``value`` is a string that cannot be parsed as a float.
+        If ``jd`` is a string that cannot be parsed as a float.
     """
-    return float(value) - JD_MINUS_MJD
+    return float(jd) - JD_MINUS_MJD
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def datetime_to_unix(value: DatetimeLike) -> float:
+def datetime_to_unix(given_datetime: DatetimeLike) -> float:
     """Convert a datetime to a Unix timestamp.
 
     Parameters
     ----------
-    value : datetime or str
+    given_datetime : datetime or str
         The datetime (naive datetimes are assumed UTC), or an ISO 8601 string.
 
     Returns
@@ -262,18 +266,18 @@ def datetime_to_unix(value: DatetimeLike) -> float:
     Raises
     ------
     ValueError
-        If ``value`` is a string that is not valid ISO 8601.
+        If ``given_datetime`` is a string that is not valid ISO 8601.
     """
-    return ensure_utc(value).timestamp()
+    return ensure_utc(given_datetime).timestamp()
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def datetime_to_mjd(value: DatetimeLike) -> float:
+def datetime_to_mjd(given_datetime: DatetimeLike) -> float:
     """Convert a datetime to a Modified Julian Day.
 
     Parameters
     ----------
-    value : datetime or str
+    given_datetime : datetime or str
         The datetime (naive datetimes are assumed UTC), or an ISO 8601 string.
 
     Returns
@@ -284,18 +288,18 @@ def datetime_to_mjd(value: DatetimeLike) -> float:
     Raises
     ------
     ValueError
-        If ``value`` is a string that is not valid ISO 8601.
+        If ``given_datetime`` is a string that is not valid ISO 8601.
     """
-    return unix_to_mjd(datetime_to_unix(value))
+    return unix_to_mjd(datetime_to_unix(given_datetime))
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def datetime_to_jd(value: DatetimeLike) -> float:
+def datetime_to_jd(given_datetime: DatetimeLike) -> float:
     """Convert a datetime to a Julian Day.
 
     Parameters
     ----------
-    value : datetime or str
+    given_datetime : datetime or str
         The datetime (naive datetimes are assumed UTC), or an ISO 8601 string.
 
     Returns
@@ -306,7 +310,7 @@ def datetime_to_jd(value: DatetimeLike) -> float:
     Raises
     ------
     ValueError
-        If ``value`` is a string that is not valid ISO 8601.
+        If ``given_datetime`` is a string that is not valid ISO 8601.
 
     Examples
     --------
@@ -314,16 +318,16 @@ def datetime_to_jd(value: DatetimeLike) -> float:
     >>> datetime_to_jd(datetime(2000, 1, 1, 12, tzinfo=UTC))
     2451545.0
     """
-    return unix_to_jd(datetime_to_unix(value))
+    return unix_to_jd(datetime_to_unix(given_datetime))
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def unix_to_datetime(value: NumberLike) -> datetime:
+def unix_to_datetime(unix_seconds: NumberLike) -> datetime:
     """Convert a Unix timestamp to a UTC datetime.
 
     Parameters
     ----------
-    value : float or str
+    unix_seconds : float or str
         Seconds since the Unix epoch.
 
     Returns
@@ -334,22 +338,22 @@ def unix_to_datetime(value: NumberLike) -> datetime:
     Raises
     ------
     ValueError
-        If ``value`` is a string that cannot be parsed as a float, is NaN,
+        If ``unix_seconds`` is a string that cannot be parsed as a float, is NaN,
         or names an instant outside years 1 to 9999.
     OverflowError
-        If ``value`` is too large in size for the system's time functions,
+        If ``unix_seconds`` is too large in size for the system's time functions,
         infinity included.
     """
-    return datetime.fromtimestamp(float(value), tz=UTC)
+    return datetime.fromtimestamp(float(unix_seconds), tz=UTC)
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def mjd_to_datetime(value: NumberLike) -> datetime:
+def mjd_to_datetime(mjd: NumberLike) -> datetime:
     """Convert a Modified Julian Day to a UTC datetime.
 
     Parameters
     ----------
-    value : float or str
+    mjd : float or str
         The Modified Julian Day.
 
     Returns
@@ -360,22 +364,22 @@ def mjd_to_datetime(value: NumberLike) -> datetime:
     Raises
     ------
     ValueError
-        If ``value`` is a string that cannot be parsed as a float, is NaN,
+        If ``mjd`` is a string that cannot be parsed as a float, is NaN,
         or names an instant outside years 1 to 9999.
     OverflowError
-        If ``value`` is too large in size for the system's time functions,
+        If ``mjd`` is too large in size for the system's time functions,
         infinity included.
     """
-    return unix_to_datetime(mjd_to_unix(value))
+    return unix_to_datetime(mjd_to_unix(mjd))
 
 
 @lru_cache(maxsize=_CACHE_SIZE)
-def jd_to_datetime(value: NumberLike) -> datetime:
+def jd_to_datetime(jd: NumberLike) -> datetime:
     """Convert a Julian Day to a UTC datetime.
 
     Parameters
     ----------
-    value : float or str
+    jd : float or str
         The Julian Day.
 
     Returns
@@ -386,10 +390,10 @@ def jd_to_datetime(value: NumberLike) -> datetime:
     Raises
     ------
     ValueError
-        If ``value`` is a string that cannot be parsed as a float, is NaN,
+        If ``jd`` is a string that cannot be parsed as a float, is NaN,
         or names an instant outside years 1 to 9999.
     OverflowError
-        If ``value`` is too large in size for the system's time functions,
+        If ``jd`` is too large in size for the system's time functions,
         infinity included.
     """
-    return unix_to_datetime(jd_to_unix(value))
+    return unix_to_datetime(jd_to_unix(jd))

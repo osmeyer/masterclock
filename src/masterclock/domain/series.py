@@ -40,29 +40,29 @@ from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
 
 
-def _refuse_bool(value: object) -> object:
+def _refuse_bool(given_states: object) -> object:
     """Refuse a bool where a number of states is meant.
 
     Parameters
     ----------
-    value : object
+    given_states : object
         The value given for the number of states.
 
     Returns
     -------
     object
-        ``value``, unchanged.
+        ``given_states``, unchanged.
 
     Raises
     ------
     ValueError
-        If ``value`` is a bool, which pydantic would otherwise take as the
+        If ``given_states`` is a bool, which pydantic would otherwise take as the
         literal it equals: ``True`` as 1.
     """
-    if isinstance(value, bool):
-        message = f"the number of states is 1, 2 or 3, not a bool: {value}"
+    if isinstance(given_states, bool):
+        message = f"the number of states is 1, 2 or 3, not a bool: {given_states}"
         raise ValueError(message)
-    return value
+    return given_states
 
 
 type FilterStates = Annotated[Literal[1, 2, 3], BeforeValidator(_refuse_bool)]
@@ -97,23 +97,23 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 
-def _finite(name: str, value: float | None) -> None:
+def _finite(field_name: str, number: float | None) -> None:
     """Refuse a float that is not finite.
 
     Parameters
     ----------
-    name : str
+    field_name : str
         The field the value is for, named in the error.
-    value : float or None
+    number : float or None
         The value; ``None`` passes.
 
     Raises
     ------
     FilterError
-        If ``value`` is nan or infinite.
+        If ``number`` is nan or infinite.
     """
-    if value is not None and not math.isfinite(value):
-        message = f"{name} {value} is not finite"
+    if number is not None and not math.isfinite(number):
+        message = f"{field_name} {number} is not finite"
         _log.error(message)
         raise FilterError(message)
 
@@ -152,12 +152,12 @@ class State(BaseModel):
 
     @field_validator("y", "d")
     @classmethod
-    def _check_finite(cls, value: float, info: ValidationInfo) -> float:
+    def _check_finite(cls, rate_or_drift: float, info: ValidationInfo) -> float:
         """Refuse a rate or drift that is not finite.
 
         Parameters
         ----------
-        value : float
+        rate_or_drift : float
             The rate or drift.
         info : ValidationInfo
             Pydantic's validation information, naming the field.
@@ -165,10 +165,10 @@ class State(BaseModel):
         Returns
         -------
         float
-            ``value``, unchanged.
+            ``rate_or_drift``, unchanged.
         """
-        _finite(str(info.field_name), value)
-        return value
+        _finite(str(info.field_name), rate_or_drift)
+        return rate_or_drift
 
 
 class SeriesParams(BaseModel):
@@ -176,7 +176,7 @@ class SeriesParams(BaseModel):
 
     Parameters
     ----------
-    model : {1, 2, 3}
+    filter_states : {1, 2, 3}
         How many states the estimator has, fixed for the life of the series.
     M : float or None
         Estimator time constant, epochs, at least 1; ``None`` exactly for a
@@ -202,7 +202,7 @@ class SeriesParams(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    model: FilterStates
+    filter_states: FilterStates
     M: Annotated[float, Field(ge=1, allow_inf_nan=False)] | None
     M_sigma: Annotated[float, Field(ge=1, allow_inf_nan=False)]
     sigma0: Annotated[float, Field(gt=0, allow_inf_nan=False)]
@@ -225,8 +225,8 @@ class SeriesParams(BaseModel):
             If ``M`` is given for a 1-state series or missing for another,
             or ``n_break`` is above ``gmax``.
         """
-        if (self.M is None) != (self.model == 1):
-            message = "a time constant M is given exactly when model is 2 or 3"
+        if (self.M is None) != (self.filter_states == 1):
+            message = "a time constant M is given exactly when filter_states is 2 or 3"
             raise ValueError(message)
         if self.n_break > self.gmax:
             message = f"n_break {self.n_break} is above gmax {self.gmax}"
@@ -319,12 +319,14 @@ class Row(BaseModel):
         "scale_time_constant",
     )
     @classmethod
-    def _check_finite(cls, value: float | None, info: ValidationInfo) -> float | None:
+    def _check_finite(
+        cls, field_value: float | None, info: ValidationInfo
+    ) -> float | None:
         """Refuse a float that is not finite.
 
         Parameters
         ----------
-        value : float or None
+        field_value : float or None
             The value.
         info : ValidationInfo
             Pydantic's validation information, naming the field.
@@ -332,25 +334,25 @@ class Row(BaseModel):
         Returns
         -------
         float or None
-            ``value``, unchanged.
+            ``field_value``, unchanged.
         """
-        _finite(str(info.field_name), value)
-        return value
+        _finite(str(info.field_name), field_value)
+        return field_value
 
     @field_validator("rejects")
     @classmethod
-    def _check_rejects(cls, value: tuple[Reject, ...]) -> tuple[Reject, ...]:
+    def _check_rejects(cls, reject_buffer: tuple[Reject, ...]) -> tuple[Reject, ...]:
         """Refuse a reject buffer too long, out of order or not finite.
 
         Parameters
         ----------
-        value : tuple of (AwareDatetime, float)
+        reject_buffer : tuple of (AwareDatetime, float)
             The buffer.
 
         Returns
         -------
         tuple of (AwareDatetime, float)
-            ``value``, unchanged.
+            ``reject_buffer``, unchanged.
 
         Raises
         ------
@@ -358,30 +360,35 @@ class Row(BaseModel):
             If it holds more than three entries, or its epochs do not rise
             from first to last.
         """
-        for _, entry in value:
-            _finite("rejects", entry)
-        if len(value) > MAX_REJECTS:
-            message = f"the reject buffer holds at most three entries: {len(value)}"
+        for _, reject_value in reject_buffer:
+            _finite("rejects", reject_value)
+        if len(reject_buffer) > MAX_REJECTS:
+            message = (
+                f"the reject buffer holds at most three entries: {len(reject_buffer)}"
+            )
             raise ValueError(message)
-        if any(later <= earlier for (earlier, _), (later, _) in pairwise(value)):
+        if any(
+            later_epoch <= earlier_epoch
+            for (earlier_epoch, _), (later_epoch, _) in pairwise(reject_buffer)
+        ):
             message = "the reject buffer is held oldest first"
             raise ValueError(message)
-        return value
+        return reject_buffer
 
     @field_validator("flags")
     @classmethod
-    def _check_flags(cls, value: str) -> str:
+    def _check_flags(cls, row_flags: str) -> str:
         """Refuse flags that are unknown, repeated, out of order or no outcome.
 
         Parameters
         ----------
-        value : str
+        row_flags : str
             The flags.
 
         Returns
         -------
         str
-            ``value``, unchanged.
+            ``row_flags``, unchanged.
 
         Raises
         ------
@@ -390,19 +397,23 @@ class Row(BaseModel):
             out of order, the flags hold other than exactly one of A, R, X
             and P, or D stands with A or U.
         """
-        ordered = "".join(flag for flag in FLAG_ORDER if flag in value)
-        if value != ordered:
+        ordered_flags = "".join(letter for letter in FLAG_ORDER if letter in row_flags)
+        if row_flags != ordered_flags:
             message = (
-                f"flags {value!r} are not distinct letters of {FLAG_ORDER} in order"
+                f"flags {row_flags!r} are not distinct letters of {FLAG_ORDER} in order"
             )
             raise ValueError(message)
-        if len(OUTCOMES & set(value)) != 1:
-            message = f"flags {value!r} hold other than exactly one of A, R, X and P"
+        if len(OUTCOMES & set(row_flags)) != 1:
+            message = (
+                f"flags {row_flags!r} hold other than exactly one of A, R, X and P"
+            )
             raise ValueError(message)
-        if "D" in value and ("A" in value or "U" in value):
-            message = f"flags {value!r}: a dormant row is never accepted or unsettled"
+        if "D" in row_flags and ("A" in row_flags or "U" in row_flags):
+            message = (
+                f"flags {row_flags!r}: a dormant row is never accepted or unsettled"
+            )
             raise ValueError(message)
-        return value
+        return row_flags
 
     @model_validator(mode="after")
     def _check_state(self) -> Self:
@@ -422,12 +433,16 @@ class Row(BaseModel):
             a 1-state series or missing for another, or a 1-state row is
             unsettled.
         """
-        dormant = "D" in self.flags
-        empty = [name for name in self._STATE if getattr(self, name) is None]
-        if empty != (list(self._STATE) if dormant else []):
+        is_dormant = "D" in self.flags
+        empty_fields = [
+            field_name
+            for field_name in self._STATE
+            if getattr(self, field_name) is None
+        ]
+        if empty_fields != (list(self._STATE) if is_dormant else []):
             message = (
                 "a dormant row has no x_fs, y, d or innovation_scale and every other"
-                f" row has all four; flags {self.flags!r}, empty {empty}"
+                f" row has all four; flags {self.flags!r}, empty {empty_fields}"
             )
             raise ValueError(message)
         if "P" in self.flags and self.innovation is not None:
@@ -478,12 +493,12 @@ class Row(BaseModel):
             raise ValueError(message)
 
 
-def build_row(values: Mapping[str, object]) -> Row:
+def build_row(field_values: Mapping[str, object]) -> Row:
     """Build a row from the values of its fields, checked.
 
     Parameters
     ----------
-    values : Mapping of str to object
+    field_values : Mapping of str to object
         Every field of the row, by name, with its value.
 
     Returns
@@ -511,32 +526,32 @@ def build_row(values: Mapping[str, object]) -> Row:
     'PD'
     """
     try:
-        return Row.model_validate(dict(values))
+        return Row.model_validate(dict(field_values))
     except ValidationError as exc:
         message = f"invalid row: {describe_error(exc)}"
         _log.error(message)
         raise FilterError(message) from exc
 
 
-def replace(row: Row, **changes: object) -> Row:
+def replace(row: Row, **changed_fields: object) -> Row:
     """Build a row from another with some fields changed, checked again.
 
     Parameters
     ----------
     row : Row
         The row to start from; it is not changed.
-    **changes : object
+    **changed_fields : object
         The fields to change, by name, with their new values.
 
     Returns
     -------
     Row
-        A new row with ``changes`` made and every other field as in ``row``.
+        A new row with ``changed_fields`` made and every other field as in ``row``.
 
     Raises
     ------
     FilterError
-        If the changed row breaks any rule of :class:`Row`, or ``changes``
+        If the changed row breaks any rule of :class:`Row`, or ``changed_fields``
         names a field a row does not have.
 
     Notes
@@ -544,4 +559,4 @@ def replace(row: Row, **changes: object) -> Row:
     Pydantic's ``model_copy(update=...)`` would build the new row without
     checking it, so a change that broke a rule would go unnoticed.
     """
-    return build_row({**dict(row), **changes})
+    return build_row({**dict(row), **changed_fields})

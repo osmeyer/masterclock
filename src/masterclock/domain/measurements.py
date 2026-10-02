@@ -20,7 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.domain.double_difference import TripleValue
-from masterclock.domain.filter import Measured
+from masterclock.domain.filter import FilterInput
 from masterclock.domain.phase import (
     EPOCH_SECONDS,
     PHASE_MAX,
@@ -141,15 +141,15 @@ class PairMeasurement(BaseModel):
             }
         )
 
-    def measured(self) -> Measured:
+    def filter_input(self) -> FilterInput:
         """Give the filter step this measurement's plain values.
 
         Returns
         -------
-        Measured
+        FilterInput
             z, the rms and the slip mark.
         """
-        return Measured(z=self.z, rms=self.rms, slip=self.slip)
+        return FilterInput(z=self.z, rms=self.rms, slip=self.slip)
 
 
 class TripleMeasurement(BaseModel):
@@ -163,7 +163,7 @@ class TripleMeasurement(BaseModel):
         Its measurement sigma, ps, zero or more, as a pair's rms may be.
     components_used : {'111', '110', '101'}
         Which of (s, c), (r, s) and (s, r) gave it, in that order.
-    cold : bool
+    pair_cold_started : bool
         Whether one of its pairs cold-started at the epoch.
 
     Raises
@@ -178,15 +178,15 @@ class TripleMeasurement(BaseModel):
     z: int
     double_difference_sigma: Annotated[float, Field(ge=0, allow_inf_nan=False)]
     components_used: Literal["111", "110", "101"]
-    cold: bool
+    pair_cold_started: bool
 
     @classmethod
-    def from_value(cls, value: TripleValue) -> TripleMeasurement:
+    def from_triple_value(cls, triple_value: TripleValue) -> TripleMeasurement:
         """Build a triple's measurement from its double difference.
 
         Parameters
         ----------
-        value : TripleValue
+        triple_value : TripleValue
             The double difference the domain gave.
 
         Returns
@@ -195,21 +195,25 @@ class TripleMeasurement(BaseModel):
             The same values, under the file's names.
         """
         return cls(
-            z=value.z,
-            double_difference_sigma=value.sigma,
-            components_used=value.components_used,
-            cold=value.cold,
+            z=triple_value.z,
+            double_difference_sigma=triple_value.sigma,
+            components_used=triple_value.components_used,
+            pair_cold_started=triple_value.pair_cold_started,
         )
 
-    def measured(self) -> Measured:
+    def filter_input(self) -> FilterInput:
         """Give the filter step this measurement's plain values.
 
         Returns
         -------
-        Measured
+        FilterInput
             z, sigma_dd and the cold mark.
         """
-        return Measured(z=self.z, sigma_dd=self.double_difference_sigma, cold=self.cold)
+        return FilterInput(
+            z=self.z,
+            sigma_dd=self.double_difference_sigma,
+            pair_cold_started=self.pair_cold_started,
+        )
 
 
 def measure_pair(
@@ -265,8 +269,8 @@ def measure_pair(
     ... ).z
     1234577
     """
-    moment = mjd_to_datetime(measurement_mjd)
-    delta = seconds(moment, epoch_start(moment))
+    measured_instant = mjd_to_datetime(measurement_mjd)
+    delta = seconds(measured_instant, epoch_start(measured_instant))
     decycled = decycle(measured_phase, delta, w, prediction, anchor)
     return PairMeasurement(
         measurement_mjd=measurement_mjd,

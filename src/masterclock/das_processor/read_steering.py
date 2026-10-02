@@ -50,7 +50,7 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 
 
 def read_steering(
-    steering_path: Path, mc: str, after: datetime, through: datetime
+    steering_path: Path, mc: str, window_start: datetime, window_end: datetime
 ) -> tuple[SteerEvent, ...]:
     """Give a reference's steering events in (after, through] (design 5.6).
 
@@ -60,16 +60,16 @@ def read_steering(
         The steering directory.
     mc : str
         The reference.
-    after : datetime
+    window_start : datetime
         Events at this instant or before are left out; must carry a
         timezone.
-    through : datetime
+    window_end : datetime
         Events after this instant are left out; must carry a timezone.
 
     Returns
     -------
     tuple of SteerEvent
-        The events applied after ``after`` and at or before ``through``,
+        The events applied after ``window_start`` and at or before ``window_end``,
         in time order; none when the reference has no steering file.
 
     Raises
@@ -81,23 +81,23 @@ def read_steering(
     """
     if re.fullmatch(REFERENCE_PATTERN, mc) is None:
         _fail(f"steering is read for references only, not {mc}")
-    path = steering_path / STEERING_FILE_TEMPLATE.format(mc=mc)
-    text = _read(path)
-    if text is None:
+    steering_file = steering_path / STEERING_FILE_TEMPLATE.format(mc=mc)
+    steering_text = _read_steering_text(steering_file)
+    if steering_text is None:
         return ()
     return tuple(
-        event
-        for event in _events(path, text)
-        if after < event.applied_datetime <= through
+        steer_event
+        for steer_event in _steer_events(steering_file, steering_text)
+        if window_start < steer_event.applied_datetime <= window_end
     )
 
 
-def _read(path: Path) -> str | None:
+def _read_steering_text(steering_file: Path) -> str | None:
     """Read a steering file's text.
 
     Parameters
     ----------
-    path : Path
+    steering_file : Path
         The file.
 
     Returns
@@ -111,24 +111,24 @@ def _read(path: Path) -> str | None:
         If the file is there but cannot be read as ASCII.
     """
     try:
-        return path.read_text(encoding="ascii")
+        return steering_file.read_text(encoding="ascii")
     except FileNotFoundError:
         return None
     except (
         OSError,
         UnicodeDecodeError,
     ) as exc:
-        _fail(f"cannot read steering file {path}: {exc}", exc)
+        _fail(f"cannot read steering file {steering_file}: {exc}", exc)
 
 
-def _events(path: Path, text: str) -> list[SteerEvent]:
+def _steer_events(steering_file: Path, steering_text: str) -> list[SteerEvent]:
     """Read every event of a steering file, checking each line.
 
     Parameters
     ----------
-    path : Path
+    steering_file : Path
         The file, for the message.
-    text : str
+    steering_text : str
         Its text.
 
     Returns
@@ -142,24 +142,29 @@ def _events(path: Path, text: str) -> list[SteerEvent]:
         If a line has no newline, does not parse, or is earlier than the
         line before it.
     """
-    events: list[SteerEvent] = []
-    for number, line in enumerate(text.splitlines(keepends=True), start=1):
-        where = f"steering file {path}: line {number}"
+    steer_events: list[SteerEvent] = []
+    for line_number, line in enumerate(
+        steering_text.splitlines(keepends=True), start=1
+    ):
+        line_place = f"steering file {steering_file}: line {line_number}"
         if not line.endswith("\n"):
-            _fail(f"{where} has no newline")
-        event = _parse(where, line[:-1])
-        if events and event.applied_datetime < events[-1].applied_datetime:
-            _fail(f"{where} is earlier than the line before")
-        events.append(event)
-    return events
+            _fail(f"{line_place} has no newline")
+        steer_event = _parse_steering_line(line_place, line[:-1])
+        if (
+            steer_events
+            and steer_event.applied_datetime < steer_events[-1].applied_datetime
+        ):
+            _fail(f"{line_place} is earlier than the line before")
+        steer_events.append(steer_event)
+    return steer_events
 
 
-def _parse(where: str, line: str) -> SteerEvent:
+def _parse_steering_line(line_place: str, line: str) -> SteerEvent:
     """Read one line of a steering file.
 
     Parameters
     ----------
-    where : str
+    line_place : str
         The file and line, for the message.
     line : str
         The line, without its newline.
@@ -175,27 +180,27 @@ def _parse(where: str, line: str) -> SteerEvent:
         If the line is not three columns of an MJD on a data day and two
         finite plain decimals.
     """
-    columns = line.split()
-    if len(columns) != _COLUMNS:
-        _fail(f"{where} has {len(columns)} columns, not {_COLUMNS}: {line!r}")
-    mjd_text, dx_text, dy_text = columns
+    line_columns = line.split()
+    if len(line_columns) != _COLUMNS:
+        _fail(f"{line_place} has {len(line_columns)} columns, not {_COLUMNS}: {line!r}")
+    mjd_text, dx_text, dy_text = line_columns
     if _MJD.fullmatch(mjd_text) is None:
-        _fail(f"{where}: {mjd_text!r} is not an MJD on a data day")
+        _fail(f"{line_place}: {mjd_text!r} is not an MJD on a data day")
     mjd = float(mjd_text)
     if not FIRST_DAY <= mjd < LAST_DAY + 1:
-        _fail(f"{where}: {mjd_text!r} is not an MJD on a data day")
-    dx, dy = _change(where, dx_text), _change(where, dy_text)
+        _fail(f"{line_place}: {mjd_text!r} is not an MJD on a data day")
+    dx, dy = _parse_change(line_place, dx_text), _parse_change(line_place, dy_text)
     return SteerEvent(applied_datetime=mjd_to_datetime(mjd), dx=dx, dy=dy)
 
 
-def _change(where: str, text: str) -> float:
+def _parse_change(line_place: str, column_text: str) -> float:
     """Read a phase or rate change.
 
     Parameters
     ----------
-    where : str
+    line_place : str
         The file and line, for the message.
-    text : str
+    column_text : str
         The column.
 
     Returns
@@ -208,10 +213,10 @@ def _change(where: str, text: str) -> float:
     DataFileError
         If the column is not a plain decimal, or its value is not finite.
     """
-    value = float(text) if _CHANGE.fullmatch(text) else math.nan
-    if not math.isfinite(value):
-        _fail(f"{where}: {text!r} is not a finite plain decimal")
-    return value
+    change = float(column_text) if _CHANGE.fullmatch(column_text) else math.nan
+    if not math.isfinite(change):
+        _fail(f"{line_place}: {column_text!r} is not a finite plain decimal")
+    return change
 
 
 def _fail(message: str, cause: Exception | None = None) -> NoReturn:

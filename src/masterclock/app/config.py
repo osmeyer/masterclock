@@ -74,18 +74,18 @@ class Setting:
 
     Parameters
     ----------
-    attribute : str
+    options_field : str
         Name of the field on the program's command-line options, which is
         also the field name in the configuration sub-model.
-    group : str
+    config_group : str
         The field of the program's configuration model the setting lands in,
         which is also the name of the section's sub-model.
-    section : str
+    ini_section : str
         The INI section the setting may be read from.
-    entry : str
+    ini_entry : str
         The INI entry name within that section, in lowercase, since
         :mod:`configparser` lowercases the entry names it reads.
-    flag : str
+    cli_flag : str
         The command-line flag, as a missing-settings message spells it.
     allow_none : bool
         Whether the literal token ``"None"`` is meaningful for this setting
@@ -97,28 +97,28 @@ class Setting:
         an optional one becomes ``None``.
     """
 
-    attribute: str
-    group: str
-    section: str
-    entry: str
-    flag: str
+    options_field: str
+    config_group: str
+    ini_section: str
+    ini_entry: str
+    cli_flag: str
     allow_none: bool
     required: bool = False
 
 
 def as_on_command_line[ValueT](
-    convert: Callable[[str], ValueT],
+    cli_conversion: Callable[[str], ValueT],
 ) -> BeforeValidator:
     """Make a model field read text as a command-line conversion reads it.
 
-    Text is given to ``convert``, and its refusal becomes the field's
+    Text is given to ``cli_conversion``, and its refusal becomes the field's
     validation error with the same reason. Anything that is not text, such
     as a value the command line has already converted, is passed on to the
     field's own validation unchanged.
 
     Parameters
     ----------
-    convert : callable
+    cli_conversion : callable
         One of the command-line conversions in
         :mod:`masterclock.app.cli`, taking the text and raising
         :class:`argparse.ArgumentTypeError` for text it refuses.
@@ -129,39 +129,39 @@ def as_on_command_line[ValueT](
         The validator, to go in the field's ``Annotated`` type.
     """
 
-    def read(value: object) -> object:
-        """Convert text with ``convert``; pass anything else on unchanged."""
-        if not isinstance(value, str):
-            return value
+    def read(field_input: object) -> object:
+        """Convert text with ``cli_conversion``; pass anything else on unchanged."""
+        if not isinstance(field_input, str):
+            return field_input
         try:
-            return convert(value)
+            return cli_conversion(field_input)
         except argparse.ArgumentTypeError as exc:
             raise ValueError(str(exc)) from exc
 
     return BeforeValidator(read)
 
 
-def _absolute(path: Path) -> Path:
+def _absolute(given_path: Path) -> Path:
     """Refuse a path that is not absolute, as the command line does.
 
     Parameters
     ----------
-    path : Path
+    given_path : Path
         The path a field was given.
 
     Returns
     -------
     Path
-        ``path`` unchanged.
+        ``given_path`` unchanged.
 
     Raises
     ------
     ValueError
-        If ``path`` is relative, the empty path included.
+        If ``given_path`` is relative, the empty path included.
     """
-    if not path.is_absolute():
-        raise ValueError(f"path must be absolute: {str(path)!r}")
-    return path
+    if not given_path.is_absolute():
+        raise ValueError(f"path must be absolute: {str(given_path)!r}")
+    return given_path
 
 
 type AbsolutePath = Annotated[Path, AfterValidator(_absolute)]
@@ -213,29 +213,33 @@ def _checked(settings: Sequence[Setting]) -> Sequence[Setting]:
         is not in lowercase, or its section is ``DEFAULT``, since no file
         could then give it.
     """
-    attributes = Counter(setting.attribute for setting in settings)
-    places = Counter((setting.section, setting.entry) for setting in settings)
+    attribute_counts = Counter(setting.options_field for setting in settings)
+    place_counts = Counter(
+        (setting.ini_section, setting.ini_entry) for setting in settings
+    )
     for setting in settings:
-        if attributes[setting.attribute] > 1:
-            reason = f"setting {setting.attribute!r} is described more than once"
-        elif places[setting.section, setting.entry] > 1:
-            reason = (
-                f"entry [{setting.section}] {setting.entry} is read by more than"
-                " one setting"
+        if attribute_counts[setting.options_field] > 1:
+            naming_problem = (
+                f"setting {setting.options_field!r} is described more than once"
             )
-        elif setting.entry != setting.entry.lower():
-            reason = (
-                f"entry [{setting.section}] {setting.entry} is not in lowercase,"
-                " so no file can give it"
+        elif place_counts[setting.ini_section, setting.ini_entry] > 1:
+            naming_problem = (
+                f"entry [{setting.ini_section}] {setting.ini_entry} is read by"
+                " more than one setting"
             )
-        elif setting.section == configparser.DEFAULTSECT:
-            reason = (
-                f"section [{setting.section}] is refused in every file, so no"
+        elif setting.ini_entry != setting.ini_entry.lower():
+            naming_problem = (
+                f"entry [{setting.ini_section}] {setting.ini_entry} is not in"
+                " lowercase, so no file can give it"
+            )
+        elif setting.ini_section == configparser.DEFAULTSECT:
+            naming_problem = (
+                f"section [{setting.ini_section}] is refused in every file, so no"
                 " file can give it"
             )
         else:
             continue
-        raise ValueError(reason)
+        raise ValueError(naming_problem)
     return settings
 
 
@@ -266,29 +270,31 @@ def _unknown_names(
     section like any other (see :data:`_NO_DEFAULT_SECTION`), since its
     entries would otherwise be merged into every section.
     """
-    sections = known_sections(settings)
-    entries = known_entries(settings)
-    unknown = [
-        f"[{section}]" for section in parser.sections() if section not in sections
+    known_section_names = known_sections(settings)
+    known_entry_names = known_entries(settings)
+    unknown_names = [
+        f"[{ini_section}]"
+        for ini_section in parser.sections()
+        if ini_section not in known_section_names
     ]
-    unknown.extend(
-        f"[{section}] {entry}"
-        for section in parser.sections()
-        if section in sections
-        for entry in parser[section]
-        if entry not in entries[section]
+    unknown_names.extend(
+        f"[{ini_section}] {ini_entry}"
+        for ini_section in parser.sections()
+        if ini_section in known_section_names
+        for ini_entry in parser[ini_section]
+        if ini_entry not in known_entry_names[ini_section]
     )
-    return unknown
+    return unknown_names
 
 
 def _reject_unknown(
-    path: Path, parser: configparser.ConfigParser, settings: Sequence[Setting]
+    config_file: Path, parser: configparser.ConfigParser, settings: Sequence[Setting]
 ) -> None:
     """Refuse a configuration file naming anything the program does not read.
 
     Parameters
     ----------
-    path : Path
+    config_file : Path
         The file being read, named in the error.
     parser : configparser.ConfigParser
         A parser that has already read it.
@@ -300,15 +306,15 @@ def _reject_unknown(
     ConfigError
         If the file contains any section or entry the program does not read.
     """
-    unknown = _unknown_names(parser, settings)
-    if unknown:
+    unknown_names = _unknown_names(parser, settings)
+    if unknown_names:
         raise ConfigError(
-            f"config file {path} names what the program does not read: "
-            f"{', '.join(unknown)}"
+            f"config file {config_file} names what the program does not read: "
+            f"{', '.join(unknown_names)}"
         )
 
 
-def _reject_several_lines(path: Path, parser: configparser.ConfigParser) -> None:
+def _reject_several_lines(config_file: Path, parser: configparser.ConfigParser) -> None:
     """Refuse a configuration file with a value that runs over several lines.
 
     :mod:`configparser` joins an indented line onto the value above it, so
@@ -316,7 +322,7 @@ def _reject_several_lines(path: Path, parser: configparser.ConfigParser) -> None
 
     Parameters
     ----------
-    path : Path
+    config_file : Path
         The file being read, named in the error.
     parser : configparser.ConfigParser
         A parser that has already read it.
@@ -326,16 +332,18 @@ def _reject_several_lines(path: Path, parser: configparser.ConfigParser) -> None
     ConfigError
         If any value, as written, holds a line break.
     """
-    for section in parser.sections():
-        for entry, value in parser.items(section, raw=True):
-            if "\n" in value:
+    for ini_section in parser.sections():
+        for ini_entry, entry_text in parser.items(ini_section, raw=True):
+            if "\n" in entry_text:
                 raise ConfigError(
-                    f"config file {path} gives [{section}] {entry} on more than"
-                    " one line"
+                    f"config file {config_file} gives [{ini_section}] {ini_entry}"
+                    " on more than one line"
                 )
 
 
-def read_entries(path: Path, settings: Sequence[Setting]) -> dict[str, dict[str, str]]:
+def read_entries(
+    config_file: Path, settings: Sequence[Setting]
+) -> dict[str, dict[str, str]]:
     """Read an INI file into a plain section/entry mapping.
 
     Missing sections and entries simply do not appear in the result; the
@@ -349,7 +357,7 @@ def read_entries(path: Path, settings: Sequence[Setting]) -> dict[str, dict[str,
 
     Parameters
     ----------
-    path : Path
+    config_file : Path
         Path to the INI configuration file.
     settings : Sequence of Setting
         The program's settings, which say what the file may name.
@@ -371,32 +379,39 @@ def read_entries(path: Path, settings: Sequence[Setting]) -> dict[str, dict[str,
     _checked(settings)
     parser = configparser.ConfigParser(default_section=_NO_DEFAULT_SECTION)
     try:
-        with path.open(encoding="utf-8") as file:
-            parser.read_file(file)
-        _reject_unknown(path, parser, settings)
-        _reject_several_lines(path, parser)
-        return {section: dict(parser.items(section)) for section in parser.sections()}
+        with config_file.open(encoding="utf-8") as open_file:
+            parser.read_file(open_file)
+        _reject_unknown(config_file, parser, settings)
+        _reject_several_lines(config_file, parser)
+        return {
+            ini_section: dict(parser.items(ini_section))
+            for ini_section in parser.sections()
+        }
     except (
         OSError,
         UnicodeDecodeError,
     ) as exc:
-        raise ConfigError(f"cannot read config file {path}: {exc}") from exc
+        raise ConfigError(f"cannot read config file {config_file}: {exc}") from exc
     except configparser.Error as exc:
-        raise ConfigError(f"config file {path} is not valid INI: {exc}") from exc
+        raise ConfigError(f"config file {config_file} is not valid INI: {exc}") from exc
 
 
 def _file_value(
-    raw: dict[str, dict[str, str]], section: str, entry: str, *, allow_none: bool
+    file_entries: dict[str, dict[str, str]],
+    ini_section: str,
+    ini_entry: str,
+    *,
+    allow_none: bool,
 ) -> str | Unset | None:
     """Look up an entry in the config-file mapping.
 
     Parameters
     ----------
-    raw : dict[str, dict[str, str]]
+    file_entries : dict[str, dict[str, str]]
         The entries read by :func:`read_entries`.
-    section : str
+    ini_section : str
         The section name.
-    entry : str
+    ini_entry : str
         The entry name within the section.
     allow_none : bool
         Whether the literal token ``"None"`` is meaningful for this entry
@@ -409,10 +424,10 @@ def _file_value(
         ``allow_none`` is set; :data:`~masterclock.app.cli.UNSET`
         if the entry is absent.
     """
-    if entry not in raw.get(section, {}):
+    if ini_entry not in file_entries.get(ini_section, {}):
         return UNSET
-    text = raw[section][entry]
-    return None if allow_none and text == NONE_LITERAL else text
+    entry_text = file_entries[ini_section][ini_entry]
+    return None if allow_none and entry_text == NONE_LITERAL else entry_text
 
 
 def _pick[ValueT](
@@ -441,13 +456,13 @@ def _pick[ValueT](
 
 
 def _missing_settings(
-    picked: Mapping[str, object], settings: Sequence[Setting]
+    effective_values: Mapping[str, object], settings: Sequence[Setting]
 ) -> list[str]:
     """Name every required setting that neither source provided.
 
     Parameters
     ----------
-    picked : Mapping[str, object]
+    effective_values : Mapping[str, object]
         The effective value of every setting, keyed by attribute;
         :data:`~masterclock.app.cli.UNSET` where neither source
         provided one.
@@ -462,14 +477,15 @@ def _missing_settings(
         provided.
     """
     return [
-        f"[{setting.section}] {setting.entry} ({setting.flag})"
+        f"[{setting.ini_section}] {setting.ini_entry} ({setting.cli_flag})"
         for setting in settings
-        if setting.required and isinstance(picked[setting.attribute], Unset)
+        if setting.required
+        and isinstance(effective_values[setting.options_field], Unset)
     ]
 
 
 def _grouped_values(
-    picked: Mapping[str, object], settings: Sequence[Setting]
+    effective_values: Mapping[str, object], settings: Sequence[Setting]
 ) -> dict[str, dict[str, object]]:
     """Sort the effective values into the sub-model each one belongs to.
 
@@ -479,7 +495,7 @@ def _grouped_values(
 
     Parameters
     ----------
-    picked : Mapping[str, object]
+    effective_values : Mapping[str, object]
         The effective value of every setting, keyed by attribute.
     settings : Sequence of Setting
         The program's settings, which say which group each lands in.
@@ -490,11 +506,13 @@ def _grouped_values(
         The values keyed by the configuration model's field and then by
         setting, ready for :meth:`~pydantic.BaseModel.model_validate`.
     """
-    grouped: dict[str, dict[str, object]] = {setting.group: {} for setting in settings}
+    grouped: dict[str, dict[str, object]] = {
+        setting.config_group: {} for setting in settings
+    }
     for setting in settings:
-        value = picked[setting.attribute]
-        grouped[setting.group][setting.attribute] = (
-            None if isinstance(value, Unset) else value
+        effective_value = effective_values[setting.options_field]
+        grouped[setting.config_group][setting.options_field] = (
+            None if isinstance(effective_value, Unset) else effective_value
         )
     return grouped
 
@@ -519,7 +537,7 @@ def known_sections(settings: Sequence[Setting]) -> frozenset[str]:
         If two settings share an attribute, or a section and entry, or a
         setting's entry is not in lowercase or its section is ``DEFAULT``.
     """
-    return frozenset(setting.section for setting in _checked(settings))
+    return frozenset(setting.ini_section for setting in _checked(settings))
 
 
 def known_entries(settings: Sequence[Setting]) -> dict[str, frozenset[str]]:
@@ -541,10 +559,12 @@ def known_entries(settings: Sequence[Setting]) -> dict[str, frozenset[str]]:
         If ``settings`` names a setting badly (see :func:`known_sections`).
     """
     return {
-        section: frozenset(
-            setting.entry for setting in settings if setting.section == section
+        ini_section: frozenset(
+            setting.ini_entry
+            for setting in settings
+            if setting.ini_section == ini_section
         )
-        for section in known_sections(settings)
+        for ini_section in known_sections(settings)
     }
 
 
@@ -567,7 +587,7 @@ def required_settings(settings: Sequence[Setting]) -> tuple[tuple[str, str, str]
         If ``settings`` names a setting badly (see :func:`known_sections`).
     """
     return tuple(
-        (setting.section, setting.entry, setting.flag)
+        (setting.ini_section, setting.ini_entry, setting.cli_flag)
         for setting in _checked(settings)
         if setting.required
     )
@@ -575,10 +595,10 @@ def required_settings(settings: Sequence[Setting]) -> tuple[tuple[str, str, str]
 
 def merge(
     settings: Sequence[Setting],
-    options: object,
+    cli_options: object,
     config_file: Path | None,
     *,
-    groups: Collection[str] | None = None,
+    config_groups: Collection[str] | None = None,
 ) -> dict[str, dict[str, object]]:
     """Merge a program's settings from its file and its command line.
 
@@ -586,12 +606,12 @@ def merge(
     ----------
     settings : Sequence of Setting
         The program's settings.
-    options : object
+    cli_options : object
         Its parsed command-line options, carrying a field per setting.
     config_file : Path or None
         Its configuration file, or None where the command line named none and
         every required setting must come from the command line.
-    groups : Collection of str or None, optional
+    config_groups : Collection of str or None, optional
         The parts of the configuration to merge, such as only the logging
         settings so logging can start before the rest are checked; ``None``,
         the default, for every part. The file is still checked against
@@ -601,7 +621,7 @@ def merge(
     -------
     dict of str to dict
         The effective values, grouped by the part of the configuration each
-        belongs to, ready to be validated; only those of ``groups`` when
+        belongs to, ready to be validated; only those of ``config_groups`` when
         given.
 
     Raises
@@ -610,7 +630,7 @@ def merge(
         If the file cannot be read, is not valid INI, names anything the
         program does not read, or gives a value on more than one line.
     MissingSettingsError
-        If a required setting of ``groups`` was provided by neither source.
+        If a required setting of ``config_groups`` was provided by neither source.
         A ConfigError itself, so one clause still catches both.
     ValueError
         If ``settings`` names a setting badly (see :func:`known_sections`).
@@ -621,21 +641,30 @@ def merge(
     neither gives is ``None``.
     """
     _checked(settings)
-    raw = read_entries(config_file, settings) if config_file is not None else {}
-    chosen = [s for s in settings if groups is None or s.group in groups]
-    picked = {
-        setting.attribute: _pick(
-            getattr(options, setting.attribute),
+    file_entries = (
+        read_entries(config_file, settings) if config_file is not None else {}
+    )
+    chosen_settings = [
+        setting
+        for setting in settings
+        if config_groups is None or setting.config_group in config_groups
+    ]
+    effective_values = {
+        setting.options_field: _pick(
+            getattr(cli_options, setting.options_field),
             _file_value(
-                raw, setting.section, setting.entry, allow_none=setting.allow_none
+                file_entries,
+                setting.ini_section,
+                setting.ini_entry,
+                allow_none=setting.allow_none,
             ),
         )
-        for setting in chosen
+        for setting in chosen_settings
     }
-    missing = _missing_settings(picked, chosen)
-    if missing:
+    missing_names = _missing_settings(effective_values, chosen_settings)
+    if missing_names:
         raise MissingSettingsError(
             "these settings must be provided by the config file or the "
-            f"command line: {', '.join(missing)}"
+            f"command line: {', '.join(missing_names)}"
         )
-    return _grouped_values(picked, chosen)
+    return _grouped_values(effective_values, chosen_settings)

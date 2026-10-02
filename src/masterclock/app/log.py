@@ -58,12 +58,12 @@ type ExcInfo = (
 """What the ``exc_info`` keyword of a logging call accepts."""
 
 
-def one_line(text: str) -> str:
+def one_line(message_text: str) -> str:
     r"""Fold text onto a single line.
 
     Parameters
     ----------
-    text : str
+    message_text : str
         The text, which may run to several lines.
 
     Returns
@@ -87,7 +87,9 @@ def one_line(text: str) -> str:
     'already one line'
     """
     return LINE_JOIN.join(
-        stripped for line in text.splitlines() if (stripped := line.strip())
+        stripped
+        for text_line in message_text.splitlines()
+        if (stripped := text_line.strip())
     )
 
 
@@ -237,11 +239,11 @@ class UtcMjdFormatter(logging.Formatter):
         Overrides a standard library method, which is why its name is not in
         this project's style.
         """
-        moment = datetime.fromtimestamp(record.created, tz=UTC)
+        created_utc = datetime.fromtimestamp(record.created, tz=UTC)
         rendered = (
-            moment.strftime(datefmt)
+            created_utc.strftime(datefmt)
             if datefmt is not None
-            else moment.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            else created_utc.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         )
         return f"{rendered} UTC, MJD {unix_to_mjd(record.created):.6f}"
 
@@ -273,37 +275,38 @@ class UtcMjdFormatter(logging.Formatter):
         return one_line(super().formatMessage(record))
 
 
-def get_logger(name: str) -> MasterClockLogger:
+def get_logger(logger_name: str) -> MasterClockLogger:
     """Return the application logger with the given name.
 
     Parameters
     ----------
-    name : str
+    logger_name : str
         The logger name, typically ``__name__``.
 
     Returns
     -------
     MasterClockLogger
-        The logger registered under ``name``.
+        The logger registered under ``logger_name``.
 
     Raises
     ------
     LoggingError
         If a plain :class:`logging.Logger` was already registered under
-        ``name`` before :mod:`masterclock.app.log` was imported,
-        or if ``name`` is ``"root"`` or empty, which both give the standard
+        ``logger_name`` before :mod:`masterclock.app.log` was imported,
+        or if ``logger_name`` is ``"root"`` or empty, which both give the standard
         root logger.
     """
-    logger = logging.getLogger(name)
+    logger = logging.getLogger(logger_name)
     if not isinstance(logger, MasterClockLogger):
         raise LoggingError(
-            f"logger {name!r} is a {type(logger).__name__}, not a MasterClockLogger"
+            f"logger {logger_name!r} is a {type(logger).__name__},"
+            " not a MasterClockLogger"
         )
     return logger
 
 
 def configure_logging(
-    level: int = logging.INFO,
+    root_level: int = logging.INFO,
     stream: TextIO | None = None,
     log_file: Path | None = None,
     backup_count: int | None = None,
@@ -321,7 +324,7 @@ def configure_logging(
 
     Parameters
     ----------
-    level : int, optional
+    root_level : int, optional
         Root logger level. Defaults to :data:`logging.INFO`.
     stream : TextIO or None, optional
         Destination stream for the stream handler. Defaults to
@@ -381,7 +384,7 @@ def configure_logging(
         root.addHandler(file_handler)
         _active_handlers.append(file_handler)
 
-    root.setLevel(level)
+    root.setLevel(root_level)
     return stream_handler
 
 

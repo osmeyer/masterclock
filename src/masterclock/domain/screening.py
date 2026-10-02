@@ -48,7 +48,7 @@ class ScreeningEvent(BaseModel):
 
     Parameters
     ----------
-    kind : {'self_missing', 'self_fail', 'reciprocity_fail', 'closure_fail'}
+    finding : {'self_missing', 'self_fail', 'reciprocity_fail', 'closure_fail'}
         What was found: a self pair with a prediction but no measurement, a
         self-measurement outside the gate, a link whose directions do not
         cancel, or a link excluded by closure.
@@ -60,7 +60,7 @@ class ScreeningEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    kind: Literal["self_missing", "self_fail", "reciprocity_fail", "closure_fail"]
+    finding: Literal["self_missing", "self_fail", "reciprocity_fail", "closure_fail"]
     references: tuple[str, ...]
     excluded: tuple[PairKey, ...]
 
@@ -82,7 +82,7 @@ class Screening(BaseModel):
     events: tuple[ScreeningEvent, ...]
 
 
-class _Epoch:
+class _EpochInnovations:
     """One epoch's innovations and scales, and the exclusions made so far."""
 
     def __init__(
@@ -148,30 +148,32 @@ class _Epoch:
         """
         if not (self.usable((a, b)) and self.usable((b, a))):
             return None
-        value = 0.5 * (self.nu((a, b)) - self.nu((b, a)))
-        return value, 0.5 * math.hypot(self.scales[(a, b)], self.scales[(b, a)])
+        two_way_value = 0.5 * (self.nu((a, b)) - self.nu((b, a)))
+        return two_way_value, 0.5 * math.hypot(self.scales[(a, b)], self.scales[(b, a)])
 
     def exclude(
         self,
-        kind: Literal["self_fail", "reciprocity_fail", "closure_fail"],
+        finding: Literal["self_fail", "reciprocity_fail", "closure_fail"],
         references: tuple[str, ...],
-        pairs: set[PairKey],
+        excluded_pairs: set[PairKey],
     ) -> None:
         """Exclude pairs and record why.
 
         Parameters
         ----------
-        kind : str
+        finding : str
             The test that failed.
         references : tuple of str
             The reference or link it failed for.
-        pairs : set of (str, str)
+        excluded_pairs : set of (str, str)
             The pairs to exclude.
         """
-        self.excluded |= pairs
+        self.excluded |= excluded_pairs
         self.events.append(
             ScreeningEvent(
-                kind=kind, references=references, excluded=tuple(sorted(pairs))
+                finding=finding,
+                references=references,
+                excluded=tuple(sorted(excluded_pairs)),
             )
         )
 
@@ -213,59 +215,69 @@ def screen_references(
     >>> sorted(screen_references(innovations, scales, frozenset({"mc1"})).excluded)
     [('mc1', 'ox1')]
     """
-    missing = sorted(set(innovations) - set(scales))
-    if missing:
-        message = f"pairs with an innovation have no innovation scale: {missing}"
+    unscaled_pairs = sorted(set(innovations) - set(scales))
+    if unscaled_pairs:
+        message = f"pairs with an innovation have no innovation scale: {unscaled_pairs}"
         _log.error(message)
         raise FilterError(message)
-    epoch = _Epoch(innovations, scales)
-    ordered = tuple(sorted(refs))
-    for r in ordered:
-        _self_test(epoch, r)
-    for r, s in combinations(ordered, 2):
-        _reciprocity(epoch, ordered, r, s)
-    _closure(epoch, ordered)
-    return Screening(excluded=frozenset(epoch.excluded), events=tuple(epoch.events))
+    epoch_innovations = _EpochInnovations(innovations, scales)
+    sorted_refs = tuple(sorted(refs))
+    for r in sorted_refs:
+        _self_test(epoch_innovations, r)
+    for r, s in combinations(sorted_refs, 2):
+        _reciprocity(epoch_innovations, sorted_refs, r, s)
+    _closure(epoch_innovations, sorted_refs)
+    return Screening(
+        excluded=frozenset(epoch_innovations.excluded),
+        events=tuple(epoch_innovations.events),
+    )
 
 
-def _self_test(epoch: _Epoch, r: str) -> None:
+def _self_test(epoch_innovations: _EpochInnovations, r: str) -> None:
     """Exclude the pairs of r that share a shift in its self pair (design 10.1).
 
     Parameters
     ----------
-    epoch : _Epoch
+    epoch_innovations : _EpochInnovations
         The epoch's values and exclusions.
     r : str
         The reference.
     """
-    own = (r, r)
-    if own not in epoch.scales:
+    self_pair = (r, r)
+    if self_pair not in epoch_innovations.scales:
         return
-    if own not in epoch.innovations:
-        epoch.events.append(
-            ScreeningEvent(kind="self_missing", references=(r,), excluded=())
+    if self_pair not in epoch_innovations.innovations:
+        epoch_innovations.events.append(
+            ScreeningEvent(finding="self_missing", references=(r,), excluded=())
         )
         return
-    if within_gate(epoch.innovations[own], epoch.scales[own]):
+    if within_gate(
+        epoch_innovations.innovations[self_pair], epoch_innovations.scales[self_pair]
+    ):
         return
-    shift = epoch.nu(own)
-    shared = {
+    self_shift = epoch_innovations.nu(self_pair)
+    shared_pairs = {
         pair
-        for pair in epoch.innovations
+        for pair in epoch_innovations.innovations
         if pair[0] == r
         and pair[1] != r
-        and abs(epoch.nu(pair) - shift)
-        <= K_SHARED * math.hypot(epoch.scales[pair], epoch.scales[own])
+        and abs(epoch_innovations.nu(pair) - self_shift)
+        <= K_SHARED
+        * math.hypot(
+            epoch_innovations.scales[pair], epoch_innovations.scales[self_pair]
+        )
     }
-    epoch.exclude("self_fail", (r,), shared)
+    epoch_innovations.exclude("self_fail", (r,), shared_pairs)
 
 
-def _reciprocity(epoch: _Epoch, refs: tuple[str, ...], r: str, s: str) -> None:
+def _reciprocity(
+    epoch_innovations: _EpochInnovations, refs: tuple[str, ...], r: str, s: str
+) -> None:
     """Exclude the bad direction of a link whose directions do not cancel (design 10.2).
 
     Parameters
     ----------
-    epoch : _Epoch
+    epoch_innovations : _EpochInnovations
         The epoch's values and exclusions.
     refs : tuple of str
         Every reference of the epoch, sorted.
@@ -273,23 +285,29 @@ def _reciprocity(epoch: _Epoch, refs: tuple[str, ...], r: str, s: str) -> None:
         The link's references, r before s.
     """
     forward, back = (r, s), (s, r)
-    if not (epoch.usable(forward) and epoch.usable(back)):
+    if not (epoch_innovations.usable(forward) and epoch_innovations.usable(back)):
         return
-    rho = epoch.nu(forward) + epoch.nu(back)
-    if abs(rho) <= K_OUT * math.hypot(epoch.scales[forward], epoch.scales[back]):
+    rho = epoch_innovations.nu(forward) + epoch_innovations.nu(back)
+    if abs(rho) <= K_OUT * math.hypot(
+        epoch_innovations.scales[forward], epoch_innovations.scales[back]
+    ):
         return
-    estimates = _closure_estimates(epoch, refs, r, s)
-    epoch.exclude("reciprocity_fail", (r, s), _bad_directions(epoch, r, s, estimates))
+    closure_estimates = _closure_estimates(epoch_innovations, refs, r, s)
+    epoch_innovations.exclude(
+        "reciprocity_fail",
+        (r, s),
+        _bad_directions(epoch_innovations, r, s, closure_estimates),
+    )
 
 
 def _closure_estimates(
-    epoch: _Epoch, refs: tuple[str, ...], r: str, s: str
+    epoch_innovations: _EpochInnovations, refs: tuple[str, ...], r: str, s: str
 ) -> list[_TwoWay]:
     """Estimate a link's two-way innovation from the other references (design 10.2).
 
     Parameters
     ----------
-    epoch : _Epoch
+    epoch_innovations : _EpochInnovations
         The epoch's values and exclusions.
     refs : tuple of str
         Every reference of the epoch, sorted.
@@ -302,28 +320,31 @@ def _closure_estimates(
         For each third reference t with usable links s-t and t-r, the
         estimate -(two-way(s, t) + two-way(t, r)) and its scale.
     """
-    estimates = []
+    closure_estimates = []
     for t in refs:
         if t in {r, s}:
             continue
-        st, tr = epoch.two_way(s, t), epoch.two_way(t, r)
+        st, tr = epoch_innovations.two_way(s, t), epoch_innovations.two_way(t, r)
         if st is not None and tr is not None:
-            estimates.append((-(st[0] + tr[0]), math.hypot(st[1], tr[1])))
-    return estimates
+            closure_estimates.append((-(st[0] + tr[0]), math.hypot(st[1], tr[1])))
+    return closure_estimates
 
 
 def _bad_directions(
-    epoch: _Epoch, r: str, s: str, estimates: list[_TwoWay]
+    epoch_innovations: _EpochInnovations,
+    r: str,
+    s: str,
+    closure_estimates: list[_TwoWay],
 ) -> set[PairKey]:
     """Name the direction of a failing link to exclude (design 10.2).
 
     Parameters
     ----------
-    epoch : _Epoch
+    epoch_innovations : _EpochInnovations
         The epoch's values and exclusions.
     r, s : str
         The link's references, r before s.
-    estimates : list of (float, float)
+    closure_estimates : list of (float, float)
         The closure estimates of the link (see :func:`_closure_estimates`).
 
     Returns
@@ -334,47 +355,53 @@ def _bad_directions(
         is no estimate.
     """
     forward, back = (r, s), (s, r)
-    if not estimates:
+    if not closure_estimates:
         return {forward, back}
-    estimate = median(value for value, _ in estimates)
-    spread = median(scale for _, scale in estimates)
-    one = {
+    median_estimate = median(
+        direction_value for direction_value, _ in closure_estimates
+    )
+    median_spread = median(estimate_scale for _, estimate_scale in closure_estimates)
+    outlying = {
         pair
-        for pair, value in ((forward, epoch.nu(forward)), (back, -epoch.nu(back)))
-        if abs(value - estimate) > K_OUT * math.hypot(epoch.scales[pair], spread)
+        for pair, direction_value in (
+            (forward, epoch_innovations.nu(forward)),
+            (back, -epoch_innovations.nu(back)),
+        )
+        if abs(direction_value - median_estimate)
+        > K_OUT * math.hypot(epoch_innovations.scales[pair], median_spread)
     }
-    return one if len(one) == 1 else {forward, back}
+    return outlying if len(outlying) == 1 else {forward, back}
 
 
-def _closure(epoch: _Epoch, refs: tuple[str, ...]) -> None:
+def _closure(epoch_innovations: _EpochInnovations, refs: tuple[str, ...]) -> None:
     """Exclude the links that only failing triangles hold (design 10.3).
 
     Parameters
     ----------
-    epoch : _Epoch
+    epoch_innovations : _EpochInnovations
         The epoch's values and exclusions.
     refs : tuple of str
         Every reference of the epoch, sorted.
     """
-    failing, passing = _triangles(epoch, refs)
-    if not failing:
+    failing_triangles, passing_triangles = _triangles(epoch_innovations, refs)
+    if not failing_triangles:
         return
     for a, b in combinations(refs, 2):
-        link = {a, b}
-        if all(link <= tri for tri in failing) and not any(
-            link <= tri for tri in passing
+        link_refs = {a, b}
+        if all(link_refs <= triangle for triangle in failing_triangles) and not any(
+            link_refs <= triangle for triangle in passing_triangles
         ):
-            epoch.exclude("closure_fail", (a, b), {(a, b), (b, a)})
+            epoch_innovations.exclude("closure_fail", (a, b), {(a, b), (b, a)})
 
 
 def _triangles(
-    epoch: _Epoch, refs: tuple[str, ...]
+    epoch_innovations: _EpochInnovations, refs: tuple[str, ...]
 ) -> tuple[list[frozenset[str]], list[frozenset[str]]]:
     """Test every triangle of references whose links are all usable (design 10.3).
 
     Parameters
     ----------
-    epoch : _Epoch
+    epoch_innovations : _EpochInnovations
         The epoch's values and exclusions.
     refs : tuple of str
         Every reference of the epoch, sorted.
@@ -385,15 +412,21 @@ def _triangles(
         The failing triangles, whose two-way innovations sum to more than
         five combined scales either way, and the passing ones.
     """
-    failing: list[frozenset[str]] = []
-    passing: list[frozenset[str]] = []
+    failing_triangles: list[frozenset[str]] = []
+    passing_triangles: list[frozenset[str]] = []
     for r, s, t in combinations(refs, 3):
-        legs = [epoch.two_way(r, s), epoch.two_way(s, t), epoch.two_way(t, r)]
-        known = [leg for leg in legs if leg is not None]
-        if len(known) < len(legs):
+        triangle_legs = [
+            epoch_innovations.two_way(r, s),
+            epoch_innovations.two_way(s, t),
+            epoch_innovations.two_way(t, r),
+        ]
+        known_legs = [leg for leg in triangle_legs if leg is not None]
+        if len(known_legs) < len(triangle_legs):
             continue
-        total = sum(value for value, _ in known)
-        scale = math.sqrt(sum(spread**2 for _, spread in known))
-        tri = frozenset({r, s, t})
-        (failing if abs(total) > K_OUT * scale else passing).append(tri)
-    return failing, passing
+        leg_sum = sum(leg_value for leg_value, _ in known_legs)
+        leg_scale = math.sqrt(sum(leg_spread**2 for _, leg_spread in known_legs))
+        triangle = frozenset({r, s, t})
+        (
+            failing_triangles if abs(leg_sum) > K_OUT * leg_scale else passing_triangles
+        ).append(triangle)
+    return failing_triangles, passing_triangles

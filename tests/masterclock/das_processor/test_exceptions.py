@@ -58,7 +58,9 @@ def test_every_refusal_reason_names_its_own_kind() -> None:
     """Give each reason a non-empty kind of its own, unlike any other's."""
     reasons = refusal_reasons()
     assert "MalformedLineError" in reasons
-    kinds = {name: value.__dict__.get("kind") for name, value in reasons.items()}
+    kinds = {
+        name: value.__dict__.get("refusal_kind") for name, value in reasons.items()
+    }
     missing = [name for name, kind in kinds.items() if not kind]
     assert missing == []
     assert len(set(kinds.values())) == len(kinds)
@@ -79,10 +81,10 @@ def test_each_refusal_reason_is_logged_by_its_word(
     reason: type[exceptions.RefusedLineError], kind: str
 ) -> None:
     """Keep the word each reason is logged by, since logs are read by it."""
-    assert reason.kind == kind
+    assert reason.refusal_kind == kind
 
 
 def test_the_base_for_refusals_names_no_kind() -> None:
     """Fail on reading the kind of the base itself, so no reason can borrow one."""
-    with pytest.raises(AttributeError, match="kind"):
-        _ = exceptions.RefusedLineError.kind
+    with pytest.raises(AttributeError, match="refusal_kind"):
+        _ = exceptions.RefusedLineError.refusal_kind

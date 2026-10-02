@@ -87,25 +87,25 @@ class _Loader(yaml.SafeLoader):
             If a key is repeated, or is a merge key, whose values would
             come from elsewhere in the file.
         """
-        seen: list[object] = []
+        seen_keys: list[object] = []
         for key_node, _ in node.value:
             if key_node.tag == _MERGE_TAG:
                 message = "merge keys are not read"
                 raise ConstructorError(None, None, message, key_node.start_mark)
-            key = self.construct_object(key_node, deep=deep)
-            if key in seen:
-                message = f"repeated key {key!r}"
+            mapping_key = self.construct_object(key_node, deep=deep)
+            if mapping_key in seen_keys:
+                message = f"repeated key {mapping_key!r}"
                 raise ConstructorError(None, None, message, key_node.start_mark)
-            seen.append(key)
+            seen_keys.append(mapping_key)
         return super().construct_mapping(node, deep=deep)
 
 
-def _tuples(value: object) -> object:
+def _tuples(yaml_value: object) -> object:
     """Turn every list in loaded YAML into a tuple, so frozen models hold it.
 
     Parameters
     ----------
-    value : object
+    yaml_value : object
         A value PyYAML loaded.
 
     Returns
@@ -113,11 +113,14 @@ def _tuples(value: object) -> object:
     object
         The same value with lists, at any depth, as tuples.
     """
-    if isinstance(value, list):
-        return tuple(_tuples(item) for item in value)
-    if isinstance(value, dict):
-        return {key: _tuples(item) for key, item in value.items()}
-    return value
+    if isinstance(yaml_value, list):
+        return tuple(_tuples(yaml_item) for yaml_item in yaml_value)
+    if isinstance(yaml_value, dict):
+        return {
+            mapping_key: _tuples(yaml_item)
+            for mapping_key, yaml_item in yaml_value.items()
+        }
+    return yaml_value
 
 
 class TypeDefault(BaseModel):
@@ -286,24 +289,26 @@ class RmsLimits(BaseModel):
             If a reference does not match the reference name pattern, or a
             pair is not a reference, a dot and a clock.
         """
-        for name in self.references:
-            if not _is_reference(name):
-                message = f"rms_limit reference {name} is not a reference name"
+        for reference_name in self.references:
+            if not _is_reference(reference_name):
+                message = (
+                    f"rms_limit reference {reference_name} is not a reference name"
+                )
                 raise ValueError(message)
-        for name in self.pairs:
-            reference, dot, clock = name.partition(".")
+        for pair_name in self.pairs:
+            reference, dot, clock = pair_name.partition(".")
             if not (dot and clock and _is_reference(reference)):
-                message = f"rms_limit pair {name} is not written reference.clock"
+                message = f"rms_limit pair {pair_name} is not written reference.clock"
                 raise ValueError(message)
         return self
 
 
-def _is_reference(name: str) -> bool:
+def _is_reference(clock_name: str) -> bool:
     """Tell whether a name is a reference clock's.
 
     Parameters
     ----------
-    name : str
+    clock_name : str
         A clock name.
 
     Returns
@@ -311,15 +316,15 @@ def _is_reference(name: str) -> bool:
     bool
         Whether the whole name matches the reference name pattern.
     """
-    return re.fullmatch(REFERENCE_PATTERN, name) is not None
+    return re.fullmatch(REFERENCE_PATTERN, clock_name) is not None
 
 
-def _in_order(entries: Iterable[Entry]) -> list[Entry]:
+def _in_order(clock_entries: Iterable[Entry]) -> list[Entry]:
     """Put a clock's entries in the order they apply.
 
     Parameters
     ----------
-    entries : iterable of Entry
+    clock_entries : iterable of Entry
         The entries as the file lists them.
 
     Returns
@@ -328,21 +333,26 @@ def _in_order(entries: Iterable[Entry]) -> list[Entry]:
         Undated entries first, in file order, then dated ones by date.
     """
     return sorted(
-        entries,
-        key=lambda entry: (entry.effective_mjd is not None, entry.effective_mjd or 0.0),
+        clock_entries,
+        key=lambda clock_entry: (
+            clock_entry.effective_mjd is not None,
+            clock_entry.effective_mjd or 0.0,
+        ),
     )
 
 
-def _settled(default: TypeDefault, entries: Iterable[Entry], where: str) -> ClockEntry:
+def _settled(
+    type_default: TypeDefault, clock_entries: Iterable[Entry], settings_owner: str
+) -> ClockEntry:
     """Apply entries to a type default and check the result.
 
     Parameters
     ----------
-    default : TypeDefault
+    type_default : TypeDefault
         The clock's type default.
-    entries : iterable of Entry
+    clock_entries : iterable of Entry
         The entries to apply, in order.
-    where : str
+    settings_owner : str
         What the settings are of, for the message.
 
     Returns
@@ -355,13 +365,13 @@ def _settled(default: TypeDefault, entries: Iterable[Entry], where: str) -> Cloc
     ValueError
         If the values do not make a valid entry.
     """
-    values: dict[str, object] = default.model_dump()
-    for entry in entries:
-        values |= entry.overrides()
+    entry_values: dict[str, object] = type_default.model_dump()
+    for clock_entry in clock_entries:
+        entry_values |= clock_entry.overrides()
     try:
-        return ClockEntry.model_validate(values)
+        return ClockEntry.model_validate(entry_values)
     except ValidationError as exc:
-        message = f"{where}: {describe_error(exc)}"
+        message = f"{settings_owner}: {describe_error(exc)}"
         raise ValueError(message) from exc
 
 
@@ -374,7 +384,7 @@ class ClockConfig(BaseModel):
         N_break: the counted rejects that make a series dormant, at least 3
         and at most every clock's gap limit.
     rms_limit : RmsLimits
-        The RMS limits of the pairs' gate; held as ``limits``, so the name
+        The RMS limits of the pairs' gate; held as ``rms_limits``, so the name
         is free for :meth:`rms_limit`.
     types : dict of str to TypeDefault
         The default entry of each clock type.
@@ -396,7 +406,7 @@ class ClockConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     rejects_before_restart: Annotated[int, Field(ge=3)]
-    limits: RmsLimits = Field(alias="rms_limit")
+    rms_limits: RmsLimits = Field(alias="rms_limit")
     types: dict[str, TypeDefault]
     clocks: dict[str, tuple[Entry, ...]]
 
@@ -414,24 +424,33 @@ class ClockConfig(BaseModel):
         ValueError
             Naming the first rule broken.
         """
-        for name, default in self.types.items():
-            self._check_gap(_settled(default, (), f"type {name}"), f"type {name}")
-        for name, entries in self.clocks.items():
-            default = self._type_default(name, entries)
-            ordered = _in_order(entries)
-            for count in range(len(ordered) + 1):
-                where = f"clock {name}"
-                self._check_gap(_settled(default, ordered[:count], where), name)
+        for type_name, type_default in self.types.items():
+            self._check_gap(
+                _settled(type_default, (), f"type {type_name}"), f"type {type_name}"
+            )
+        for clock_name, clock_entries in self.clocks.items():
+            type_default = self._type_default(clock_name, clock_entries)
+            ordered_entries = _in_order(clock_entries)
+            for entries_applied in range(len(ordered_entries) + 1):
+                settings_owner = f"clock {clock_name}"
+                self._check_gap(
+                    _settled(
+                        type_default, ordered_entries[:entries_applied], settings_owner
+                    ),
+                    clock_name,
+                )
         return self
 
-    def _type_default(self, name: str, entries: Sequence[Entry]) -> TypeDefault:
+    def _type_default(
+        self, clock_name: str, clock_entries: Sequence[Entry]
+    ) -> TypeDefault:
         """Give a clock's type default, checking its entries name it rightly.
 
         Parameters
         ----------
-        name : str
+        clock_name : str
             The clock.
-        entries : sequence of Entry
+        clock_entries : sequence of Entry
             Its entries as the file lists them.
 
         Returns
@@ -448,34 +467,34 @@ class ClockConfig(BaseModel):
             reference is not of type mc, or an entry changes the number of
             states.
         """
-        if not entries:
-            message = f"clock {name} has no entry"
+        if not clock_entries:
+            message = f"clock {clock_name} has no entry"
             raise ValueError(message)
-        kind = entries[0].type
-        if any(entry.type is not None for entry in entries[1:]):
-            message = f"the type of {name} is given by its first entry only"
+        clock_type = clock_entries[0].type
+        if any(clock_entry.type is not None for clock_entry in clock_entries[1:]):
+            message = f"the type of {clock_name} is given by its first entry only"
             raise ValueError(message)
-        if name.startswith(REFERENCE_PREFIX) and kind != REFERENCE_TYPE:
-            message = f"clock {name} is a reference, so of type {REFERENCE_TYPE}"
-            raise ValueError(f"{message}, not {kind}")
-        default = self._default_of(name, entries[0])
-        for entry in entries:
-            if entry.filter_states not in {None, default.filter_states}:
+        if clock_name.startswith(REFERENCE_PREFIX) and clock_type != REFERENCE_TYPE:
+            message = f"clock {clock_name} is a reference, so of type {REFERENCE_TYPE}"
+            raise ValueError(f"{message}, not {clock_type}")
+        type_default = self._default_of(clock_name, clock_entries[0])
+        for clock_entry in clock_entries:
+            if clock_entry.filter_states not in {None, type_default.filter_states}:
                 message = (
-                    f"an entry changes the filter_states of {name}"
-                    f" from {default.filter_states} to {entry.filter_states}"
+                    f"an entry changes the filter_states of {clock_name}"
+                    f" from {type_default.filter_states} to {clock_entry.filter_states}"
                 )
                 raise ValueError(message)
-        return default
+        return type_default
 
-    def _default_of(self, name: str, first: Entry) -> TypeDefault:
+    def _default_of(self, clock_name: str, first_entry: Entry) -> TypeDefault:
         """Give a clock's default: its type's, or its first entry's own settings.
 
         Parameters
         ----------
-        name : str
+        clock_name : str
             The clock.
-        first : Entry
+        first_entry : Entry
             Its first entry.
 
         Returns
@@ -490,36 +509,41 @@ class ClockConfig(BaseModel):
             If the type is one the file does not give, or a first entry
             with no type has a date or leaves out a setting.
         """
-        if first.type is not None:
-            if first.type not in self.types:
+        if first_entry.type is not None:
+            if first_entry.type not in self.types:
                 message = (
-                    f"clock {name} has type {first.type}, which types does not give"
+                    f"clock {clock_name} has type {first_entry.type},"
+                    " which types does not give"
                 )
                 raise ValueError(message)
-            return self.types[first.type]
-        if first.effective_mjd is not None:
+            return self.types[first_entry.type]
+        if first_entry.effective_mjd is not None:
             message = (
-                f"the first entry of {name} gives no type, so it holds from the"
+                f"the first entry of {clock_name} gives no type, so it holds from the"
                 " start and has no effective_mjd"
             )
             raise ValueError(message)
-        missing = [field for field in _OWN_SETTINGS if getattr(first, field) is None]
-        if missing:
+        missing_settings = [
+            setting_name
+            for setting_name in _OWN_SETTINGS
+            if getattr(first_entry, setting_name) is None
+        ]
+        if missing_settings:
             message = (
-                f"the first entry of {name} gives no type, so it gives every"
-                f" setting; it leaves out {', '.join(missing)}"
+                f"the first entry of {clock_name} gives no type, so it gives every"
+                f" setting; it leaves out {', '.join(missing_settings)}"
             )
             raise ValueError(message)
-        return TypeDefault.model_validate(first.overrides())
+        return TypeDefault.model_validate(first_entry.overrides())
 
-    def _check_gap(self, entry: ClockEntry, name: str) -> None:
+    def _check_gap(self, settled_entry: ClockEntry, settings_owner: str) -> None:
         """Refuse a gap limit below N_break.
 
         Parameters
         ----------
-        entry : ClockEntry
+        settled_entry : ClockEntry
             Settled values of a clock or type.
-        name : str
+        settings_owner : str
             What they are of, for the message.
 
         Raises
@@ -527,28 +551,28 @@ class ClockConfig(BaseModel):
         ValueError
             If ``rejects_before_restart`` is above the gap limit.
         """
-        if self.rejects_before_restart > entry.gap_limit:
+        if self.rejects_before_restart > settled_entry.gap_limit:
             message = (
                 f"rejects_before_restart {self.rejects_before_restart} is above"
-                f" the gap_limit {entry.gap_limit} of {name}"
+                f" the gap_limit {settled_entry.gap_limit} of {settings_owner}"
             )
             raise ValueError(message)
 
-    def entry_for(self, clock: str, mark: datetime) -> ClockEntry:
+    def entry_for(self, clock: str, epoch_start: datetime) -> ClockEntry:
         """Give a clock's settings at a mark (design 15.2).
 
         Parameters
         ----------
         clock : str
             The clock.
-        mark : datetime
+        epoch_start : datetime
             The epoch start; must carry a timezone.
 
         Returns
         -------
         ClockEntry
             The type default of the clock's first entry, with every entry in
-            force at ``mark`` applied in order of ``effective_mjd``: an entry
+            force at ``epoch_start`` applied in order of ``effective_mjd``: an entry
             without one from the start, one with one from the first mark at
             or after it.
 
@@ -557,19 +581,19 @@ class ClockConfig(BaseModel):
         ConfigError
             If the configuration has no entry for ``clock``.
         """
-        entries = self.clocks.get(clock)
-        if entries is None:
+        clock_entries = self.clocks.get(clock)
+        if clock_entries is None:
             message = f"the clock configuration has no entry for clock {clock}"
             _log.error(message)
             raise ConfigError(message)
         in_force = [
-            entry
-            for entry in _in_order(entries)
-            if entry.effective_mjd is None
-            or mjd_to_datetime(entry.effective_mjd) <= _aware(mark)
+            clock_entry
+            for clock_entry in _in_order(clock_entries)
+            if clock_entry.effective_mjd is None
+            or mjd_to_datetime(clock_entry.effective_mjd) <= _aware(epoch_start)
         ]
-        default = self._type_default(clock, entries)
-        return _settled(default, in_force, f"clock {clock}")
+        type_default = self._type_default(clock, clock_entries)
+        return _settled(type_default, in_force, f"clock {clock}")
 
     def rms_limit(self, pair: PairKey) -> int:
         """Give a pair's RMS limit (design 9.1).
@@ -585,20 +609,20 @@ class ClockConfig(BaseModel):
             The pair's own limit, else its reference a's, else the default.
         """
         reference, clock = pair
-        own = self.limits.pairs.get(f"{reference}.{clock}")
-        if own is not None:
-            return own
-        return self.limits.references.get(reference, self.limits.default)
+        pair_limit = self.rms_limits.pairs.get(f"{reference}.{clock}")
+        if pair_limit is not None:
+            return pair_limit
+        return self.rms_limits.references.get(reference, self.rms_limits.default)
 
-    def params_for(self, key: SeriesKey, mark: datetime) -> SeriesParams:
+    def params_for(self, series_key: SeriesKey, epoch_start: datetime) -> SeriesParams:
         """Give a series' settings at a mark (design 8.1).
 
         Parameters
         ----------
-        key : (str, str) or (str, str, str)
+        series_key : (str, str) or (str, str, str)
             A pair (a, b), which takes the entry of b and its RMS limit, or
             a triple (r, s, c), which takes the entry of c and has none.
-        mark : datetime
+        epoch_start : datetime
             The epoch start; must carry a timezone.
 
         Returns
@@ -611,50 +635,54 @@ class ClockConfig(BaseModel):
         ConfigError
             If the configuration has no entry for the series' clock.
         """
-        entry = self.entry_for(key[-1], mark)
-        rms_max = self.rms_limit((key[0], key[1])) if len(key) == _PAIR else None
+        clock_entry = self.entry_for(series_key[-1], epoch_start)
+        rms_max = (
+            self.rms_limit((series_key[0], series_key[1]))
+            if len(series_key) == _PAIR
+            else None
+        )
         return SeriesParams(
-            model=entry.filter_states,
-            M=entry.time_constant,
-            M_sigma=entry.scale_time_constant,
-            sigma0=entry.initial_innovation_scale,
-            gmax=entry.gap_limit,
+            filter_states=clock_entry.filter_states,
+            M=clock_entry.time_constant,
+            M_sigma=clock_entry.scale_time_constant,
+            sigma0=clock_entry.initial_innovation_scale,
+            gmax=clock_entry.gap_limit,
             n_break=self.rejects_before_restart,
             rms_max=rms_max,
         )
 
 
-def _aware(mark: datetime) -> datetime:
+def _aware(epoch_start: datetime) -> datetime:
     """Refuse a mark without a timezone.
 
     Parameters
     ----------
-    mark : datetime
+    epoch_start : datetime
         The mark.
 
     Returns
     -------
     datetime
-        ``mark``, unchanged.
+        ``epoch_start``, unchanged.
 
     Raises
     ------
     ConfigError
-        If ``mark`` has no timezone, and so names no one instant.
+        If ``epoch_start`` has no timezone, and so names no one instant.
     """
-    if mark.tzinfo is None:
-        message = f"the mark {mark} has no timezone"
+    if epoch_start.tzinfo is None:
+        message = f"the mark {epoch_start} has no timezone"
         _log.error(message)
         raise ConfigError(message)
-    return mark
+    return epoch_start
 
 
-def read_clock_config(path: Path) -> ClockConfig:
+def read_clock_config(config_file: Path) -> ClockConfig:
     """Read and check a clock configuration file (design 15.2).
 
     Parameters
     ----------
-    path : Path
+    config_file : Path
         The YAML file.
 
     Returns
@@ -670,33 +698,33 @@ def read_clock_config(path: Path) -> ClockConfig:
         not a mapping, or breaks any rule of :class:`ClockConfig`.
     """
     try:
-        text = path.read_text(encoding="utf-8")
+        yaml_text = config_file.read_text(encoding="utf-8")
     except (
         OSError,
         UnicodeDecodeError,
     ) as exc:
-        _fail(path, f"cannot read: {exc}", exc)
-    loader = _Loader(text)
+        _fail(config_file, f"cannot read: {exc}", exc)
+    yaml_loader = _Loader(yaml_text)
     try:
-        data = loader.get_single_data()
+        loaded_yaml = yaml_loader.get_single_data()
     except yaml.YAMLError as exc:
-        _fail(path, describe_error(exc), exc)
+        _fail(config_file, describe_error(exc), exc)
     finally:
-        loader.dispose()
-    if not isinstance(data, dict):
-        _fail(path, "is not a mapping of the sections", None)
+        yaml_loader.dispose()
+    if not isinstance(loaded_yaml, dict):
+        _fail(config_file, "is not a mapping of the sections", None)
     try:
-        return ClockConfig.model_validate(_tuples(data))
+        return ClockConfig.model_validate(_tuples(loaded_yaml))
     except ValidationError as exc:
-        _fail(path, describe_error(exc), exc)
+        _fail(config_file, describe_error(exc), exc)
 
 
-def _fail(path: Path, problem: str, cause: Exception | None) -> NoReturn:
+def _fail(config_file: Path, problem: str, cause: Exception | None) -> NoReturn:
     """Log and raise a clock configuration error.
 
     Parameters
     ----------
-    path : Path
+    config_file : Path
         The file.
     problem : str
         What is wrong with it.
@@ -708,6 +736,6 @@ def _fail(path: Path, problem: str, cause: Exception | None) -> NoReturn:
     ConfigError
         Always, naming the file and the problem.
     """
-    message = f"clock configuration {path}: {problem}"
+    message = f"clock configuration {config_file}: {problem}"
     _log.error(message)
     raise ConfigError(message) from cause

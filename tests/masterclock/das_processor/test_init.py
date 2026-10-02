@@ -262,7 +262,11 @@ def test_the_logging_settings_reach_the_logging(
     )
     assert das_processor.main(argv) == 0
     assert calls == [
-        {"level": logging.INFO, "log_file": tmp_path / "run.log", "backup_count": 3}
+        {
+            "root_level": logging.INFO,
+            "log_file": tmp_path / "run.log",
+            "backup_count": 3,
+        }
     ]
 
 

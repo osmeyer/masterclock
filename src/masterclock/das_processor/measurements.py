@@ -117,7 +117,7 @@ class TripleMeasurement(BaseModel):
     z : int
         The double difference dd, ps.
     double_difference_sigma : float
-        Its measurement sigma, ps, above zero.
+        Its measurement sigma, ps, zero or more, as a pair's rms may be.
     components_used : {'111', '110', '101'}
         Which of (s, c), (r, s) and (s, r) gave it, in that order.
     cold : bool
@@ -133,7 +133,7 @@ class TripleMeasurement(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     z: int
-    double_difference_sigma: Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    double_difference_sigma: Annotated[float, Field(ge=0, allow_inf_nan=False)]
     components_used: Literal["111", "110", "101"]
     cold: bool
 

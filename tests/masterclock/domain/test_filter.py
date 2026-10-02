@@ -1473,7 +1473,7 @@ def test_unchanged_settings_start_no_segment() -> None:
         {"z": 1, "sigma_dd": 3.0, "slip": True},
         {"z": 1, "rms": 3, "cold": True},
         {"z": 1, "rms": -1},
-        {"z": 1, "sigma_dd": 0.0},
+        {"z": 1, "sigma_dd": -1.0},
         {"z": 1, "sigma_dd": float("nan")},
         {"z": 1.5, "rms": 3},
     ],

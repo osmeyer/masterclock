@@ -35,6 +35,11 @@ cold-starts from the third of three from consecutive epochs whose second
 difference is within 5 sqrt(6) sigma0; a missing epoch empties the buffer;
 counted rejects reaching N_break make a series dormant; and the last
 buffered measurement is what a dormant pair is decycled against.
+
+The filter step: a configuration change starts a warm segment before the
+measurement is handled, and shares the row with its outcome; then every
+path of the decision flow gives its row, a component cold start makes a
+triple dormant, and the result says whether the row cold-started.
 """
 
 import dataclasses
@@ -44,6 +49,7 @@ from fractions import Fraction
 from typing import Final, Literal
 
 import pytest
+from pydantic import ValidationError
 
 from masterclock.domain import filter as estimator
 from masterclock.domain.exceptions import FilterError
@@ -934,25 +940,11 @@ def test_a_counted_reject_enters_the_buffer() -> None:
 
 
 def run_epoch(last: Row, z: int, settings: SeriesParams, rms: int = 3) -> Row:
-    """Process one epoch's measurement as the filter step does, gate to row."""
+    """Process one epoch's pair measurement through the filter step."""
     prediction = estimator.predict(last, NO_INPUT)
-    draft = estimator.carry(last.interpolated_datetime + EPOCH, last, settings)
-    if prediction is None:
-        return estimator.acquire(draft, z, settings)
-    innovation = z - prediction.x
-    draft = dataclasses.replace(draft, innovation=float(innovation))
-    assert draft.innovation_scale is not None
-    if estimator.within_gate(innovation, draft.innovation_scale) and estimator.rms_ok(
-        rms, settings.rms_max
-    ):
-        return estimator.accept(draft, prediction, innovation, rms)
-    draft = estimator.count_reject(draft, innovation)
-    stepped = estimator.accept_step(draft, prediction, z, rms, settings)
-    if stepped is not None:
-        return stepped
-    if draft.consecutive_rejects >= settings.n_break:
-        return estimator.acquire(dataclasses.replace(draft, rejects=()), z, settings)
-    return estimator.hold(draft, prediction, "R", settings)
+    measured = estimator.Measured(z=z, rms=rms)
+    mark = last.interpolated_datetime + EPOCH
+    return estimator.filter_step(mark, settings, last, prediction, measured).row
 
 
 def truth(epochs: int, offset: int = 0) -> list[int]:
@@ -1235,3 +1227,270 @@ def test_the_anchor_is_the_last_buffered_measurement() -> None:
 def test_no_anchor_without_a_buffered_measurement(last: Row | None) -> None:
     """Give None for no row, a tracked row, or a dormant row with an empty buffer."""
     assert estimator.anchor_of(last) is None
+
+
+# ------------------------------------------------------------- filter step
+
+
+def pair(z: int, rms: int = 3, *, slip: bool = False) -> estimator.Measured:
+    """Give a pair's measurement at an epoch."""
+    return estimator.Measured(z=z, rms=rms, slip=slip)
+
+
+def triple(z: int, sigma: float = 3.5, *, cold: bool = False) -> estimator.Measured:
+    """Give a triple's measurement at an epoch."""
+    return estimator.Measured(z=z, sigma_dd=sigma, cold=cold)
+
+
+def step(
+    last: Row | None,
+    measured: estimator.Measured | None,
+    settings: SeriesParams | None = None,
+    *,
+    excluded: bool = False,
+) -> estimator.StepResult:
+    """Run the filter step at the epoch after ``last``."""
+    mark = NEXT if last is None else last.interpolated_datetime + EPOCH
+    prediction = estimator.predict(last, NO_INPUT)
+    return estimator.filter_step(
+        mark, settings or params(), last, prediction, measured, excluded=excluded
+    )
+
+
+def ending(*values: float) -> tuple[tuple[datetime, float], ...]:
+    """Give a reject buffer of ``values`` at consecutive epochs ending at MARK."""
+    count = len(values)
+    return tuple((MARK - EPOCH * (count - 1 - i), v) for i, v in enumerate(values))
+
+
+WORKED: Final = 1_234_577
+"""The worked epoch's measurement, ps: z_E of Appendix A."""
+
+
+def test_the_worked_epoch_is_accepted() -> None:
+    """Give the accepted row of design 5.4 for the worked epoch, not cold."""
+    result = step(last_row(), pair(WORKED))
+    assert result.cold is False
+    assert result.row.flags == "A"
+    assert result.row.x_fs == 1_234_574_457
+
+
+def test_no_measurement_gives_a_predicted_row() -> None:
+    """Give P with the prediction when there is no measurement (9.6)."""
+    result = step(last_row(), None)
+    assert (result.row.flags, result.cold) == ("P", False)
+    assert result.row.epochs_since_accept == 1
+
+
+def test_no_measurement_for_a_dormant_series_gives_a_dormant_row() -> None:
+    """Give D P for a new or dormant series with no measurement (9.6)."""
+    assert step(None, None).row.flags == "PD"
+    assert step(last_row(flags="PD", **DORMANT), None).row.flags == "PD"
+
+
+def test_a_new_series_buffers_its_first_measurement() -> None:
+    """Give D R, the measurement buffered, for a series with no prediction (9.6)."""
+    result = step(None, pair(WORKED))
+    assert (result.row.flags, result.cold) == ("RD", False)
+    assert result.row.rejects == ((NEXT, float(WORKED)),)
+    assert result.row.segment == 0
+
+
+def test_a_consistent_third_measurement_cold_starts() -> None:
+    """Give A N U and say the row cold-started, from the acquisition buffer (9.6)."""
+    last = last_row(
+        flags="RD",
+        rejects=((MARK - EPOCH, float(WORKED)), (MARK, float(WORKED))),
+        **DORMANT,
+    )
+    result = step(last, pair(WORKED))
+    assert (result.row.flags, result.cold) == ("ANU", True)
+    assert result.row.segment == 5
+
+
+def test_an_excluded_measurement_within_the_gate_is_held() -> None:
+    """Give X, not counted, for an excluded measurement inside the gate (9.5)."""
+    result = step(last_row(), pair(WORKED), excluded=True)
+    assert (result.row.flags, result.row.consecutive_rejects) == ("X", 0)
+    assert result.row.rejects == ()
+    assert result.row.innovation == float(
+        WORKED - Fraction(1_234_567) - exact(0.0123) * T
+    )
+
+
+def test_an_excluded_measurement_outside_the_gate_is_a_counted_reject() -> None:
+    """Give R, counted and buffered, for an excluded one outside the gate (9.5)."""
+    result = step(last_row(), pair(WORKED + 100), excluded=True)
+    assert (result.row.flags, result.row.consecutive_rejects) == ("R", 1)
+    assert len(result.row.rejects) == 1
+
+
+def test_a_measurement_outside_the_gate_is_a_counted_reject() -> None:
+    """Give R and push the innovation for a measurement outside the gate (9.6)."""
+    result = step(last_row(), pair(WORKED + 100))
+    assert (result.row.flags, result.row.consecutive_rejects) == ("R", 1)
+    assert result.row.innovation == result.row.rejects[0][1]
+
+
+def test_an_rms_over_the_limit_is_a_counted_reject() -> None:
+    """Give R for a pair whose rms is over its limit, inside the gate (9.1)."""
+    result = step(last_row(), pair(WORKED, rms=81))
+    assert (result.row.flags, result.row.consecutive_rejects) == ("R", 1)
+
+
+def test_a_triple_has_no_rms_test_and_its_floor_is_sigma_dd() -> None:
+    """Accept a triple with no rms limit, its scale held up by sigma_dd (12.5)."""
+    result = step(last_row(), triple(WORKED, sigma=3.5), params(rms_max=None))
+    assert result.row.flags == "A"
+    assert result.row.innovation_scale == 3.5
+
+
+def test_a_third_agreeing_reject_is_a_phase_step() -> None:
+    """Give A, step_offset up, same segment, after two rejects (9.6)."""
+    last = last_row(
+        flags="R",
+        consecutive_rejects=2,
+        rejects=ending(150.0, 150.0),
+        innovation=150.0,
+        epochs_since_accept=2,
+    )
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    result = step(last, pair(round_even(prediction.x) + 150))
+    assert (result.row.flags, result.row.step_offset, result.row.segment) == (
+        "A",
+        150,
+        4,
+    )
+
+
+def test_a_third_reject_on_a_line_is_a_frequency_step() -> None:
+    """Give A N U in segment + 1 after rejects on a line (9.6)."""
+    last = last_row(
+        flags="R",
+        consecutive_rejects=2,
+        rejects=ending(30.0, 60.0),
+        innovation=60.0,
+        epochs_since_accept=2,
+    )
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    result = step(last, pair(round_even(prediction.x) + 90))
+    assert (result.row.flags, result.row.segment) == ("ANU", 5)
+
+
+def test_a_third_scattered_reject_is_held() -> None:
+    """Give R when three rejects show no step and N_break is not reached (9.6)."""
+    last = last_row(
+        flags="R",
+        consecutive_rejects=2,
+        rejects=ending(100.0, -100.0),
+        innovation=-100.0,
+        epochs_since_accept=2,
+    )
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    result = step(last, pair(round_even(prediction.x) + 100))
+    assert (result.row.flags, result.row.consecutive_rejects) == ("R", 3)
+
+
+def test_rejects_reaching_n_break_make_the_series_dormant() -> None:
+    """Give D R with only the current measurement buffered at N_break (9.6)."""
+    last = last_row(
+        flags="R",
+        consecutive_rejects=4,
+        rejects=ending(100.0, -100.0, 300.0),
+        innovation=300.0,
+        epochs_since_accept=4,
+    )
+    result = step(last, pair(WORKED - 500), params(n_break=5))
+    assert (result.row.flags, result.cold) == ("RD", False)
+    assert result.row.rejects == ((NEXT, float(WORKED - 500)),)
+    assert result.row.consecutive_rejects == 0
+
+
+def test_a_component_cold_start_makes_a_triple_dormant() -> None:
+    """Give D R and restart acquisition when a component pair cold-started (12.6)."""
+    last = last_row(
+        rejects=ending(90.0), consecutive_rejects=1, flags="R", innovation=90.0
+    )
+    result = step(last, triple(WORKED, cold=True), params(rms_max=None))
+    assert (result.row.flags, result.cold) == ("RD", False)
+    assert result.row.rejects == ((NEXT, float(WORKED)),)
+
+
+def test_a_slip_corrected_measurement_carries_s() -> None:
+    """Carry S onto the row of a measurement the slip check corrected."""
+    assert step(last_row(), pair(WORKED, slip=True)).row.flags == "AS"
+
+
+def test_a_configuration_change_warm_starts_before_the_measurement() -> None:
+    """Start segment + 1 with the new M, then accept with its gains (8.7, U14)."""
+    changed = params(M=150.0, M_sigma=60.0)
+    last = last_row()
+    result = step(last, pair(WORKED), changed)
+    row = result.row
+    assert (row.flags, row.segment, row.epochs_in_segment) == ("ANU", 5, 0)
+    assert (row.time_constant, row.scale_time_constant, row.step_offset) == (
+        150.0,
+        60.0,
+        0,
+    )
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    expected = estimator.update(prediction, WORKED - prediction.x, 3, 150.0)
+    assert row.x_fs == to_fs(expected.x)
+    assert row.y == expected.y
+
+
+def test_a_configuration_change_shares_a_row_with_no_measurement() -> None:
+    """Give N U P on a configuration change at an epoch with no measurement (8.7)."""
+    assert step(last_row(), None, params(M_sigma=60.0)).row.flags == "PNU"
+
+
+def test_a_dormant_series_takes_new_settings_at_its_cold_start() -> None:
+    """Start no warm segment for a dormant series: its cold start takes them."""
+    last = last_row(flags="PD", **DORMANT)
+    assert step(last, None, params(M=150.0)).row.flags == "PD"
+
+
+def test_unchanged_settings_start_no_segment() -> None:
+    """Keep the segment when M and M_sigma are as in the last row."""
+    assert step(last_row(), pair(WORKED)).row.segment == 4
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"z": 1, "rms": 3, "sigma_dd": 3.0},
+        {"z": 1},
+        {"z": 1, "sigma_dd": 3.0, "slip": True},
+        {"z": 1, "rms": 3, "cold": True},
+        {"z": 1, "rms": -1},
+        {"z": 1, "sigma_dd": 0.0},
+        {"z": 1, "sigma_dd": float("nan")},
+        {"z": 1.5, "rms": 3},
+    ],
+)
+def test_a_measurement_is_a_pair_s_or_a_triple_s(values: dict[str, object]) -> None:
+    """Refuse a measurement that is neither a pair's (rms) nor a triple's (sigma_dd)."""
+    with pytest.raises((ValidationError, FilterError)):
+        estimator.Measured.model_validate(values)
+
+
+@pytest.mark.parametrize(
+    ("measured", "floor"), [(pair(5, rms=4), 4.0), (triple(5, sigma=3.25), 3.25)]
+)
+def test_a_measurement_gives_its_floor(
+    measured: estimator.Measured, floor: float
+) -> None:
+    """Give the rms of a pair and sigma_dd of a triple as the scale's floor (9.2)."""
+    assert measured.floor == floor
+
+
+def test_a_prediction_for_a_series_with_no_scale_is_refused() -> None:
+    """Raise FilterError when a dormant last row is given a prediction anyway."""
+    last = last_row(flags="PD", **DORMANT)
+    prediction = State(x=Fraction(WORKED), y=0.0)
+    with pytest.raises(FilterError, match="no scale"):
+        estimator.filter_step(NEXT, params(), last, prediction, pair(WORKED))

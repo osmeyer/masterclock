@@ -49,7 +49,7 @@ from masterclock.app.cli import (
 from masterclock.app.exceptions import ConfigError, MissingSettingsError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Mapping, Sequence
 
 _NO_DEFAULT_SECTION: Final[str] = "\n"
 """The parser's name for its default section, one no section header can give.
@@ -574,7 +574,11 @@ def required_settings(settings: Sequence[Setting]) -> tuple[tuple[str, str, str]
 
 
 def merge(
-    settings: Sequence[Setting], options: object, config_file: Path | None
+    settings: Sequence[Setting],
+    options: object,
+    config_file: Path | None,
+    *,
+    groups: Collection[str] | None = None,
 ) -> dict[str, dict[str, object]]:
     """Merge a program's settings from its file and its command line.
 
@@ -587,12 +591,18 @@ def merge(
     config_file : Path or None
         Its configuration file, or None where the command line named none and
         every required setting must come from the command line.
+    groups : Collection of str or None, optional
+        The parts of the configuration to merge, such as only the logging
+        settings so logging can start before the rest are checked; ``None``,
+        the default, for every part. The file is still checked against
+        every setting.
 
     Returns
     -------
     dict of str to dict
         The effective values, grouped by the part of the configuration each
-        belongs to, ready to be validated.
+        belongs to, ready to be validated; only those of ``groups`` when
+        given.
 
     Raises
     ------
@@ -600,8 +610,8 @@ def merge(
         If the file cannot be read, is not valid INI, names anything the
         program does not read, or gives a value on more than one line.
     MissingSettingsError
-        If a required setting was provided by neither source. A ConfigError
-        itself, so one clause still catches both.
+        If a required setting of ``groups`` was provided by neither source.
+        A ConfigError itself, so one clause still catches both.
     ValueError
         If ``settings`` names a setting badly (see :func:`known_sections`).
 
@@ -612,6 +622,7 @@ def merge(
     """
     _checked(settings)
     raw = read_entries(config_file, settings) if config_file is not None else {}
+    chosen = [s for s in settings if groups is None or s.group in groups]
     picked = {
         setting.attribute: _pick(
             getattr(options, setting.attribute),
@@ -619,12 +630,12 @@ def merge(
                 raw, setting.section, setting.entry, allow_none=setting.allow_none
             ),
         )
-        for setting in settings
+        for setting in chosen
     }
-    missing = _missing_settings(picked, settings)
+    missing = _missing_settings(picked, chosen)
     if missing:
         raise MissingSettingsError(
             "these settings must be provided by the config file or the "
             f"command line: {', '.join(missing)}"
         )
-    return _grouped_values(picked, settings)
+    return _grouped_values(picked, chosen)

@@ -380,6 +380,36 @@ def check_paths(config: AppConfig) -> None:
     _check_processed_directory(config.processed.processed_path)
 
 
+def build_logging_config(options: CliOptions) -> LoggingConfig:
+    """Merge and validate the logging settings alone, so logging can start first.
+
+    Parameters
+    ----------
+    options : CliOptions
+        The parsed command-line options.
+
+    Returns
+    -------
+    LoggingConfig
+        The effective, validated logging settings.
+
+    Raises
+    ------
+    ConfigError
+        If the INI file cannot be read or parsed, names anything the
+        program does not read, or a logging value is invalid.
+    MissingSettingsError
+        If a required logging setting is given by neither source.
+    """
+    values = merge(SETTINGS, options, options.config_file, groups={"logging"})
+    try:
+        return LoggingConfig.model_validate(values["logging"])
+    except ValidationError as exc:
+        raise ConfigError(
+            f"invalid configuration values: logging: {describe_error(exc)}"
+        ) from exc
+
+
 def build_config(options: CliOptions) -> AppConfig:
     """Merge and validate the effective configuration.
 

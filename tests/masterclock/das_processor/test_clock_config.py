@@ -3,8 +3,10 @@
 The rules covered: the clock configuration is read from YAML with a safe
 loader that refuses a key repeated in any mapping, into frozen models that
 refuse unknown keys; a clock's entry at a mark starts from the type default
-of its first entry and applies, in order of effective_mjd, every entry in
-force at the mark, an entry without effective_mjd from the start, and one
+of its first entry, or that entry's own settings when it gives no type and
+every setting from the start, and applies, in order of effective_mjd, every
+entry in force at the mark, an entry without effective_mjd from the start,
+and one
 between two marks from the next mark; every check of design 15.2 refuses
 the file with ConfigError; the RMS limit of a pair is its own, else its
 reference's, else the default; a series takes the settings of its clock
@@ -412,3 +414,76 @@ def test_rejects_before_restart_may_equal_the_gap_limit(tmp_path: Path) -> None:
     """Take a gap limit equal to rejects_before_restart (15.2)."""
     text = BASE.replace("rejects_before_restart: 36", "rejects_before_restart: 432")
     assert load(tmp_path, text).rejects_before_restart == 432
+
+
+# ------------------------------------------- a first entry with its own settings
+
+OWN: Final = (
+    "{filter_states: 2, time_constant: 40.0, scale_time_constant: 20.0,"
+    " initial_innovation_scale: 6.0, gap_limit: 300}"
+)
+"""Every setting of a 2-state clock, given in its first entry."""
+
+
+def test_a_first_entry_may_give_every_setting_instead_of_a_type(
+    tmp_path: Path,
+) -> None:
+    """Take a clock's own settings, from the start, when it fits no type."""
+    text = BASE.replace("  cs7: [{type: cesium}]", f"  rb9: [{OWN}]")
+    config = load(tmp_path, text)
+    assert config.entry_for("rb9", BEFORE) == clock_config.ClockEntry(
+        filter_states=2,
+        time_constant=40.0,
+        scale_time_constant=20.0,
+        initial_innovation_scale=6.0,
+        gap_limit=300,
+    )
+
+
+def test_a_clock_with_its_own_settings_takes_later_entries_too(
+    tmp_path: Path,
+) -> None:
+    """Apply a later entry over a first entry's own settings, from its date."""
+    later = "    - {effective_mjd: 60980.0, time_constant: 80.0}\n"
+    text = BASE.replace("  cs7: [{type: cesium}]", f"  rb9:\n    - {OWN}\n{later}")
+    config = load(tmp_path, text)
+    assert config.entry_for("rb9", BEFORE).time_constant == 40.0
+    assert config.entry_for("rb9", AT).time_constant == 80.0
+
+
+@pytest.mark.parametrize(
+    ("entry", "match"),
+    [
+        (
+            "{filter_states: 2, time_constant: 40.0, scale_time_constant: 20.0}",
+            "rb9 gives no type, so it gives every setting; it leaves out"
+            " initial_innovation_scale, gap_limit",
+        ),
+        (OWN.replace("{", "{effective_mjd: 60980.0, "), "rb9 .* no effective_mjd"),
+        (OWN.replace(" time_constant: 40.0,", ""), "time constant"),
+    ],
+)
+def test_a_first_entry_with_its_own_settings_gives_them_all_from_the_start(
+    tmp_path: Path, entry: str, match: str
+) -> None:
+    """Refuse one that leaves a setting out, or holds only from a date."""
+    refused(
+        tmp_path, BASE.replace("  cs7: [{type: cesium}]", f"  rb9: [{entry}]"), match
+    )
+
+
+def test_a_reference_has_the_reference_type_not_its_own_settings(
+    tmp_path: Path,
+) -> None:
+    """Refuse a reference whose first entry gives settings instead of type mc."""
+    text = BASE.replace("  mc1: [{type: mc}]", f"  mc1: [{OWN}]")
+    refused(tmp_path, text, "mc1 is a reference, so of type mc")
+
+
+def test_a_clock_with_its_own_settings_keeps_its_number_of_states(
+    tmp_path: Path,
+) -> None:
+    """Refuse a later entry that changes the states its first entry gave."""
+    later = "    - {effective_mjd: 60980.0, filter_states: 3}\n"
+    text = BASE.replace("  cs7: [{type: cesium}]", f"  rb9:\n    - {OWN}\n{later}")
+    refused(tmp_path, text, "changes the filter_states of rb9")

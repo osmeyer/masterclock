@@ -148,13 +148,24 @@ class TypeDefault(BaseModel):
     gap_limit: PositiveInt
 
 
+_OWN_SETTINGS: Final[tuple[str, ...]] = (
+    "filter_states",
+    "scale_time_constant",
+    "initial_innovation_scale",
+    "gap_limit",
+)
+"""The settings a first entry without a type must give; the time constant
+too, when the number of states asks for one, as for any entry."""
+
+
 class Entry(BaseModel):
     """One entry of a clock: the type, or the values it overrides from a date.
 
     Parameters
     ----------
     type : str or None, optional
-        The clock's type; given by its first entry and by no other.
+        The clock's type; given by its first entry and by no other. A first
+        entry may give every setting itself instead.
     effective_mjd : float or None, optional
         The MJD the entry applies from; ``None`` for from the start.
     filter_states, time_constant, scale_time_constant : optional
@@ -368,15 +379,16 @@ class ClockConfig(BaseModel):
     types : dict of str to TypeDefault
         The default entry of each clock type.
     clocks : dict of str to tuple of Entry
-        Each clock's entries, the first giving its type.
+        Each clock's entries, the first giving its type or every setting.
 
     Raises
     ------
     pydantic.ValidationError
         If any check of the clock configuration fails: a clock with no
-        entry, or whose first entry gives no type, or a type the file does
-        not give; a later entry giving a type; a reference not of type mc;
-        an entry changing the number of states; a time constant missing or
+        entry, or whose first entry gives neither a type the file gives nor,
+        undated, every setting itself; a later entry giving a type; a
+        reference not of type mc; an entry changing the number of states;
+        a time constant missing or
         given where the number of states says otherwise; a value out of its
         range; or N_break above a gap limit at any date.
     """
@@ -425,32 +437,28 @@ class ClockConfig(BaseModel):
         Returns
         -------
         TypeDefault
-            The default of the type its first entry gives.
+            The default of the type its first entry gives, or the settings
+            it gives itself when it gives no type.
 
         Raises
         ------
         ValueError
-            If the clock has no entry, its first entry no type or a type
-            the file does not give, a later entry gives a type, a reference
-            is not of type mc, or an entry changes the number of states.
+            If the clock has no entry, its first entry neither a type the
+            file gives nor every setting, a later entry gives a type, a
+            reference is not of type mc, or an entry changes the number of
+            states.
         """
         if not entries:
             message = f"clock {name} has no entry"
             raise ValueError(message)
         kind = entries[0].type
-        if kind is None:
-            message = f"the first entry of {name} gives no type"
-            raise ValueError(message)
         if any(entry.type is not None for entry in entries[1:]):
             message = f"the type of {name} is given by its first entry only"
-            raise ValueError(message)
-        if kind not in self.types:
-            message = f"clock {name} has type {kind}, which types does not give"
             raise ValueError(message)
         if name.startswith(REFERENCE_PREFIX) and kind != REFERENCE_TYPE:
             message = f"clock {name} is a reference, so of type {REFERENCE_TYPE}"
             raise ValueError(f"{message}, not {kind}")
-        default = self.types[kind]
+        default = self._default_of(name, entries[0])
         for entry in entries:
             if entry.filter_states not in {None, default.filter_states}:
                 message = (
@@ -459,6 +467,50 @@ class ClockConfig(BaseModel):
                 )
                 raise ValueError(message)
         return default
+
+    def _default_of(self, name: str, first: Entry) -> TypeDefault:
+        """Give a clock's default: its type's, or its first entry's own settings.
+
+        Parameters
+        ----------
+        name : str
+            The clock.
+        first : Entry
+            Its first entry.
+
+        Returns
+        -------
+        TypeDefault
+            The default of the type the first entry gives; with no type,
+            the settings the first entry gives itself.
+
+        Raises
+        ------
+        ValueError
+            If the type is one the file does not give, or a first entry
+            with no type has a date or leaves out a setting.
+        """
+        if first.type is not None:
+            if first.type not in self.types:
+                message = (
+                    f"clock {name} has type {first.type}, which types does not give"
+                )
+                raise ValueError(message)
+            return self.types[first.type]
+        if first.effective_mjd is not None:
+            message = (
+                f"the first entry of {name} gives no type, so it holds from the"
+                " start and has no effective_mjd"
+            )
+            raise ValueError(message)
+        missing = [field for field in _OWN_SETTINGS if getattr(first, field) is None]
+        if missing:
+            message = (
+                f"the first entry of {name} gives no type, so it gives every"
+                f" setting; it leaves out {', '.join(missing)}"
+            )
+            raise ValueError(message)
+        return TypeDefault.model_validate(first.overrides())
 
     def _check_gap(self, entry: ClockEntry, name: str) -> None:
         """Refuse a gap limit below N_break.

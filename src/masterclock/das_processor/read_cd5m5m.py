@@ -46,7 +46,6 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    NonNegativeInt,
     PositiveFloat,
     ValidationError,
     model_validator,
@@ -121,6 +120,9 @@ MEASURED_PHASE_WIDTH: Final[int] = 9
 
 RMS_WIDTH: Final[int] = 4
 """Width of the RMS column."""
+
+RMS_MAX: Final[int] = 10**RMS_WIDTH - 1
+"""The largest RMS a line may give, ps: the most its column holds."""
 
 SWITCH_PATTERN: Final[str] = r"^[0-9][A-Z][0-9]{2}$"
 """How a switch position is spelled.
@@ -208,8 +210,8 @@ class DASMeasurement(BaseModel):
         :data:`~masterclock.domain.phase.PHASE_MAX` inclusive; a whole
         :data:`~masterclock.domain.phase.PHASE_PERIOD` would be indistinguishable
         from zero.
-    rms : NonNegativeInt
-        RMS of the measurement in picoseconds.
+    rms : int
+        RMS of the measurement in picoseconds, from 0 to :data:`RMS_MAX`.
     switch : str
         Switch position, as :data:`SWITCH_PATTERN` spells it: the reference
         digit, the switch name, and the port number on that switch. Kept
@@ -260,7 +262,7 @@ class DASMeasurement(BaseModel):
 
     measurement_mjd: Annotated[float, Field(ge=FIRST_DAY, lt=LAST_DAY + 1)]
     measured_phase: Annotated[int, Field(ge=0, le=PHASE_MAX)]
-    rms: NonNegativeInt
+    rms: Annotated[int, Field(ge=0, le=RMS_MAX)]
     switch: Annotated[str, Field(pattern=SWITCH_PATTERN)]
     clock: Annotated[str, Field(min_length=1)]
     # The four below are worked out in model_post_init. Each has a default

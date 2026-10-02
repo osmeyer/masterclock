@@ -289,15 +289,15 @@ def test_a_block_refuses_a_measurement_of_another_epoch() -> None:
 
 
 def test_a_measurement_is_written_back_in_the_das_layout() -> None:
-    """Write each column to its width, with a separator even past it."""
+    """Write each column to its width, with a separator even at its widest."""
     measurement = reader.DASMeasurement(
         measurement_mjd=60010.000694,
         measured_phase=7,
-        rms=123_456,
+        rms=9_999,
         switch="2C11",
         clock="clkd",
     )
-    assert str(measurement) == "60010.000694         7 123456 2C11 clkd"
+    assert str(measurement) == "60010.000694         7 9999 2C11 clkd"
     assert len(str(measurement).split()) == reader._FIELD_COUNT
 
 
@@ -305,7 +305,7 @@ def test_a_measurement_is_written_back_in_the_das_layout() -> None:
     st.integers(min_value=reader.FIRST_DAY, max_value=reader.LAST_DAY),
     st.integers(min_value=0, max_value=999_999),
     st.integers(min_value=0, max_value=PHASE_MAX),
-    st.integers(min_value=0, max_value=10**7),
+    st.integers(min_value=0, max_value=reader.RMS_MAX),
     st.from_regex(r"[0-9][A-Z][0-9]{2}", fullmatch=True),
     st.from_regex(r"[a-z0-9]{1,12}", fullmatch=True),
 )
@@ -746,3 +746,10 @@ def test_a_refused_line_ending_in_any_letter_is_shown_whole(
     list(reader.read_measurements(path))
     (message,) = skipped(caplog)
     assert f"{bad[:-1]!r}" in message
+
+
+def test_an_rms_past_its_column_is_malformed() -> None:
+    """Refuse an RMS above 9999, the most the DAS's four-digit column holds."""
+    assert reader.parse_line(f"60010.000694 1000 {reader.RMS_MAX} 1A01 c").rms == 9999
+    with pytest.raises(MalformedLineError, match="rms"):
+        reader.parse_line(f"60010.000694 1000 {reader.RMS_MAX + 1} 1A01 c")

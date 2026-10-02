@@ -1,7 +1,7 @@
 """Tests for src/masterclock/das_processor/files.py.
 
 The rules covered: the column table gives the measurement file a width of
-485 and 34 header lines and the double-difference file 455 and 31; every
+483 and 34 header lines and the double-difference file 455 and 31; every
 header line is exactly that wide and starts with '#', in the design's order
 with the warning second; rows are right-justified fixed-width columns
 separated by ', ', with '-' for an empty field, floats as {:+.16e} and the
@@ -55,7 +55,7 @@ from masterclock.das_processor.measurements import (
     TripleMeasurement,
     measure_pair,
 )
-from masterclock.das_processor.read_cd5m5m import DASMeasurement
+from masterclock.das_processor.read_cd5m5m import RMS_MAX, DASMeasurement
 from masterclock.domain.phase import PHASE_MAX, exact
 from masterclock.domain.series import PairKey, Row, SeriesKey, State, TripleKey
 
@@ -106,14 +106,14 @@ def row(**changes: object) -> Row:
 
 MEAS_EXAMPLE: Final = (
     "2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,"
-    "  60941.251588,  34579,      3, 2B07,            6,          1234577,"
+    "  60941.251588,  34579,    3, 2B07,            6,          1234577,"
     "          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12,"
     " +3.0000000000000000e+00,         4,                0,       812,         0,"
     "         0,             -,                       -,             -,"
     "                       -,             -,                       -, 3,"
     " +1.0000000000000000e+02, +5.0000000000000000e+01,        A",
     "2025-09-23 06:10:00+00:00,  60941.256944,                                -,"
-    "             -,      -,      -,    -,            -,                -,"
+    "             -,      -,    -,    -,            -,                -,"
     "          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12,"
     " +3.0000000000000000e+00,         4,                0,       813,         1,"
     "         0,             -,                       -,             -,"
@@ -145,8 +145,8 @@ DDIFF_EXAMPLE: Final = (
 
 
 def test_the_column_table_gives_the_widths_and_header_lengths() -> None:
-    """Work out W = 485 and 455 and 34 and 31 header lines from the table."""
-    assert (files.MEAS_WIDTH, files.MEAS_HEADER_LINES) == (485, 34)
+    """Work out W = 483 and 455 and 34 and 31 header lines from the table."""
+    assert (files.MEAS_WIDTH, files.MEAS_HEADER_LINES) == (483, 34)
     assert (files.DDIFF_WIDTH, files.DDIFF_HEADER_LINES) == (455, 31)
 
 
@@ -532,7 +532,7 @@ def meas_records(draw: st.DrawFn) -> files.MeasRecord:
     raw = DASMeasurement(
         measurement_mjd=round(start + offset * 1e-6, 6),
         measured_phase=draw(st.integers(0, PHASE_MAX)),
-        rms=draw(st.integers(0, 999_999)),
+        rms=draw(st.integers(0, RMS_MAX)),
         switch=draw(st.from_regex(r"2[A-Z][0-9]{2}", fullmatch=True)),
         clock="nav23",
     )

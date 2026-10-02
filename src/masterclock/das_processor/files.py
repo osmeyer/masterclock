@@ -20,6 +20,7 @@ the one form das_processor writes. The measurement file holds no
 innovation, so a measurement row reads back without one.
 """
 
+import math
 import os
 import re
 import shutil
@@ -34,6 +35,7 @@ from masterclock.app.exceptions import describe_error
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.app.timeutil import datetime_to_mjd, mjd_to_datetime
 from masterclock.das_processor.channels import RfChannel
+from masterclock.das_processor.config import DDIFF_SUBDIRECTORY, MEAS_SUBDIRECTORY
 from masterclock.das_processor.epochs import floor_to_ten_minutes, format_epoch
 from masterclock.das_processor.exceptions import DataFileError
 from masterclock.das_processor.measurements import PairMeasurement, TripleMeasurement
@@ -46,7 +48,6 @@ from masterclock.domain.series import (
     Reject,
     Row,
     SeriesKey,
-    build_row,
 )
 
 type FileKind = Literal["meas", "ddiff"]
@@ -736,6 +737,32 @@ def _mark_value(text: str) -> datetime:
     return floor_to_ten_minutes(mjd_to_datetime(float(text)) + _HALF_EPOCH)
 
 
+def _float_value(text: str) -> float:
+    """Read a float column.
+
+    Parameters
+    ----------
+    text : str
+        The field.
+
+    Returns
+    -------
+    float
+        The value.
+
+    Raises
+    ------
+    ValueError
+        If the field is not a number, or not a finite one, which no column
+        holds.
+    """
+    value = float(text)
+    if not math.isfinite(value):
+        message = f"{text!r} is not a finite number"
+        raise ValueError(message)
+    return value
+
+
 def _optional_float(text: str | None) -> float | None:
     """Read a float column that may be empty.
 
@@ -749,7 +776,7 @@ def _optional_float(text: str | None) -> float | None:
     float or None
         The value, or ``None``.
     """
-    return None if text is None else float(text)
+    return None if text is None else _float_value(text)
 
 
 def _row(mark: datetime, innovation: float | None, texts: list[str | None]) -> Row:
@@ -772,18 +799,18 @@ def _row(mark: datetime, innovation: float | None, texts: list[str | None]) -> R
     Raises
     ------
     ValueError
-        If a field is not of its kind.
-    FilterError
-        If the fields make no valid row.
+        If a field is not of its kind or not finite, or the fields make no
+        valid row: a pydantic ValidationError, which is not logged, so a
+        file check can read a damaged line quietly.
     """
     x, y, d, scale, segment, step, in_segment, since, rejected = texts[:9]
     rejects: list[Reject] = []
     for index in range(3):
         when, value = texts[9 + 2 * index], texts[10 + 2 * index]
         if when is not None or value is not None:
-            rejects.append((_mark_value(_given(when)), float(_given(value))))
+            rejects.append((_mark_value(_given(when)), _float_value(_given(value))))
     states, time_constant, scale_constant, flags = texts[15:]
-    return build_row(
+    return Row.model_validate(
         {
             "interpolated_datetime": mark,
             "innovation": innovation,
@@ -799,7 +826,7 @@ def _row(mark: datetime, innovation: float | None, texts: list[str | None]) -> R
             "rejects": tuple(rejects),
             "filter_states": int(_given(states)),
             "time_constant": _optional_float(time_constant),
-            "scale_time_constant": float(_given(scale_constant)),
+            "scale_time_constant": _float_value(_given(scale_constant)),
             "flags": _given(flags),
         }
     )
@@ -848,6 +875,43 @@ def _pair_measurement(
     )
 
 
+def _attempt[RecordT: (MeasRecord, DdiffRecord)](
+    line: str, build: Callable[[], RecordT], again: Callable[[RecordT], str]
+) -> tuple[RecordT | None, str, Exception | None]:
+    """Build a record from a line, and check it gives the line back, quietly.
+
+    Parameters
+    ----------
+    line : str
+        The line.
+    build : callable
+        Builds the record from the line.
+    again : callable
+        Formats a record.
+
+    Returns
+    -------
+    tuple of (record or None, str, Exception or None)
+        The record, or ``None`` with what is wrong with the line and the
+        error that showed it. Nothing is logged.
+    """
+    try:
+        record = build()
+    except (
+        ValueError,
+        FilterError,
+        PhaseError,
+    ) as exc:
+        return None, f"row {line[:25]!r} does not parse: {describe_error(exc)}", exc
+    if again(record) != line:
+        return (
+            None,
+            f"row {line[:25]!r} is not written as das_processor writes it",
+            None,
+        )
+    return record, "", None
+
+
 def _parsed[RecordT: (MeasRecord, DdiffRecord)](
     line: str, build: Callable[[], RecordT], again: Callable[[RecordT], str]
 ) -> RecordT:
@@ -873,17 +937,65 @@ def _parsed[RecordT: (MeasRecord, DdiffRecord)](
         If the line does not make a record, or the record does not format
         back to exactly the line.
     """
-    try:
-        record = build()
-    except (
-        ValueError,
-        FilterError,
-        PhaseError,
-    ) as exc:
-        _fail(f"row {line[:25]!r} does not parse: {describe_error(exc)}", exc)
-    if again(record) != line:
-        _fail(f"row {line[:25]!r} is not written as das_processor writes it")
+    record, problem, cause = _attempt(line, build, again)
+    if record is None:
+        _fail(problem, cause)
     return record
+
+
+def _meas_record(line: str, key: PairKey) -> MeasRecord:
+    """Build a measurement file record from a line, unchecked against it.
+
+    Parameters
+    ----------
+    line : str
+        The line.
+    key : (str, str)
+        The file's pair.
+
+    Returns
+    -------
+    MeasRecord
+        The record.
+    """
+    texts = _fields(line, MEAS_COLUMNS)
+    row = _row(datetime.fromisoformat(_given(texts[0])), None, texts[9:])
+    return MeasRecord(
+        measurement=_pair_measurement(texts[2:9], key, row.flags), row=row
+    )
+
+
+def _ddiff_record(line: str) -> DdiffRecord:
+    """Build a double-difference file record from a line, unchecked against it.
+
+    Parameters
+    ----------
+    line : str
+        The line.
+
+    Returns
+    -------
+    DdiffRecord
+        The record.
+    """
+    texts = _fields(line, DDIFF_COLUMNS)
+    z, innovation, sigma, used = texts[2:6]
+    row = _row(
+        datetime.fromisoformat(_given(texts[0])),
+        _optional_float(innovation),
+        texts[6:],
+    )
+    triple = None
+    if z is not None or sigma is not None or used is not None:
+        triple = TripleMeasurement.model_validate(
+            {
+                "z": int(_given(z)),
+                "double_difference_sigma": _float_value(_given(sigma)),
+                "components_used": _given(used),
+                "cold": False,
+            }
+        )
+    return DdiffRecord(measurement=triple, row=row)
 
 
 def parse_meas_row(line: str, key: PairKey) -> MeasRecord:
@@ -908,16 +1020,7 @@ def parse_meas_row(line: str, key: PairKey) -> MeasRecord:
         If the line does not parse, makes no valid record, or is not
         exactly what :func:`format_meas_row` gives for that record.
     """
-
-    def build() -> MeasRecord:
-        """Build the record from the line's fields."""
-        texts = _fields(line, MEAS_COLUMNS)
-        row = _row(datetime.fromisoformat(_given(texts[0])), None, texts[9:])
-        return MeasRecord(
-            measurement=_pair_measurement(texts[2:9], key, row.flags), row=row
-        )
-
-    return _parsed(line, build, format_meas_row)
+    return _parsed(line, lambda: _meas_record(line, key), format_meas_row)
 
 
 def parse_ddiff_row(line: str) -> DdiffRecord:
@@ -940,29 +1043,7 @@ def parse_ddiff_row(line: str) -> DdiffRecord:
         If the line does not parse, makes no valid record, or is not
         exactly what :func:`format_ddiff_row` gives for that record.
     """
-
-    def build() -> DdiffRecord:
-        """Build the record from the line's fields."""
-        texts = _fields(line, DDIFF_COLUMNS)
-        z, innovation, sigma, used = texts[2:6]
-        row = _row(
-            datetime.fromisoformat(_given(texts[0])),
-            _optional_float(innovation),
-            texts[6:],
-        )
-        triple = None
-        if z is not None or sigma is not None or used is not None:
-            triple = TripleMeasurement.model_validate(
-                {
-                    "z": int(_given(z)),
-                    "double_difference_sigma": float(_given(sigma)),
-                    "components_used": _given(used),
-                    "cold": False,
-                }
-            )
-        return DdiffRecord(measurement=triple, row=row)
-
-    return _parsed(line, build, format_ddiff_row)
+    return _parsed(line, lambda: _ddiff_record(line), format_ddiff_row)
 
 
 # ------------------------------------------------- file check and last row
@@ -1012,19 +1093,22 @@ def row_epoch(line: bytes, kind: FileKind, key: SeriesKey) -> datetime | None:
     datetime or None
         The row's epoch when the slot is a whole line, ending in its
         newline, that is ASCII and parses as a row of the file; otherwise
-        ``None``. A header line never parses as a row.
+        ``None``. A header line never parses as a row. Nothing is logged:
+        a damaged line is reported by the roll-back that removes it.
     """
     if not line.endswith(b"\n"):
         return None
     try:
-        return _parse_line(
-            line[:-1].decode("ascii"), kind, key
-        ).row.interpolated_datetime
-    except (
-        UnicodeDecodeError,
-        DataFileError,
-    ):
+        text = line[:-1].decode("ascii")
+    except UnicodeDecodeError:
         return None
+    record: MeasRecord | DdiffRecord | None
+    if kind == "meas":
+        pair = (key[0], key[1])
+        record = _attempt(text, lambda: _meas_record(text, pair), format_meas_row)[0]
+    else:
+        record = _attempt(text, lambda: _ddiff_record(text), format_ddiff_row)[0]
+    return None if record is None else record.row.interpolated_datetime
 
 
 def _slot(file: BinaryIO, index: int, size: int) -> bytes:
@@ -1214,6 +1298,29 @@ class DayBuffer:
             back = parse_ddiff_row(line).row
         self.texts[path] = self.texts.get(path, "") + line + "\n"
         self.last[key] = back
+
+    def take(self, other: DayBuffer) -> None:
+        """Move another buffer's rows into this one, all of them or none.
+
+        Parameters
+        ----------
+        other : DayBuffer
+            A buffer of rows added after this one's, such as one epoch's.
+
+        Raises
+        ------
+        DataFileError
+            If a path of ``other`` is another series' or kind's in this
+            buffer; this buffer is then unchanged.
+        """
+        for path in other.texts:
+            series = other.series_of(path)
+            if self._series.get(path, series) != series:
+                _fail(f"{path} holds the {self._series[path]} series, not {series}")
+        for path, text in other.texts.items():
+            self._series[path] = other.series_of(path)
+            self.texts[path] = self.texts.get(path, "") + text
+        self.last.update(other.last)
 
     def series_of(self, path: Path) -> tuple[FileKind, SeriesKey]:
         """Give the kind of file and the series a buffered path is for.
@@ -1603,3 +1710,36 @@ def redo_from(
         done = _keep_through(path, kind, key, None if good is None else through)
         if done != "kept":
             _log.info("data file %s %s for a redo from %s", path, done, mark)
+
+
+def ensure_archives(processed_path: Path) -> None:
+    """Make the two archive directories when they are missing (design 5.1).
+
+    Parameters
+    ----------
+    processed_path : Path
+        The directory holding the archives.
+
+    Raises
+    ------
+    DataFileError
+        If a directory cannot be made, or its name is taken by something
+        that is not a directory.
+
+    Notes
+    -----
+    A directory made here is flushed into ``processed_path``, so the files
+    written into it later are found after a crash.
+    """
+    made = False
+    for name in (MEAS_SUBDIRECTORY, DDIFF_SUBDIRECTORY):
+        directory = processed_path / name
+        if directory.is_dir():
+            continue
+        try:
+            directory.mkdir()
+        except OSError as exc:
+            _fail(f"cannot make archive {directory}: {exc}", exc)
+        made = True
+    if made:
+        _sync_directory(processed_path)

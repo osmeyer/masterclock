@@ -1242,3 +1242,44 @@ def test_a_file_that_cannot_be_read_is_not_rolled_back(tmp_path: Path) -> None:
     """Raise DataFileError when the file to roll back cannot be read."""
     with pytest.raises(DataFileError, match="cannot read"):
         files.roll_back(tmp_path / "missing.dat", "meas", KEY, E)
+
+
+def test_the_archive_directories_are_made_once(tmp_path: Path) -> None:
+    """Make meas/ and ddiff/ when missing, and leave them when there."""
+    files.ensure_archives(tmp_path)
+    assert (tmp_path / "meas").is_dir()
+    assert (tmp_path / "ddiff").is_dir()
+    (tmp_path / "meas" / "kept").write_text("")
+    files.ensure_archives(tmp_path)
+    assert (tmp_path / "meas" / "kept").exists()
+
+
+def test_an_archive_directory_that_cannot_be_made_is_refused(tmp_path: Path) -> None:
+    """Raise DataFileError when an archive's name is taken by a file."""
+    (tmp_path / "ddiff").write_text("")
+    with pytest.raises(DataFileError, match="cannot make"):
+        files.ensure_archives(tmp_path)
+
+
+def test_a_buffer_takes_another_s_rows(tmp_path: Path) -> None:
+    """Move one epoch's rows into the day's buffer, texts and newest rows."""
+    day, pair_path, triple_path = filled(tmp_path)
+    epoch = files.DayBuffer("a")
+    epoch.add(pair_path, KEY, predicted(2))
+    epoch.add(triple_path, TRIPLE, triple_record(2))
+    day.take(epoch)
+    assert day.texts[pair_path].count("\n") == 3
+    assert day.last[KEY] == predicted(2).row
+    assert day.series_of(triple_path) == ("ddiff", TRIPLE)
+
+
+def test_a_buffer_takes_nothing_from_a_clashing_one(tmp_path: Path) -> None:
+    """Refuse rows of another series for a path, leaving the buffer as it was."""
+    day, pair_path, _ = filled(tmp_path)
+    before = dict(day.texts), dict(day.last)
+    epoch = files.DayBuffer("a")
+    epoch.add(pair_path.parent / "das_a.mc2.cs7.dat", ("mc2", "cs7"), predicted(2))
+    epoch.add(pair_path, ("mc2", "hm1"), predicted(2))
+    with pytest.raises(DataFileError, match="series"):
+        day.take(epoch)
+    assert (dict(day.texts), dict(day.last)) == before

@@ -25,11 +25,17 @@ import pytest
 from pydantic import ValidationError
 
 from masterclock.app.exceptions import ConfigError
+from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import datetime_to_mjd, mjd_to_datetime
-from masterclock.das_processor import run
+from masterclock.das_processor import files, registry, run
 from masterclock.das_processor.clock_config import ClockConfig, read_clock_config
 from masterclock.das_processor.config import AppConfig
-from masterclock.das_processor.read_cd5m5m import DASData, DASMeasurement
+from masterclock.das_processor.exceptions import DataFileError
+from masterclock.das_processor.read_cd5m5m import (
+    DASData,
+    DASMeasurement,
+    read_all_blocks,
+)
 from masterclock.das_processor.read_steering import STEERING_FILE_TEMPLATE
 from masterclock.das_processor.registry import Existing
 from masterclock.domain.double_difference import Component, double_difference
@@ -64,7 +70,7 @@ CLOCKS: Final = (
 def deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
     """Make an invented deployment's directories and give its configuration."""
     for name in ("das", "steering", "processed"):
-        (tmp_path / name).mkdir()
+        (tmp_path / name).mkdir(parents=True)
     clocks = tmp_path / "clock_config.yaml"
     clocks.write_text(CLOCKS, encoding="utf-8")
     config = AppConfig.model_validate(
@@ -613,3 +619,251 @@ def test_a_rejected_pair_gives_its_triple_no_value(tmp_path: Path) -> None:
     done = run.process_triples(epoch, last, pairs)
     assert ("mc2", "mc2", "nav23") not in done.measurements
     assert done.results[("mc2", "mc2", "nav23")].row.flags == "P"
+
+
+# ---------------------------------------------------------------- the epoch loop
+
+LATE: Final = datetime(2025, 9, 23, 23, 20, tzinfo=UTC)
+"""The first epoch of the runs below: four epochs before midnight."""
+
+
+def das_files(tmp_path: Path, marks: list[datetime]) -> None:
+    """Write DAS daily files measuring mc1 against itself and nav23 at ``marks``."""
+    days: dict[int, list[str]] = {}
+    for mark in marks:
+        start = datetime_to_mjd(mark)
+        for offset, (clock, phase) in enumerate((("mc1", 1000), ("nav23", 50_000))):
+            raw = DASMeasurement(
+                measurement_mjd=round(start + (offset + 1) * 2e-5, 6),
+                measured_phase=phase,
+                rms=3,
+                switch="1A01" if clock == "mc1" else "1A02",
+                clock=clock,
+            )
+            days.setdefault(int(start), []).append(f"{raw}\n")
+    for day, lines in days.items():
+        (tmp_path / "das" / f"cd5m5m_{day}.dat").write_text(
+            "".join(lines), encoding="ascii"
+        )
+
+
+def loop_deployment(
+    tmp_path: Path, start: datetime = LATE
+) -> tuple[AppConfig, ClockConfig]:
+    """Give a deployment whose first epoch is ``start``."""
+    config, clocks = deployment(tmp_path)
+    processed = config.processed.model_copy(
+        update={"start_from_mjd": datetime_to_mjd(start)}
+    )
+    return config.model_copy(update={"processed": processed}), clocks
+
+
+def rows_of(config: AppConfig, key: SeriesKey) -> list[Row]:
+    """Read every row of a series' file."""
+    path = registry.series_file(config.processed.processed_path, "a", key)
+    kind: files.FileKind = "meas" if len(key) == 2 else "ddiff"
+    size = files.WIDTHS[kind] + 1
+    data = path.read_bytes()[files.HEADER_LINES[kind] * size :]
+    lines = [data[i : i + size - 1].decode() for i in range(0, len(data), size)]
+    if kind == "meas":
+        return [files.parse_meas_row(line, (key[0], key[1])).row for line in lines]
+    return [files.parse_ddiff_row(line).row for line in lines]
+
+
+SERIES: Final[tuple[SeriesKey, ...]] = (
+    ("mc1", "mc1"),
+    ("mc1", "nav23"),
+    ("mc1", "mc1", "nav23"),
+)
+"""The series of the loop's deployment."""
+
+
+def recorded_writes(monkeypatch: pytest.MonkeyPatch) -> list[datetime | None]:
+    """Record, at every write, the newest epoch the buffer holds text for."""
+    marks: list[datetime | None] = []
+    real = files.write_buffer
+
+    def spy(buffer: files.DayBuffer) -> None:
+        """Record the newest buffered epoch, then write."""
+        newest = (
+            [buffer.last[key].interpolated_datetime for key in buffer.last]
+            if buffer.texts
+            else []
+        )
+        marks.append(max(newest, default=None))
+        real(buffer)
+
+    monkeypatch.setattr(run, "write_buffer", spy)
+    return marks
+
+
+def test_a_day_is_written_after_its_last_epoch_and_at_the_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Write after 23:50 UTC and when the data end (5.8)."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE + i * T for i in range(6)])
+    writes = recorded_writes(monkeypatch)
+    run.run(config, clocks, None, ShutdownHandler())
+    assert writes == [LATE + 3 * T, LATE + 5 * T]
+    for key in SERIES:
+        assert [row.interpolated_datetime for row in rows_of(config, key)] == [
+            LATE + i * T for i in range(6)
+        ]
+
+
+def test_a_day_without_a_block_at_23_50_is_still_written_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Write after 23:50 although the DAS measured nothing then (review focus 2)."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE + i * T for i in (0, 1, 2, 4, 5)])
+    writes = recorded_writes(monkeypatch)
+    run.run(config, clocks, None, ShutdownHandler())
+    assert writes == [LATE + 3 * T, LATE + 5 * T]
+    assert rows_of(config, ("mc1", "mc1"))[3].flags == "P"
+
+
+def test_a_gap_gives_predicted_rows_and_the_run_stops_at_the_end_of_the_data(
+    tmp_path: Path,
+) -> None:
+    """Give every series a row for a gap epoch, and nothing after the data (6.2)."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE, LATE + T, LATE + 4 * T])
+    run.run(config, clocks, None, ShutdownHandler())
+    self_rows = rows_of(config, ("mc1", "mc1"))
+    assert [row.interpolated_datetime for row in self_rows] == [
+        LATE + i * T for i in range(5)
+    ]
+    assert [row.flags for row in self_rows] == ["RD", "RD", "PD", "PD", "RD"]
+
+
+def test_steps_stop_the_run_after_that_many_epochs(tmp_path: Path) -> None:
+    """Process --steps N epochs and stop, writing the buffer (6.1)."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE + i * T for i in range(6)])
+    run.run(config, clocks, 2, ShutdownHandler())
+    assert len(rows_of(config, ("mc1", "mc1"))) == 2
+    run.run(config, clocks, 1, ShutdownHandler())
+    assert len(rows_of(config, ("mc1", "mc1"))) == 3
+
+
+def test_a_shutdown_stops_between_epochs_after_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Finish the epoch, write the buffer and stop when a shutdown is asked (6.1)."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE + i * T for i in range(6)])
+    shutdown = ShutdownHandler()
+    real = run.process_epoch
+
+    def asking(*args: object) -> run.EpochDone:
+        """Process the epoch, asking for a shutdown during the second."""
+        done = real(*args)  # type: ignore[arg-type]
+        if done.epoch.interpolated_datetime == LATE + T:
+            shutdown.request_shutdown()
+        return done
+
+    monkeypatch.setattr(run, "process_epoch", asking)
+    run.run(config, clocks, None, shutdown)
+    assert len(rows_of(config, ("mc1", "mc1"))) == 2
+    assert len(rows_of(config, ("mc1", "mc1", "nav23"))) == 2
+
+
+def test_a_run_restarted_after_every_epoch_writes_the_same_files(
+    tmp_path: Path,
+) -> None:
+    """Give byte-identical files whether run as a batch or one epoch at a time (I5)."""
+    batch, clocks = loop_deployment(tmp_path / "batch")
+    das_files(tmp_path / "batch", [LATE + i * T for i in range(6)])
+    run.run(batch, clocks, None, ShutdownHandler())
+    stepped, clocks = loop_deployment(tmp_path / "stepped")
+    das_files(tmp_path / "stepped", [LATE + i * T for i in range(6)])
+    for _ in range(8):
+        run.run(stepped, clocks, 1, ShutdownHandler())
+    for key in SERIES:
+        one = registry.series_file(batch.processed.processed_path, "a", key)
+        other = registry.series_file(stepped.processed.processed_path, "a", key)
+        assert one.read_bytes() == other.read_bytes(), key
+
+
+def test_a_damaged_line_found_at_the_start_redoes_every_file_from_its_epoch(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Roll every file back before a damaged line, then redo them alike (6.7, U26)."""
+    clean, clocks = loop_deployment(tmp_path / "clean")
+    das_files(tmp_path / "clean", [LATE + i * T for i in range(6)])
+    run.run(clean, clocks, None, ShutdownHandler())
+    damaged, clocks = loop_deployment(tmp_path / "damaged")
+    das_files(tmp_path / "damaged", [LATE + i * T for i in range(6)])
+    run.run(damaged, clocks, None, ShutdownHandler())
+    path = registry.series_file(damaged.processed.processed_path, "a", ("mc1", "nav23"))
+    data = bytearray(path.read_bytes())
+    size = files.MEAS_WIDTH + 1
+    data[(files.MEAS_HEADER_LINES + 2) * size + 3] = ord("x")
+    path.write_bytes(bytes(data[: -size // 2]))
+    assert run.next_epoch(damaged) == LATE + 2 * T
+    assert {r.levelname for r in caplog.records} == {"WARNING"}
+    run.run(damaged, clocks, None, ShutdownHandler())
+    for key in SERIES:
+        one = registry.series_file(clean.processed.processed_path, "a", key)
+        other = registry.series_file(damaged.processed.processed_path, "a", key)
+        assert one.read_bytes() == other.read_bytes(), key
+
+
+def test_with_no_files_the_run_starts_at_start_from_mjd(tmp_path: Path) -> None:
+    """Start at the epoch containing start_from_mjd when no file exists (6.7)."""
+    config, _ = loop_deployment(tmp_path, LATE + 2 * T + timedelta(seconds=90))
+    assert run.next_epoch(config) == LATE + 2 * T
+
+
+def test_a_block_before_the_next_epoch_is_passed_over(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skip a block earlier than the epoch the run is at, rather than loop on it."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE - T, LATE, LATE + T])
+    real = read_all_blocks
+
+    def from_earlier(directory: Path, start_at_mjd: float | None = None) -> object:
+        """Read from one epoch before the start."""
+        del start_at_mjd
+        return real(directory, datetime_to_mjd(LATE - T))
+
+    monkeypatch.setattr(run, "read_all_blocks", from_earlier)
+    run.run(config, clocks, None, ShutdownHandler())
+    rows = rows_of(config, ("mc1", "mc1"))
+    assert [row.interpolated_datetime for row in rows] == [LATE, LATE + T]
+
+
+def test_an_epoch_that_fails_adds_none_of_its_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leave the day buffer as it was when an epoch fails part way (5.8 step 1)."""
+    config, clocks = loop_deployment(tmp_path)
+    das_files(tmp_path, [LATE + i * T for i in range(3)])
+    buffer = files.DayBuffer("a")
+    blocks = list(read_all_blocks(tmp_path / "das", datetime_to_mjd(LATE)))
+    files.ensure_archives(config.processed.processed_path)
+    run.process_epoch(LATE, blocks[0], buffer, config, clocks)
+    before = dict(buffer.texts), dict(buffer.last)
+    real = files.DayBuffer.add
+    calls: list[SeriesKey] = []
+
+    def failing(
+        self: files.DayBuffer,
+        path: Path,
+        key: SeriesKey,
+        record: files.MeasRecord | files.DdiffRecord,
+    ) -> None:
+        """Add the first row, then fail on the second, as a bad value would."""
+        calls.append(key)
+        if len(calls) == 2:
+            message = "injected"
+            raise DataFileError(message)
+        real(self, path, key, record)
+
+    monkeypatch.setattr(files.DayBuffer, "add", failing)
+    with pytest.raises(DataFileError, match="injected"):
+        run.process_epoch(LATE + T, blocks[1], buffer, config, clocks)
+    assert (dict(buffer.texts), dict(buffer.last)) == before

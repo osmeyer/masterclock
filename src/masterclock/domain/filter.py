@@ -26,6 +26,10 @@ A measurement is accepted when it passes the gate (:func:`within_gate`,
 :func:`rms_ok`). One that fails is a counted reject (:func:`count_reject`),
 and three in a row are looked at for a step (:func:`classify`): agreeing,
 they are a phase step; on a line, a frequency step (:func:`accept_step`).
+
+:func:`filter_step` puts it all together for one series at one epoch: it
+takes the series' measurement as plain values (:class:`Measured`) and
+gives its row and whether it cold-started (:class:`StepResult`).
 """
 
 import dataclasses
@@ -34,9 +38,9 @@ from dataclasses import dataclass, fields
 from datetime import datetime
 from fractions import Fraction
 from itertools import pairwise
-from typing import TYPE_CHECKING, Final, Literal
+from typing import Annotated, Final, Literal, Self, cast
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
@@ -53,13 +57,11 @@ from masterclock.domain.series import (
     MAX_REJECTS,
     FilterStates,
     Reject,
+    Row,
     SeriesParams,
     State,
     build_row,
 )
-
-if TYPE_CHECKING:
-    from masterclock.domain.series import Row
 
 _T: Final[int] = EPOCH_SECONDS
 """One epoch, s: whole, so a phase moved on by it stays exact."""
@@ -955,3 +957,238 @@ def anchor_of(last: Row | None) -> int | None:
     if last is None or "D" not in last.flags or not last.rejects:
         return None
     return round_even(exact(last.rejects[-1][1]))
+
+
+# ------------------------------------------------------------- filter step
+
+
+class Measured(BaseModel):
+    """What one series measured at an epoch: a pair's or a triple's value.
+
+    Parameters
+    ----------
+    z : int
+        The measurement at the epoch start, ps: a pair's decycled phase or
+        a triple's double difference.
+    rms : int or None, optional
+        For a pair, the rms the DAS gave, ps, at least 0; ``None`` for a
+        triple.
+    sigma_dd : float or None, optional
+        For a triple, the double difference's sigma, ps, above zero;
+        ``None`` for a pair.
+    slip : bool, optional
+        Whether the slip check corrected a pair's cycle count. Never set
+        for a triple.
+    cold : bool, optional
+        Whether a pair that gave a triple's value cold-started at the
+        epoch. Never set for a pair.
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If both or neither of ``rms`` and ``sigma_dd`` are given, a value is
+        out of range or of the wrong kind, a triple is marked as slip
+        corrected, or a pair as following a cold start.
+
+    Examples
+    --------
+    >>> Measured(z=1_234_577, rms=3).floor
+    3.0
+    >>> Measured(z=6_666_667, sigma_dd=3.3166).floor
+    3.3166
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    z: int
+    rms: Annotated[int, Field(ge=0)] | None = None
+    sigma_dd: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
+    slip: bool = False
+    cold: bool = False
+
+    @model_validator(mode="after")
+    def _check_kind(self) -> Self:
+        """Refuse a measurement that is not wholly a pair's or a triple's.
+
+        Returns
+        -------
+        Self
+            The measurement, unchanged.
+
+        Raises
+        ------
+        ValueError
+            If both or neither of ``rms`` and ``sigma_dd`` are given, a
+            triple is slip corrected or a pair follows a cold start.
+        """
+        if (self.rms is None) == (self.sigma_dd is None):
+            message = "a measurement has an rms (a pair) or a sigma_dd (a triple)"
+            raise ValueError(message)
+        if self.sigma_dd is not None and self.slip:
+            message = "the slip check corrects pairs only"
+            raise ValueError(message)
+        if self.rms is not None and self.cold:
+            message = "only a triple follows its component pairs' cold starts"
+            raise ValueError(message)
+        return self
+
+    @property
+    def floor(self) -> float:
+        """The lowest the innovation scale may go: a pair's rms, a triple's sigma_dd."""
+        if self.rms is not None:
+            return float(self.rms)
+        return cast("float", self.sigma_dd)  # a triple's, given when rms is not
+
+
+class StepResult(BaseModel):
+    """The row a series writes at an epoch, and whether it cold-started there.
+
+    Parameters
+    ----------
+    row : Row
+        The series' row at the epoch.
+    cold : bool
+        Whether the row is a cold start: a triple built from this pair's
+        value then goes dormant (design 12.6).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    row: Row
+    cold: bool
+
+
+def params_changed(params: SeriesParams, last: Row) -> bool:
+    """Tell whether a series' settings changed its time constants (design 8.7).
+
+    Parameters
+    ----------
+    params : SeriesParams
+        The settings in force at the epoch.
+    last : Row
+        The series' last row, which carries its segment's time constants.
+
+    Returns
+    -------
+    bool
+        Whether M or M_sigma differ from the last row's.
+    """
+    return (params.M, params.M_sigma) != (last.time_constant, last.scale_time_constant)
+
+
+def filter_step(
+    mark: datetime,
+    params: SeriesParams,
+    last: Row | None,
+    prediction: State | None,
+    measured: Measured | None,
+    *,
+    excluded: bool = False,
+) -> StepResult:
+    """Give a series' row at an epoch: the whole of the decision flow (design 9.6).
+
+    Parameters
+    ----------
+    mark : datetime
+        The epoch start E.
+    params : SeriesParams
+        The settings in force at E.
+    last : Row or None
+        The series' last row, or ``None`` for a new series.
+    prediction : State or None
+        The prediction at E from ``last`` (see :func:`predict`), or
+        ``None`` when the series has none.
+    measured : Measured or None
+        The series' measurement at E, or ``None`` when there is none.
+    excluded : bool, optional
+        Whether screening or the slip check excluded the measurement.
+
+    Returns
+    -------
+    StepResult
+        The row, and whether it cold-started. First, a tracked series whose
+        time constants changed starts a warm segment (see
+        :func:`start_segment`); the row then also carries the outcome.
+        With no measurement, the row holds the prediction (see :func:`hold`).
+        A series with no prediction, or a triple one of whose pairs
+        cold-started, acquires (see :func:`acquire`). Otherwise the
+        measurement goes through the gate.
+
+    Raises
+    ------
+    FilterError
+        If ``params`` is for another model than the series', or a row
+        breaks a rule of :class:`Row`.
+    """
+    draft = carry(mark, last, params, slip=measured is not None and measured.slip)
+    if last is not None and "D" not in last.flags and params_changed(params, last):
+        draft = start_segment(draft, params, keep_offset=True)
+    if measured is None:
+        return StepResult(row=hold(draft, prediction, "P", params), cold=False)
+    if measured.cold:
+        draft = dataclasses.replace(draft, rejects=())
+        prediction = None
+    if prediction is None:
+        row = acquire(draft, measured.z, params)
+        return StepResult(row=row, cold="D" not in row.flags)
+    row = _gate(draft, prediction, measured, params, excluded=excluded)
+    return StepResult(row=row, cold=False)
+
+
+def _gate(
+    draft: RowDraft,
+    prediction: State,
+    measured: Measured,
+    params: SeriesParams,
+    *,
+    excluded: bool,
+) -> Row:
+    """Accept, hold or reject a measurement against its prediction (design 9.6).
+
+    Parameters
+    ----------
+    draft : RowDraft
+        The row as built so far.
+    prediction : State
+        The series' prediction at the epoch.
+    measured : Measured
+        The measurement.
+    params : SeriesParams
+        The settings in force.
+    excluded : bool
+        Whether screening or the slip check excluded the measurement.
+
+    Returns
+    -------
+    Row
+        Accepted when the measurement passes the gate and is not excluded.
+        Held as X when it is excluded inside the gate, not counted.
+        Otherwise a counted reject, which may show a step (see
+        :func:`accept_step`), make the series dormant when the rejects
+        reach ``n_break`` (the measurement then starts its acquisition
+        buffer), or is held as R.
+
+    Raises
+    ------
+    FilterError
+        If a row breaks a rule of :class:`Row`.
+    """
+    innovation = measured.z - prediction.x
+    draft = dataclasses.replace(draft, innovation=float(innovation))
+    if draft.innovation_scale is None:
+        message = f"a measurement at {draft.interpolated_datetime} has no scale"
+        _log.error(message)
+        raise FilterError(message)
+    within = within_gate(innovation, draft.innovation_scale)
+    rms_passes = measured.rms is None or rms_ok(measured.rms, params.rms_max)
+    if within and rms_passes and not excluded:
+        return accept(draft, prediction, innovation, measured.floor)
+    if within and excluded:
+        return hold(draft, prediction, "X", params)
+    draft = count_reject(draft, innovation)
+    stepped = accept_step(draft, prediction, measured.z, measured.floor, params)
+    if stepped is not None:
+        return stepped
+    if draft.consecutive_rejects >= params.n_break:
+        return acquire(dataclasses.replace(draft, rejects=()), measured.z, params)
+    return hold(draft, prediction, "R", params)

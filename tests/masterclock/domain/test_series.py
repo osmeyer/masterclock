@@ -10,8 +10,8 @@ a whole one, its phase in whole femtoseconds, with no rate or drift where
 its model has none; at most three rejects are held, oldest first; a time
 constant is held exactly when the model has more than one state; every
 float is finite; a row gives its state unless it is dormant; every model is
-frozen and strict and refuses unknown fields; and replace builds a changed
-row and checks it again.
+frozen and strict and refuses unknown fields; and build_row builds a row
+from its fields, and replace a changed row, checking it again.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -399,3 +399,17 @@ def test_replace_checks_the_changed_row_again(changes: dict[str, object]) -> Non
     """Raise FilterError for a change that makes the row invalid."""
     with pytest.raises(FilterError, match="invalid row"):
         series.replace(row(), **changes)
+
+
+# --------------------------------------------------------------- build_row
+
+
+def test_build_row_builds_a_row_from_its_fields() -> None:
+    """Give the row whose fields are the values given."""
+    assert series.build_row(dict(row())) == row()
+
+
+def test_build_row_checks_the_row() -> None:
+    """Raise FilterError for fields that make no valid row."""
+    with pytest.raises(FilterError, match="invalid row"):
+        series.build_row({**dict(row()), "flags": "AR"})

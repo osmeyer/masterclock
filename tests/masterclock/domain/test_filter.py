@@ -8,19 +8,33 @@ with the phase exact; a dormant or missing last row gives no prediction;
 the update adds the gains times the innovation, the phase exact; and a
 noise-free ramp or parabola is followed to within 1 ps, whether the phase
 is kept exact or each row stores it in whole femtoseconds.
+
+The row lifecycle: a row starts from the last row moved on one epoch, or
+dormant in segment 0 for a new series; an accepted row holds the update,
+clears the counters and the buffer, and moves the innovation scale by the
+innovation before the update, never below its floor; a held row (P, X or R)
+stores the prediction and keeps the scale, the counters and the buffer, one
+more epoch since an accept; a held row past the gap limit, or with no
+prediction, is dormant, with no state; a cold start begins segment + 1 at
+the measurement with sigma0; a warm segment start keeps the state and the
+step offset and takes the new time constants, never a new model; a row of a
+2- or 3-state series is unsettled while its segment is younger than five
+time constants, a dormant or 1-state row never; flags are written in the
+order ARXPDSNU; and a 1-state series passes its measurements through.
 """
 
+import dataclasses
 import math
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
-from typing import Final
+from typing import Final, Literal
 
 import pytest
 
 from masterclock.domain import filter as estimator
 from masterclock.domain.exceptions import FilterError
 from masterclock.domain.phase import EPOCH_SECONDS, exact, round_even, to_fs
-from masterclock.domain.series import Row, State
+from masterclock.domain.series import Row, SeriesParams, State
 
 MARK: Final = datetime(2025, 9, 23, 5, 50, tzinfo=UTC)
 """An invented ten-minute mark."""
@@ -350,3 +364,451 @@ def test_a_parabola_stored_in_femtoseconds_is_followed_within_a_picosecond(
     """
     innovations = follow_rows(3, M, parabola(M))
     assert max(abs(v) for v in innovations[int(20 * M) :]) <= 1
+
+
+# ------------------------------------------------------------ row lifecycle
+
+
+def params(**changes: object) -> SeriesParams:
+    """Build the worked epoch's settings, with ``changes`` applied."""
+    values: dict[str, object] = {
+        "model": 3,
+        "M": 100.0,
+        "M_sigma": 50.0,
+        "sigma0": 5.0,
+        "gmax": 432,
+        "n_break": 36,
+        "rms_max": 80,
+    }
+    values.update(changes)
+    return SeriesParams.model_validate(values)
+
+
+ONE_STATE: Final[dict[str, object]] = {
+    "y": 0.0,
+    "d": 0.0,
+    "filter_states": 1,
+    "time_constant": None,
+}
+"""The changes that make a last row one of a 1-state series."""
+
+DORMANT: Final[dict[str, object]] = {
+    "innovation": None,
+    "x_fs": None,
+    "y": None,
+    "d": None,
+    "innovation_scale": None,
+}
+"""The changes that make a last row a dormant one, apart from its flags."""
+
+NEXT: Final = MARK + timedelta(minutes=10)
+"""The epoch after the worked epoch's last row: the worked epoch itself."""
+
+
+def moved_on(last: Row, **changes: object) -> estimator.RowDraft:
+    """Carry ``last`` on to the next epoch, with ``changes`` made to the draft."""
+    draft = estimator.carry(
+        last.interpolated_datetime + timedelta(minutes=10), last, params()
+    )
+    return dataclasses.replace(draft, **changes)  # type: ignore[arg-type]
+
+
+def test_a_draft_has_the_fields_of_a_row() -> None:
+    """Give RowDraft exactly Row's fields, in the same order, so finish fits."""
+    names = [field.name for field in dataclasses.fields(estimator.RowDraft)]
+    assert names == list(Row.model_fields)
+
+
+def test_a_new_series_starts_dormant_in_segment_zero() -> None:
+    """Start a series with no last row with no state and every counter at 0."""
+    draft = estimator.carry(NEXT, None, params(model=2, M=30.0, M_sigma=40.0))
+    assert draft == estimator.RowDraft(
+        interpolated_datetime=NEXT,
+        innovation=None,
+        x_fs=None,
+        y=None,
+        d=None,
+        innovation_scale=None,
+        segment=0,
+        step_offset=0,
+        epochs_in_segment=0,
+        epochs_since_accept=0,
+        consecutive_rejects=0,
+        rejects=(),
+        filter_states=2,
+        time_constant=30.0,
+        scale_time_constant=40.0,
+        flags="",
+    )
+
+
+def test_carry_moves_the_last_row_on_one_epoch() -> None:
+    """Keep the last row's fields, one more epoch in its segment, no innovation."""
+    last = last_row(
+        innovation=-4.5,
+        consecutive_rejects=2,
+        rejects=((MARK - timedelta(minutes=10), 40.0), (MARK, -4.5)),
+        epochs_since_accept=2,
+        flags="R",
+    )
+    draft = estimator.carry(NEXT, last, params(M=150.0))
+    expected = {
+        **dict(last),
+        "interpolated_datetime": NEXT,
+        "innovation": None,
+        "epochs_in_segment": 812,
+        "flags": "",
+    }
+    assert dataclasses.asdict(draft) == expected
+
+
+def test_a_slip_correction_marks_the_row() -> None:
+    """Carry S into the row when the slip check corrected its measurement."""
+    draft = estimator.carry(NEXT, last_row(), params(), slip=True)
+    assert draft.flags == "S"
+    prediction = estimator.predict(last_row(), NO_INPUT)
+    assert prediction is not None
+    row = estimator.accept(draft, prediction, 1_234_577 - prediction.x, 3)
+    assert row.flags == "AS"
+
+
+def test_the_worked_epoch_gives_the_rows_of_the_measurement_file() -> None:
+    """Reproduce the two example rows of design 5.4: accepted, then predicted."""
+    last = last_row()
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    accepted = estimator.accept(
+        estimator.carry(NEXT, last, params()), prediction, 1_234_577 - prediction.x, 3
+    )
+    assert accepted == last_row(
+        interpolated_datetime=NEXT,
+        innovation=float(1_234_577 - prediction.x),
+        x_fs=1_234_574_457,
+        y=0.01230129052352643,
+        d=7.169515400974333e-12,
+        epochs_in_segment=812,
+    )
+    following = estimator.predict(accepted, NO_INPUT)
+    assert following is not None
+    later = NEXT + timedelta(minutes=10)
+    predicted = estimator.hold(
+        estimator.carry(later, accepted, params()), following, "P", params()
+    )
+    assert predicted == last_row(
+        interpolated_datetime=later,
+        innovation=None,
+        x_fs=1_234_581_838,
+        y=0.012301294825235671,
+        d=7.169515400974333e-12,
+        epochs_in_segment=813,
+        epochs_since_accept=1,
+        flags="P",
+    )
+
+
+def test_an_accept_clears_the_counters_and_the_buffer() -> None:
+    """Set consecutive_rejects and epochs_since_accept to 0, empty the buffer."""
+    last = last_row(
+        innovation=-4.5,
+        consecutive_rejects=2,
+        rejects=((MARK - timedelta(minutes=10), 40.0), (MARK, -4.5)),
+        epochs_since_accept=2,
+        flags="R",
+    )
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    row = estimator.accept(moved_on(last), prediction, Fraction(1), 3)
+    assert (row.consecutive_rejects, row.rejects, row.epochs_since_accept) == (0, (), 0)
+    assert row.flags == "A"
+
+
+@pytest.mark.parametrize(
+    ("scale", "innovation", "floor", "expected"),
+    [
+        (4.0, 10, 3, math.sqrt(0.98 * 16 + 0.02 * 100)),
+        (4.0, -10, 3, math.sqrt(0.98 * 16 + 0.02 * 100)),
+        (4.0, 0, 3, math.sqrt(0.98 * 16)),
+        (3.0, 1, 3, 3.0),
+        (4.0, 0, 3.99, math.sqrt(3.99**2)),
+    ],
+)
+def test_an_accept_moves_the_innovation_scale_but_not_below_its_floor(
+    scale: float, innovation: int, floor: float, expected: float
+) -> None:
+    """Average the squared innovation in with w = 1/M_sigma, kept above the floor."""
+    last = last_row(innovation_scale=scale)
+    prediction = State(x=Fraction(1_234_574), y=0.0123)
+    row = estimator.accept(moved_on(last), prediction, Fraction(innovation), floor)
+    assert row.innovation_scale == expected
+
+
+def test_an_accept_takes_the_innovation_before_the_update() -> None:
+    """Write the innovation given, and move the scale by it, not the residual."""
+    last = last_row(innovation_scale=4.0)
+    prediction = State(x=Fraction(1_000), y=0.0)
+    row = estimator.accept(moved_on(last), prediction, Fraction(21, 2), 1)
+    assert row.innovation == 10.5
+    assert row.innovation_scale == math.sqrt(0.98 * 16 + 0.02 * 10.5**2)
+
+
+def test_an_accept_needs_a_series_with_an_innovation_scale() -> None:
+    """Raise FilterError for an accept on a draft that has no scale."""
+    draft = moved_on(last_row(), innovation_scale=None)
+    with pytest.raises(FilterError, match="no innovation scale"):
+        estimator.accept(draft, State(x=Fraction(0), y=0.0), Fraction(0), 3)
+
+
+@pytest.mark.parametrize("flag", ["P", "X", "R"])
+def test_a_held_row_carries_the_prediction(flag: Literal["P", "X", "R"]) -> None:
+    """Store the prediction, keep the scale and counters, one more epoch unaccepted."""
+    last = last_row(
+        innovation=-4.5,
+        consecutive_rejects=1,
+        rejects=((MARK, -40.0),),
+        epochs_since_accept=1,
+        flags="R",
+    )
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    innovation = None if flag == "P" else 7.25
+    row = estimator.hold(
+        moved_on(last, innovation=innovation), prediction, flag, params()
+    )
+    assert row == last_row(
+        interpolated_datetime=NEXT,
+        innovation=innovation,
+        x_fs=to_fs(prediction.x),
+        y=prediction.y,
+        d=prediction.d,
+        epochs_in_segment=812,
+        epochs_since_accept=2,
+        consecutive_rejects=1,
+        rejects=((MARK, -40.0),),
+        flags=flag,
+    )
+
+
+def test_an_excluded_measurement_within_the_gate_leaves_the_counts() -> None:
+    """Give X with consecutive_rejects and the buffer unchanged (U12)."""
+    rejects = ((MARK - timedelta(minutes=10), 30.0), (MARK, 31.0))
+    last = last_row(
+        innovation=31.0, consecutive_rejects=2, rejects=rejects, epochs_since_accept=2
+    )
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    row = estimator.hold(moved_on(last, innovation=2.0), prediction, "X", params())
+    assert (row.flags, row.consecutive_rejects, row.rejects) == ("X", 2, rejects)
+    assert row.epochs_since_accept == 3
+    assert row.x_fs == to_fs(prediction.x)
+
+
+def run_gap(epochs: int, gmax: int) -> Row:
+    """Hold a tracked series through ``epochs`` epochs with no measurement."""
+    settings = params(gmax=gmax, n_break=3)
+    last = last_row()
+    for _ in range(epochs):
+        prediction = estimator.predict(last, NO_INPUT)
+        draft = estimator.carry(
+            last.interpolated_datetime + timedelta(minutes=10), last, settings
+        )
+        last = estimator.hold(draft, prediction, "P", settings)
+    return last
+
+
+@pytest.mark.parametrize("gmax", [3, 6])
+def test_a_gap_of_the_gap_limit_is_still_predicted(gmax: int) -> None:
+    """Give P rows for G_max epochs, then accept the next measurement (U13)."""
+    last = run_gap(gmax, gmax)
+    assert (last.flags, last.epochs_since_accept) == ("P", gmax)
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    row = estimator.accept(
+        moved_on(last), prediction, round_even(prediction.x) - prediction.x, 3
+    )
+    assert (row.flags, row.epochs_since_accept, row.segment) == ("A", 0, 4)
+
+
+@pytest.mark.parametrize("gmax", [3, 6])
+def test_a_gap_past_the_gap_limit_goes_dormant(gmax: int) -> None:
+    """Give a D row at G_max + 1 epochs, with no state and no prediction (U13)."""
+    last = run_gap(gmax + 1, gmax)
+    assert (last.flags, last.epochs_since_accept) == ("PD", gmax + 1)
+    assert (last.x_fs, last.y, last.d, last.innovation_scale) == (None,) * 4
+    assert (last.segment, last.step_offset) == (4, 0)
+    assert estimator.predict(last, NO_INPUT) is None
+    later = run_gap(gmax + 3, gmax)
+    assert (later.flags, later.epochs_since_accept) == ("PD", gmax + 3)
+
+
+def test_a_held_row_without_a_prediction_is_dormant() -> None:
+    """Make a held row dormant when the series has no prediction."""
+    row = estimator.hold(moved_on(last_row()), None, "R", params())
+    assert row.flags == "RD"
+    assert row.x_fs is None
+
+
+@pytest.mark.parametrize("flag", ["P", "X", "R"])
+def test_a_dormant_row_keeps_its_segment_and_offset(
+    flag: Literal["P", "X", "R"],
+) -> None:
+    """Empty the state and the buffer, keep segment and step_offset (13.4)."""
+    last = last_row(step_offset=-37, rejects=((MARK, 12.0),), consecutive_rejects=1)
+    row = estimator.dormant(moved_on(last), flag)
+    assert row.flags == f"{flag}D"
+    assert (row.x_fs, row.y, row.d, row.innovation_scale) == (None,) * 4
+    assert (row.segment, row.step_offset, row.rejects) == (4, -37, ())
+
+
+def test_a_dormant_row_can_keep_its_acquisition_buffer() -> None:
+    """Keep the buffer when asked: it holds the measurements to acquire from."""
+    buffered = ((MARK, 1_234_000.0),)
+    last = last_row(flags="RD", rejects=buffered, segment=0, **DORMANT)
+    row = estimator.dormant(moved_on(last), "R", keep_buffer=True)
+    assert (row.flags, row.rejects) == ("RD", buffered)
+
+
+@pytest.mark.parametrize(
+    ("model", "M", "flags"), [(3, 100.0, "ANU"), (2, 30.0, "ANU"), (1, None, "AN")]
+)
+def test_a_cold_start_begins_a_segment_from_the_measurement(
+    model: Literal[1, 2, 3], M: float | None, flags: str
+) -> None:
+    """Start segment + 1 at [z, 0, 0] with sigma0 and step_offset 0 (8.6, 13.4)."""
+    settings = params(model=model, M=M, M_sigma=40.0, sigma0=6.5)
+    last = last_row(
+        filter_states=model,
+        time_constant=M,
+        flags="RD",
+        segment=2,
+        step_offset=15,
+        consecutive_rejects=4,
+        rejects=((MARK, 1_234_570.0),),
+        epochs_since_accept=9,
+        **DORMANT,
+    )
+    draft = estimator.carry(NEXT, last, settings)
+    row = estimator.cold_start(draft, 1_234_577, settings)
+    assert row == Row(
+        interpolated_datetime=NEXT,
+        innovation=None,
+        x_fs=1_234_577_000,
+        y=0.0,
+        d=0.0,
+        innovation_scale=6.5,
+        segment=3,
+        step_offset=0,
+        epochs_in_segment=0,
+        epochs_since_accept=0,
+        consecutive_rejects=0,
+        rejects=(),
+        filter_states=model,
+        time_constant=M,
+        scale_time_constant=40.0,
+        flags=flags,
+    )
+
+
+def test_a_configuration_change_starts_a_warm_segment() -> None:
+    """Carry X- and step_offset into segment + 1 with the new M: N U + outcome (8.7)."""
+    last = last_row(step_offset=25)
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    changed = params(M=150.0, M_sigma=60.0)
+    draft = estimator.start_segment(moved_on(last), changed, keep_offset=True)
+    row = estimator.hold(draft, prediction, "P", changed)
+    assert (row.flags, row.segment, row.epochs_in_segment) == ("PNU", 5, 0)
+    assert (row.step_offset, row.time_constant, row.scale_time_constant) == (
+        25,
+        150.0,
+        60.0,
+    )
+    assert (row.x_fs, row.innovation_scale) == (to_fs(prediction.x), 3.0)
+
+
+def test_a_frequency_step_starts_a_warm_segment_and_accepts() -> None:
+    """Give A N U, segment + 1, step_offset carried, then the update (13.4)."""
+    last = last_row(step_offset=25)
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    draft = estimator.start_segment(moved_on(last), params(), keep_offset=True)
+    row = estimator.accept(draft, prediction, Fraction(2), 3)
+    assert (row.flags, row.segment, row.step_offset) == ("ANU", 5, 25)
+    assert row.x_fs == to_fs(estimator.update(prediction, Fraction(2), 3, 100.0).x)
+
+
+def test_a_phase_step_keeps_the_segment() -> None:
+    """Accept within the same segment, with the step offset the step gave (13.4)."""
+    last = last_row(step_offset=25)
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    row = estimator.accept(moved_on(last, step_offset=525), prediction, Fraction(2), 3)
+    assert (row.flags, row.segment, row.step_offset) == ("A", 4, 525)
+
+
+def test_a_segment_keeps_its_model() -> None:
+    """Raise FilterError for a segment whose settings name another model."""
+    with pytest.raises(FilterError, match="model"):
+        estimator.start_segment(
+            moved_on(last_row()), params(model=2, M=30.0), keep_offset=True
+        )
+
+
+@pytest.mark.parametrize(
+    ("M", "epochs", "flags"),
+    [(100.0, 499, "AU"), (100.0, 500, "A"), (30.0, 149, "AU"), (30.0, 150, "A")],
+)
+def test_a_row_is_unsettled_until_five_time_constants(
+    M: float, epochs: int, flags: str
+) -> None:
+    """Carry U while epochs_in_segment < 5 M, and not from 5 M on (8.8)."""
+    last = last_row(time_constant=M)
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    draft = moved_on(last, epochs_in_segment=epochs)
+    assert estimator.accept(draft, prediction, Fraction(0), 3).flags == flags
+
+
+def test_a_dormant_row_is_never_unsettled() -> None:
+    """Give D without U, however young the segment."""
+    row = estimator.dormant(moved_on(last_row(), epochs_in_segment=0), "P")
+    assert row.flags == "PD"
+
+
+def test_flags_are_written_in_their_order() -> None:
+    """Order slip, new segment and outcome as ARXPDSNU, whatever was added first."""
+    last = last_row()
+    prediction = estimator.predict(last, NO_INPUT)
+    assert prediction is not None
+    draft = estimator.carry(NEXT, last, params(), slip=True)
+    draft = estimator.start_segment(draft, params(), keep_offset=True)
+    assert draft.flags == "SN"
+    assert estimator.accept(draft, prediction, Fraction(0), 3).flags == "ASNU"
+
+
+def test_finish_refuses_a_row_that_breaks_a_rule() -> None:
+    """Raise FilterError when the finished draft is not a valid row."""
+    draft = moved_on(last_row(), x_fs=None)
+    with pytest.raises(FilterError, match="invalid row"):
+        estimator.finish(draft, "A")
+
+
+def test_a_one_state_series_passes_its_measurements_through() -> None:
+    """Make x = z exactly on every accepted row, y and d 0.0, never U (U24)."""
+    settings = params(model=1, M=None)
+    last = last_row(epochs_in_segment=0, **ONE_STATE)
+    measurements = [2**60 + 7, 2**60 + 7, None, 2**60 - 200_001, 5]
+    for z in measurements:
+        prediction = estimator.predict(last, NO_INPUT)
+        assert prediction is not None
+        draft = estimator.carry(
+            last.interpolated_datetime + timedelta(minutes=10), last, settings
+        )
+        if z is None:
+            row = estimator.hold(draft, prediction, "P", settings)
+            assert row.x_fs == last.x_fs
+        else:
+            row = estimator.accept(draft, prediction, z - prediction.x, 3)
+            assert row.x_fs == z * 1000
+        assert (row.y, row.d) == (0.0, 0.0)
+        assert "U" not in row.flags
+        last = row

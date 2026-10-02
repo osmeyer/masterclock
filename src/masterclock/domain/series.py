@@ -10,11 +10,13 @@ a value of the wrong kind is refused rather than converted: a phase that is
 not a :class:`~fractions.Fraction` or an ``int``, a ``bool`` for a number, a
 list for a tuple. A float that is not finite raises
 :class:`~masterclock.domain.exceptions.FilterError`, since no estimator value
-can be one. A row is never changed: :func:`replace` builds a new one and
-checks it again.
+can be one. :func:`build_row` builds a row from the values of its fields,
+checked. A row is never changed: :func:`replace` builds a new one and checks
+it again.
 """
 
 import math
+from collections.abc import Mapping
 from fractions import Fraction
 from itertools import pairwise
 from typing import Annotated, ClassVar, Final, Literal, Self
@@ -467,6 +469,46 @@ class Row(BaseModel):
             raise ValueError(message)
 
 
+def build_row(values: Mapping[str, object]) -> Row:
+    """Build a row from the values of its fields, checked.
+
+    Parameters
+    ----------
+    values : Mapping of str to object
+        Every field of the row, by name, with its value.
+
+    Returns
+    -------
+    Row
+        The row the values make.
+
+    Raises
+    ------
+    FilterError
+        If the values break any rule of :class:`Row`, miss a field, or name
+        a field a row does not have.
+
+    Examples
+    --------
+    >>> from datetime import UTC, datetime
+    >>> build_row({
+    ...     "interpolated_datetime": datetime(2025, 9, 23, 6, 0, tzinfo=UTC),
+    ...     "innovation": None, "x_fs": None, "y": None, "d": None,
+    ...     "innovation_scale": None, "segment": 0, "step_offset": 0,
+    ...     "epochs_in_segment": 0, "epochs_since_accept": 0,
+    ...     "consecutive_rejects": 0, "rejects": (), "filter_states": 1,
+    ...     "time_constant": None, "scale_time_constant": 50.0, "flags": "PD",
+    ... }).flags
+    'PD'
+    """
+    try:
+        return Row.model_validate(dict(values))
+    except ValidationError as exc:
+        message = f"invalid row: {describe_error(exc)}"
+        _log.error(message)
+        raise FilterError(message) from exc
+
+
 def replace(row: Row, **changes: object) -> Row:
     """Build a row from another with some fields changed, checked again.
 
@@ -493,9 +535,4 @@ def replace(row: Row, **changes: object) -> Row:
     Pydantic's ``model_copy(update=...)`` would build the new row without
     checking it, so a change that broke a rule would go unnoticed.
     """
-    try:
-        return Row.model_validate({**dict(row), **changes})
-    except ValidationError as exc:
-        message = f"invalid row: {describe_error(exc)}"
-        _log.error(message)
-        raise FilterError(message) from exc
+    return build_row({**dict(row), **changes})

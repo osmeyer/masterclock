@@ -23,8 +23,9 @@ DEBUG and its prediction and update at TRACE.
 
 The next epoch is one after the oldest epoch every file is good through,
 every file rolled back to it, or one before the epoch a write journal
-names, the journal then deleted; with no file, the epoch containing
-start_from_mjd.
+names, the journal then deleted, and a file whose first row is damaged,
+refused without a journal, deleted with one, to be made again; with no
+file, the epoch containing start_from_mjd.
 
 Each series takes the settings in force at its epoch; a link not accepted
 does not make its triple cold; the TRACE lines and steps with a settings
@@ -1457,3 +1458,32 @@ def test_a_clock_measured_with_an_rms_of_zero_gives_its_triple_a_row(
     epoch = epoch_of([*REFERENCE_MEASURED, still], last, tmp_path)
     done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
     assert done.measurements[("mc2", "mc2", "ox23")].double_difference_sigma == 0.0
+
+
+def test_a_new_file_left_without_its_rows_by_a_stopped_write_is_made_again(
+    tmp_path: Path,
+) -> None:
+    """Delete a file whose rows a crash never wrote, when the journal shows why."""
+    clean, clocks = loop_deployment(tmp_path / "clean")
+    das_files(tmp_path / "clean", [LATE + i * T for i in range(6)])
+    run.run(clean, clocks, None, ShutdownHandler())
+    stopped, clocks = loop_deployment(tmp_path / "stopped")
+    das_files(tmp_path / "stopped", [LATE + i * T for i in range(6)])
+    run.run(stopped, clocks, 2, ShutdownHandler())
+    processed = stopped.processed.processed_path
+    path = registry.series_file(processed, "a", ("mc1", "ox23"))
+    path.write_bytes(
+        path.read_bytes()[: files.MEAS_HEADER_LINES * (files.MEAS_WIDTH + 1)]
+        + b"\0" * (files.MEAS_WIDTH + 1) * 2
+    )
+    with pytest.raises(DataFileError, match="damaged first row"):
+        run.next_epoch(stopped)
+    journal = processed / JOURNAL_FILE_TEMPLATE.format(rf="a")
+    journal.write_text(f"{LATE.isoformat()}\n", encoding="ascii")
+    assert run.next_epoch(stopped) == LATE
+    assert not path.exists()
+    run.run(stopped, clocks, None, ShutdownHandler())
+    for key in SERIES:
+        one = registry.series_file(clean.processed.processed_path, "a", key)
+        other = registry.series_file(processed, "a", key)
+        assert one.read_bytes() == other.read_bytes(), key

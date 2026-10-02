@@ -547,15 +547,24 @@ def next_epoch(config: AppConfig) -> datetime:
     Raises
     ------
     DataFileError
-        If a file cannot be read, changed or deleted, or its first row is
-        damaged, so its rows cannot be placed in time.
+        If a file cannot be read, changed or deleted, or, with no write
+        stopped part way, its first row is damaged, so its rows cannot be
+        placed in time.
+
+    Notes
+    -----
+    The journal is read before any file is checked. When it is there, a
+    file whose first row is damaged is one the stopped write was creating,
+    its length on the device but not its rows, and the roll-back deletes
+    it, to be made again.
     """
     journal = config.processed.processed_path / JOURNAL_FILE_TEMPLATE.format(
         rf=config.das.rf
     )
     series = data_series(config)
-    good = [good_through(path, kind) for path, kind, _ in series]
     begun = read_journal(journal)
+    stopped = begun is not None
+    good = [good_through(path, kind, stopped_write=stopped) for path, kind, _ in series]
     if begun is not None:
         good.append(begun - _EPOCH)
     common = min((mark for mark in good if mark is not None), default=None)

@@ -18,7 +18,8 @@ last row that parses, is sound and good through that row, its other rows
 not read; otherwise it is good
 through the row before its first line that does not parse, holds nothing
 good when it has no whole row, and is refused when its first row does not
-parse; and the last row of a sound file is read back as its row (U26).
+parse, unless a write stopped part way, when it holds nothing good; and
+the last row of a sound file is read back as its row (U26).
 
 The write: every check is made before a file is opened, and a failed one
 changes nothing; files are written one at a time, measurement files first;
@@ -1739,3 +1740,13 @@ def test_a_device_fault_names_the_file_and_what_was_done(
     assert str(raised.value) == (
         f"cannot write data file {pair_path}: [Errno 5] Input/output error"
     )
+
+
+def test_after_a_stopped_write_a_damaged_first_row_holds_nothing_good(
+    tmp_path: Path,
+) -> None:
+    """Give None, not a refusal, for a file whose rows never reached the device."""
+    path = meas_file(tmp_path, "\0" * (files.MEAS_WIDTH + 1) * 2)
+    with pytest.raises(DataFileError, match="damaged first row"):
+        files.good_through(path, "meas")
+    assert files.good_through(path, "meas", stopped_write=True) is None

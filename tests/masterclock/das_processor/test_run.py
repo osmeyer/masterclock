@@ -104,7 +104,6 @@ def deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
             },
             "processed": {
                 "processed_path": tmp_path / "processed",
-                "redo_from_mjd": None,
                 "start_from_mjd": None,
                 "clock_config_file": clocks,
             },

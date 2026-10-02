@@ -23,7 +23,7 @@ from masterclock.app.lock import RunLock
 from masterclock.app.log import configure_logging
 from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import mjd_to_datetime
-from masterclock.das_processor.cli import parse_args, usage_error
+from masterclock.das_processor.cli import CliOptions, parse_args, usage_error
 from masterclock.das_processor.clock_config import read_clock_config
 from masterclock.das_processor.config import (
     LOCK_FILE_TEMPLATE,
@@ -46,7 +46,7 @@ _SILENT: Final[int] = logging.CRITICAL + 1
 """A logging level above every record's, for a run with logging set to None."""
 
 
-def _settings(argv: Sequence[str] | None) -> tuple[AppConfig, int | None] | None:
+def _settings(argv: Sequence[str] | None) -> tuple[AppConfig, CliOptions] | None:
     """Read and check the run's settings, before logging starts.
 
     Parameters
@@ -57,9 +57,10 @@ def _settings(argv: Sequence[str] | None) -> tuple[AppConfig, int | None] | None
 
     Returns
     -------
-    tuple of (AppConfig, int or None) or None
-        The settings and ``--steps``; ``None`` when a setting cannot be
-        used, after saying why on standard error.
+    tuple of (AppConfig, CliOptions) or None
+        The settings, and the command line for what only it gives
+        (``--steps`` and ``--redo-from-mjd``); ``None`` when a setting
+        cannot be used, after saying why on standard error.
 
     Raises
     ------
@@ -85,7 +86,7 @@ def _settings(argv: Sequence[str] | None) -> tuple[AppConfig, int | None] | None
     ) as exc:
         print(f"das_processor: error: {exc}", file=sys.stderr)
         return None
-    return config, options.steps
+    return config, options
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -120,7 +121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     settings = _settings(argv)
     if settings is None:
         return FAILURE
-    config, steps = settings
+    config, options = settings
     try:
         clock_config = read_clock_config(config.processed.clock_config_file)
         lock_name = LOCK_FILE_TEMPLATE.format(rf=config.das.rf)
@@ -128,13 +129,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             RunLock(config.processed.processed_path, lock_name),
             ShutdownHandler() as shutdown,
         ):
-            redo_mjd = config.processed.redo_from_mjd
+            redo_mjd = options.redo_from_mjd
             if redo_mjd is not None:
                 redo_from(
                     [(path, kind) for path, kind, _ in data_series(config)],
                     floor_to_ten_minutes(mjd_to_datetime(redo_mjd)),
                 )
-            run_channel(config, clock_config, steps, shutdown)
+            run_channel(config, clock_config, options.steps, shutdown)
     except MasterClockError:
         return FAILURE
     return SUCCESS

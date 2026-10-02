@@ -105,14 +105,6 @@ SETTINGS: Final[tuple[Setting, ...]] = (
         required=True,
     ),
     Setting(
-        "redo_from_mjd",
-        "processed",
-        "PROCESSED",
-        "redo_from_mjd",
-        "--redo-from-mjd",
-        allow_none=True,
-    ),
-    Setting(
         "start_from_mjd",
         "processed",
         "PROCESSED",
@@ -219,9 +211,6 @@ class ProcessedConfig(BaseModel):
         Absolute path under which processed results are written: each kind
         of file in a subdirectory of its own (:attr:`meas_path`,
         :attr:`ddiff_path`), with the run lock directly in it beside them.
-    redo_from_mjd : DataMjd or None
-        Reprocess data starting from this MJD; ``None`` means no
-        reprocessing.
     start_from_mjd : DataMjd
         MJD to start processing from when there are no processed files to
         read a previous measurement from; once there are, it has no effect.
@@ -234,7 +223,6 @@ class ProcessedConfig(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     processed_path: AbsolutePath
-    redo_from_mjd: DayMjd | None
     start_from_mjd: Annotated[DayMjd, BeforeValidator(_start_when_not_given)]
     clock_config_file: AbsolutePath
 

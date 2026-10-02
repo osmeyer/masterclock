@@ -44,13 +44,12 @@ from masterclock.das_processor.channels import RfChannel
 from masterclock.das_processor.config import DDIFF_SUBDIRECTORY, MEAS_SUBDIRECTORY
 from masterclock.das_processor.epochs import floor_to_ten_minutes, format_epoch
 from masterclock.das_processor.exceptions import DataFileError
-from masterclock.das_processor.measurements import PairMeasurement, TripleMeasurement
-from masterclock.das_processor.read_cd5m5m import RMS_WIDTH, DASMeasurement
+from masterclock.das_processor.read_cd5m5m import RMS_WIDTH
 from masterclock.domain.exceptions import FilterError, PhaseError
+from masterclock.domain.measurements import PairMeasurement, TripleMeasurement
 from masterclock.domain.phase import EPOCH_SECONDS, FS_PER_PS
 from masterclock.domain.references import REFERENCE_PATTERN
 from masterclock.domain.series import (
-    PairKey,
     Reject,
     Row,
     SeriesKey,
@@ -118,7 +117,6 @@ MEAS_COLUMNS: Final[tuple[Column, ...]] = (
     Column("measurement_mjd", 13, "measurement time, MJD"),
     Column("measured_phase", 6, "raw phase from the DAS, ps"),
     Column("rms", RMS_WIDTH, "RMS from the DAS, ps"),
-    Column("switch", 4, "switch position from the DAS"),
     Column("cycle_count", 12, "whole periods added in decycling"),
     Column("z", 16, "decycled phase interpolated to E, ps"),
     *_STATE_COLUMNS,
@@ -273,13 +271,10 @@ class MeasRecord(BaseModel):
             if "S" in self.row.flags:
                 _fail(f"row of {self.row.interpolated_datetime}: S with no measurement")
             return self
-        if (
-            self.measurement.measurement.interpolated_datetime
-            != self.row.interpolated_datetime
-        ):
+        if self.measurement.interpolated_datetime != self.row.interpolated_datetime:
             _fail(
                 f"row of {self.row.interpolated_datetime}: its measurement is of"
-                f" the epoch of {self.measurement.measurement.interpolated_datetime}"
+                f" the epoch of {self.measurement.interpolated_datetime}"
             )
         if self.measurement.slip != ("S" in self.row.flags):
             _fail(
@@ -401,8 +396,6 @@ def _named(kind: FileKind, key: SeriesKey) -> str:
     ----------
     kind : {'meas', 'ddiff'}
         The kind of file.
-    key : (str, str) or (str, str, str)
-        The series.
 
     Returns
     -------
@@ -598,15 +591,13 @@ def format_meas_row(record: MeasRecord) -> str:
     pair = record.measurement
     texts: list[str | None] = list(_mark_texts(row.interpolated_datetime))
     if pair is None:
-        texts += [None] * 7
+        texts += [None] * 6
     else:
-        raw = pair.measurement
         texts += [
-            raw.measurement_datetime.isoformat(sep=" ", timespec="microseconds"),
-            f"{raw.measurement_mjd:.{_MJD_DECIMALS}f}",
-            str(raw.measured_phase),
-            str(raw.rms),
-            raw.switch,
+            pair.measurement_datetime.isoformat(sep=" ", timespec="microseconds"),
+            f"{pair.measurement_mjd:.{_MJD_DECIMALS}f}",
+            str(pair.measured_phase),
+            str(pair.rms),
             str(pair.cycle_count),
             str(pair.z),
         ]
@@ -838,17 +829,13 @@ def _row(mark: datetime, innovation: float | None, texts: list[str | None]) -> R
     )
 
 
-def _pair_measurement(
-    texts: list[str | None], key: PairKey, flags: str
-) -> PairMeasurement | None:
+def _pair_measurement(texts: list[str | None], flags: str) -> PairMeasurement | None:
     """Build a pair's measurement from its columns.
 
     Parameters
     ----------
     texts : list of (str or None)
-        The seven measurement columns' fields.
-    key : (str, str)
-        The file's pair.
+        The six measurement columns' fields.
     flags : str
         The row's flags, whose S marks a slip correction.
 
@@ -860,24 +847,19 @@ def _pair_measurement(
     Raises
     ------
     ValueError
-        If a field is not of its kind, the fields do not make a DAS
-        measurement, or it is against another reference than the pair's.
+        If a field is not of its kind, or the fields do not make a
+        measurement.
     """
     if all(text is None for text in texts):
         return None
-    _, mjd, phase, rms, switch, cycles, z = (_given(text) for text in texts)
-    raw = DASMeasurement(
-        measurement_mjd=float(mjd),
+    _, mjd, phase, rms, cycles, z = (_given(text) for text in texts)
+    return PairMeasurement(
+        measurement_mjd=_float_value(mjd),
         measured_phase=int(phase),
         rms=int(rms),
-        switch=switch,
-        clock=key[1],
-    )
-    if raw.reference != key[0]:
-        message = f"the row's measurement is against {raw.reference}, not {key[0]}"
-        raise ValueError(message)
-    return PairMeasurement(
-        measurement=raw, cycle_count=int(cycles), z=int(z), slip="S" in flags
+        cycle_count=int(cycles),
+        z=int(z),
+        slip="S" in flags,
     )
 
 
@@ -951,15 +933,13 @@ def _parsed[RecordT: (MeasRecord, DdiffRecord)](
     return record
 
 
-def _meas_record(line: str, key: PairKey) -> MeasRecord:
+def _meas_record(line: str) -> MeasRecord:
     """Build a measurement file record from a line, unchecked against it.
 
     Parameters
     ----------
     line : str
         The line.
-    key : (str, str)
-        The file's pair.
 
     Returns
     -------
@@ -967,10 +947,8 @@ def _meas_record(line: str, key: PairKey) -> MeasRecord:
         The record.
     """
     texts = _fields(line, MEAS_COLUMNS)
-    row = _row(datetime.fromisoformat(_given(texts[0])), None, texts[9:])
-    return MeasRecord(
-        measurement=_pair_measurement(texts[2:9], key, row.flags), row=row
-    )
+    row = _row(datetime.fromisoformat(_given(texts[0])), None, texts[8:])
+    return MeasRecord(measurement=_pair_measurement(texts[2:8], row.flags), row=row)
 
 
 def _ddiff_record(line: str) -> DdiffRecord:
@@ -1006,15 +984,13 @@ def _ddiff_record(line: str) -> DdiffRecord:
     return DdiffRecord(measurement=triple, row=row)
 
 
-def parse_meas_row(line: str, key: PairKey) -> MeasRecord:
+def parse_meas_row(line: str) -> MeasRecord:
     """Read a measurement file row (design 5.4).
 
     Parameters
     ----------
     line : str
         The line, without its newline.
-    key : (str, str)
-        The file's pair.
 
     Returns
     -------
@@ -1028,7 +1004,7 @@ def parse_meas_row(line: str, key: PairKey) -> MeasRecord:
         If the line does not parse, makes no valid record, or is not
         exactly what :func:`format_meas_row` gives for that record.
     """
-    return _parsed(line, lambda: _meas_record(line, key), format_meas_row)
+    return _parsed(line, lambda: _meas_record(line), format_meas_row)
 
 
 def parse_ddiff_row(line: str) -> DdiffRecord:
@@ -1057,7 +1033,7 @@ def parse_ddiff_row(line: str) -> DdiffRecord:
 # ------------------------------------------------- file check and last row
 
 
-def _parse_line(text: str, kind: FileKind, key: SeriesKey) -> MeasRecord | DdiffRecord:
+def _parse_line(text: str, kind: FileKind) -> MeasRecord | DdiffRecord:
     """Read a row of either kind of file.
 
     Parameters
@@ -1066,8 +1042,6 @@ def _parse_line(text: str, kind: FileKind, key: SeriesKey) -> MeasRecord | Ddiff
         The line, without its newline.
     kind : {'meas', 'ddiff'}
         The kind of file.
-    key : (str, str) or (str, str, str)
-        The file's series.
 
     Returns
     -------
@@ -1080,11 +1054,11 @@ def _parse_line(text: str, kind: FileKind, key: SeriesKey) -> MeasRecord | Ddiff
         If the line is not a row of that file.
     """
     if kind == "meas":
-        return parse_meas_row(text, (key[0], key[1]))
+        return parse_meas_row(text)
     return parse_ddiff_row(text)
 
 
-def row_epoch(line: bytes, kind: FileKind, key: SeriesKey) -> datetime | None:
+def row_epoch(line: bytes, kind: FileKind) -> datetime | None:
     """Give the epoch of a good row (design 5.7).
 
     Parameters
@@ -1093,8 +1067,6 @@ def row_epoch(line: bytes, kind: FileKind, key: SeriesKey) -> datetime | None:
         One line slot of a file, with its newline if it has one.
     kind : {'meas', 'ddiff'}
         The kind of file.
-    key : (str, str) or (str, str, str)
-        The file's series.
 
     Returns
     -------
@@ -1114,8 +1086,7 @@ def row_epoch(line: bytes, kind: FileKind, key: SeriesKey) -> datetime | None:
         return None
     record: MeasRecord | DdiffRecord | None
     if kind == "meas":
-        pair = (key[0], key[1])
-        record = _attempt(text, lambda: _meas_record(text, pair), format_meas_row)[0]
+        record = _attempt(text, lambda: _meas_record(text), format_meas_row)[0]
     else:
         record = _attempt(text, lambda: _ddiff_record(text), format_ddiff_row)[0]
     return None if record is None else record.row.interpolated_datetime
@@ -1142,7 +1113,7 @@ def _slot(file: BinaryIO, index: int, size: int) -> bytes:
     return file.read(size)
 
 
-def good_through(path: Path, kind: FileKind, key: SeriesKey) -> datetime | None:
+def good_through(path: Path, kind: FileKind) -> datetime | None:
     """Give the epoch of a file's last good row (design 5.2, 5.7).
 
     Parameters
@@ -1151,8 +1122,6 @@ def good_through(path: Path, kind: FileKind, key: SeriesKey) -> datetime | None:
         The file.
     kind : {'meas', 'ddiff'}
         The kind of file.
-    key : (str, str) or (str, str, str)
-        The file's series.
 
     Returns
     -------
@@ -1176,12 +1145,12 @@ def good_through(path: Path, kind: FileKind, key: SeriesKey) -> datetime | None:
             if rows < 1:
                 return None
             if length % size == 0:
-                last = row_epoch(_slot(file, header_lines + rows - 1, size), kind, key)
+                last = row_epoch(_slot(file, header_lines + rows - 1, size), kind)
                 if last is not None:
                     return last
             good = None
             for index in range(rows):
-                epoch = row_epoch(_slot(file, header_lines + index, size), kind, key)
+                epoch = row_epoch(_slot(file, header_lines + index, size), kind)
                 if epoch is None:
                     break
                 good = epoch
@@ -1192,7 +1161,7 @@ def good_through(path: Path, kind: FileKind, key: SeriesKey) -> datetime | None:
     return good
 
 
-def read_last_row(path: Path, kind: FileKind, key: SeriesKey) -> Row:
+def read_last_row(path: Path, kind: FileKind) -> Row:
     """Read the last row of a sound file (design 5.7).
 
     Parameters
@@ -1201,8 +1170,6 @@ def read_last_row(path: Path, kind: FileKind, key: SeriesKey) -> Row:
         The file.
     kind : {'meas', 'ddiff'}
         The kind of file.
-    key : (str, str) or (str, str, str)
-        The file's series.
 
     Returns
     -------
@@ -1215,12 +1182,10 @@ def read_last_row(path: Path, kind: FileKind, key: SeriesKey) -> Row:
         If the file cannot be read, is not sound, or its last row is not a
         row of the file.
     """
-    return read_last_record(path, kind, key).row
+    return read_last_record(path, kind).row
 
 
-def read_last_record(
-    path: Path, kind: FileKind, key: SeriesKey
-) -> MeasRecord | DdiffRecord:
+def read_last_record(path: Path, kind: FileKind) -> MeasRecord | DdiffRecord:
     """Read the last record of a sound file: its measurement and row.
 
     Parameters
@@ -1229,8 +1194,6 @@ def read_last_record(
         The file.
     kind : {'meas', 'ddiff'}
         The kind of file.
-    key : (str, str) or (str, str, str)
-        The file's series.
 
     Returns
     -------
@@ -1257,7 +1220,7 @@ def read_last_record(
         text = line[:-1].decode("ascii")
     except UnicodeDecodeError as exc:
         _fail(f"data file {path} is not sound: its last row is not ASCII", exc)
-    return _parse_line(text, kind, key)
+    return _parse_line(text, kind)
 
 
 # --------------------------------------------------- day buffer and write
@@ -1284,8 +1247,6 @@ class DayBuffer:
         Each file's lines since the last write, newlines included.
     last : dict of series key to Row
         Each series' newest row, as a later run would read it back.
-    switches : dict of (str, str) to str
-        Each pair's switch at its newest measurement, for the log.
     start : datetime or None
         The earliest epoch of the rows since the last write; ``None`` when
         there are none.
@@ -1307,7 +1268,6 @@ class DayBuffer:
         self.start: datetime | None = None
         self.texts: dict[Path, str] = {}
         self.last: dict[SeriesKey, Row] = {}
-        self.switches: dict[PairKey, str] = {}
         self._series: dict[Path, tuple[FileKind, SeriesKey]] = {}
 
     def add(self, path: Path, key: SeriesKey, record: MeasRecord | DdiffRecord) -> None:
@@ -1341,9 +1301,7 @@ class DayBuffer:
             _fail(f"{path} holds the {self._series[path]} series, not {(kind, key)}")
         if isinstance(record, MeasRecord):
             line = format_meas_row(record)
-            back = parse_meas_row(line, (key[0], key[1])).row
-            if record.measurement is not None:
-                self.switches[(key[0], key[1])] = record.measurement.measurement.switch
+            back = parse_meas_row(line).row
         else:
             line = format_ddiff_row(record)
             back = parse_ddiff_row(line).row
@@ -1384,7 +1342,6 @@ class DayBuffer:
             self._series[path] = other.series_of(path)
             self.texts[path] = self.texts.get(path, "") + text
         self.last.update(other.last)
-        self.switches.update(other.switches)
         self._started(other.start)
 
     def series_of(self, path: Path) -> tuple[FileKind, SeriesKey]:
@@ -1616,9 +1573,7 @@ type _Cut = Literal["kept", "cut", "deleted"]
 """What keeping a file's rows through an epoch did to it."""
 
 
-def _keep_through(
-    path: Path, kind: FileKind, key: SeriesKey, through: datetime | None
-) -> _Cut:
+def _keep_through(path: Path, kind: FileKind, through: datetime | None) -> _Cut:
     """Keep a file's rows up to and including an epoch, and remove the rest.
 
     Parameters
@@ -1627,8 +1582,6 @@ def _keep_through(
         The file, whose rows up to ``through`` are good.
     kind : {'meas', 'ddiff'}
         Its kind.
-    key : (str, str) or (str, str, str)
-        Its series.
     through : datetime or None
         The last epoch to keep; ``None`` to keep none.
 
@@ -1651,9 +1604,7 @@ def _keep_through(
             length = file.seek(0, os.SEEK_END)
             rows = length // size - header_lines
             first = (
-                row_epoch(_slot(file, header_lines, size), kind, key)
-                if rows > 0
-                else None
+                row_epoch(_slot(file, header_lines, size), kind) if rows > 0 else None
             )
             if through is None or first is None or through < first:
                 keep = 0
@@ -1661,7 +1612,7 @@ def _keep_through(
                 keep = (through - first) // _EPOCH + 1
                 if keep > rows:
                     _fail(f"{path} has no row for {through}")
-                found = row_epoch(_slot(file, header_lines + keep - 1, size), kind, key)
+                found = row_epoch(_slot(file, header_lines + keep - 1, size), kind)
                 if found != through:
                     _fail(
                         f"{path} does not hold one row per epoch: {found} for {through}"
@@ -1722,9 +1673,7 @@ def _truncate(path: Path, end: int) -> None:
         _fail(f"cannot cut data file {path}: {exc}", exc)
 
 
-def roll_back(
-    path: Path, kind: FileKind, key: SeriesKey, common: datetime | None
-) -> None:
+def roll_back(path: Path, kind: FileKind, common: datetime | None) -> None:
     """Roll a file back to the epoch every file holds (design 6.7).
 
     Parameters
@@ -1733,8 +1682,6 @@ def roll_back(
         The file, good through ``common`` or later.
     kind : {'meas', 'ddiff'}
         Its kind.
-    key : (str, str) or (str, str, str)
-        Its series.
     common : datetime or None
         L, the oldest epoch any file of the channel is good through;
         ``None`` when no file holds a whole row.
@@ -1753,23 +1700,21 @@ def roll_back(
     it is. Each file changed is logged at WARNING with its path and the
     epoch.
     """
-    done = _keep_through(path, kind, key, common)
+    done = _keep_through(path, kind, common)
     if done == "cut":
         _log.warning("data file %s rolled back to %s", path, common)
     elif done == "deleted":
         _log.warning("data file %s deleted: no row at or before %s", path, common)
 
 
-def redo_from(
-    series: Iterable[tuple[Path, FileKind, SeriesKey]], mark: datetime
-) -> None:
+def redo_from(series: Iterable[tuple[Path, FileKind]], mark: datetime) -> None:
     """Delete every row at or after an epoch from every file (design 6.5).
 
     Parameters
     ----------
-    series : iterable of (Path, FileKind, series key)
+    series : iterable of (Path, FileKind)
         Every file of the channel, measurement and double-difference, with
-        its kind and series.
+        its kind.
     mark : datetime
         The epoch to reprocess from.
 
@@ -1788,10 +1733,10 @@ def redo_from(
     Running it again after an interruption finishes the deletion: a file
     already cut is left as it is.
     """
-    for path, kind, key in series:
-        good = good_through(path, kind, key)
+    for path, kind in series:
+        good = good_through(path, kind)
         through = mark - _EPOCH if good is None else min(mark - _EPOCH, good)
-        done = _keep_through(path, kind, key, None if good is None else through)
+        done = _keep_through(path, kind, None if good is None else through)
         if done != "kept":
             _log.info("data file %s %s for a redo from %s", path, done, mark)
 

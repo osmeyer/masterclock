@@ -1,7 +1,7 @@
 """Tests for src/masterclock/das_processor/files.py.
 
 The rules covered: the column table gives the measurement file a width of
-483 and 34 header lines and the double-difference file 455 and 31; every
+477 and 33 header lines and the double-difference file 455 and 31; every
 header line is exactly that wide and starts with '#', in the design's order
 with the warning second; rows are right-justified fixed-width columns
 separated by ', ', with '-' for an empty field, floats as {:+.16e} and the
@@ -50,12 +50,12 @@ from hypothesis import strategies as st
 from masterclock.app.timeutil import datetime_to_mjd
 from masterclock.das_processor import files
 from masterclock.das_processor.exceptions import DataFileError
-from masterclock.das_processor.measurements import (
+from masterclock.das_processor.read_cd5m5m import RMS_MAX
+from masterclock.domain.measurements import (
     PairMeasurement,
     TripleMeasurement,
     measure_pair,
 )
-from masterclock.das_processor.read_cd5m5m import RMS_MAX, DASMeasurement
 from masterclock.domain.phase import PHASE_MAX, exact
 from masterclock.domain.series import PairKey, Row, SeriesKey, State, TripleKey
 
@@ -65,17 +65,20 @@ E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 STEP: Final = timedelta(minutes=10)
 """One epoch."""
 
-RAW: Final = DASMeasurement(
+RAW: Final[dict[str, float | int]] = {
+    "measurement_mjd": 60941.251588,
+    "measured_phase": 34579,
+    "rms": 3,
+}
+"""Appendix A's reading: its MJD, phase and rms."""
+
+PAIR: Final = measure_pair(
     measurement_mjd=60941.251588,
     measured_phase=34579,
     rms=3,
-    switch="2B07",
-    clock="nav23",
-)
-"""Appendix A's raw row."""
-
-PAIR: Final = measure_pair(
-    RAW, State(x=1_234_567 + exact(0.0123) * 600, y=0.0123), Fraction(0), None
+    prediction=State(x=1_234_567 + exact(0.0123) * 600, y=0.0123),
+    w=Fraction(0),
+    anchor=None,
 )
 """Appendix A's pair measurement."""
 
@@ -106,14 +109,14 @@ def row(**changes: object) -> Row:
 
 MEAS_EXAMPLE: Final = (
     "2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,"
-    "  60941.251588,  34579,    3, 2B07,            6,          1234577,"
+    "  60941.251588,  34579,    3,            6,          1234577,"
     "          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12,"
     " +3.0000000000000000e+00,         4,                0,       812,         0,"
     "         0,             -,                       -,             -,"
     "                       -,             -,                       -, 3,"
     " +1.0000000000000000e+02, +5.0000000000000000e+01,        A",
     "2025-09-23 06:10:00+00:00,  60941.256944,                                -,"
-    "             -,      -,    -,    -,            -,                -,"
+    "             -,      -,    -,            -,                -,"
     "          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12,"
     " +3.0000000000000000e+00,         4,                0,       813,         1,"
     "         0,             -,                       -,             -,"
@@ -145,8 +148,8 @@ DDIFF_EXAMPLE: Final = (
 
 
 def test_the_column_table_gives_the_widths_and_header_lengths() -> None:
-    """Work out W = 483 and 455 and 34 and 31 header lines from the table."""
-    assert (files.MEAS_WIDTH, files.MEAS_HEADER_LINES) == (483, 34)
+    """Work out W = 477 and 455 and 33 and 31 header lines from the table."""
+    assert (files.MEAS_WIDTH, files.MEAS_HEADER_LINES) == (477, 33)
     assert (files.DDIFF_WIDTH, files.DDIFF_HEADER_LINES) == (455, 31)
 
 
@@ -190,7 +193,7 @@ def test_the_measurement_header_is_the_design_s() -> None:
         "# Columns: right-justified, fixed width, separated by ', '.",
     ]
     assert lines[6] == "#   interpolated_datetime   epoch start E, UTC"
-    assert lines[33] == (
+    assert lines[32] == (
         "#   flags                   A accepted, R rejected, X excluded, P predicted,"
         " D dormant, S slip corrected, N new segment, U unsettled"
     )
@@ -293,9 +296,9 @@ def test_the_double_difference_example_rows_come_out_byte_for_byte() -> None:
 
 def test_the_example_rows_parse_back() -> None:
     """Parse the design's example rows into records that format to them."""
-    record = files.parse_meas_row(MEAS_EXAMPLE[0], ("mc2", "nav23"))
+    record = files.parse_meas_row(MEAS_EXAMPLE[0])
     assert record == files.MeasRecord(measurement=PAIR, row=row())
-    assert files.parse_meas_row(MEAS_EXAMPLE[1], ("mc2", "nav23")).measurement is None
+    assert files.parse_meas_row(MEAS_EXAMPLE[1]).measurement is None
     for line in DDIFF_EXAMPLE:
         assert files.format_ddiff_row(files.parse_ddiff_row(line)) == line
 
@@ -316,9 +319,9 @@ def test_a_dormant_row_writes_its_state_as_empty_fields() -> None:
     )
     line = files.format_meas_row(files.MeasRecord(measurement=PAIR, row=dormant))
     fields = line.split(", ")
-    assert fields[9:13] == ["-".rjust(20), "-".rjust(23), "-".rjust(23), "-".rjust(23)]
-    assert fields[18:20] == [" 60941.243056", "+1.2345700000000000e+06"]
-    assert files.parse_meas_row(line, ("mc2", "nav23")).row == dormant
+    assert fields[8:12] == ["-".rjust(20), "-".rjust(23), "-".rjust(23), "-".rjust(23)]
+    assert fields[17:19] == [" 60941.243056", "+1.2345700000000000e+06"]
+    assert files.parse_meas_row(line).row == dormant
 
 
 @pytest.mark.parametrize(
@@ -334,8 +337,8 @@ def test_a_dormant_row_writes_its_state_as_empty_fields() -> None:
 def test_the_phase_is_written_in_ps_to_the_femtosecond(x_fs: int, text: str) -> None:
     """Write whole femtoseconds as ps with three decimals, sign and all."""
     line = files.format_meas_row(files.MeasRecord(measurement=PAIR, row=row(x_fs=x_fs)))
-    assert line.split(", ")[9] == text.rjust(20)
-    assert files.parse_meas_row(line, ("mc2", "nav23")).row.x_fs == x_fs
+    assert line.split(", ")[8] == text.rjust(20)
+    assert files.parse_meas_row(line).row.x_fs == x_fs
 
 
 # ------------------------------------------------------------------ overflow
@@ -359,7 +362,7 @@ def test_a_value_too_wide_for_its_column_is_refused(changes: dict[str, object]) 
 
 def test_a_cycle_count_too_wide_is_refused() -> None:
     """Raise DataFileError for a cycle count wider than its column."""
-    pair = PairMeasurement(measurement=RAW, cycle_count=10**12, z=1)
+    pair = PairMeasurement.model_validate({**RAW, "cycle_count": 10**12, "z": 1})
     with pytest.raises(DataFileError, match="cycle_count"):
         files.format_meas_row(files.MeasRecord(measurement=pair, row=row()))
 
@@ -382,7 +385,6 @@ def test_a_cycle_count_too_wide_is_refused() -> None:
         ("2025-09-23 06:00:00+00:00", "2025-09-23 06:00:00-05:00"),
         (",       812,", ",       81x,"),
         ("  34579,", " 234579,"),
-        (" 2B07,", " 2b07,"),
         ("e+00,         4,", "e+00,         -,"),
     ],
 )
@@ -391,7 +393,7 @@ def test_a_line_not_exactly_as_written_is_refused(old: str, new: str) -> None:
     assert MEAS_EXAMPLE[0].count(old) == 1
     line = MEAS_EXAMPLE[0].replace(old, new)
     with pytest.raises(DataFileError):
-        files.parse_meas_row(line, ("mc2", "nav23"))
+        files.parse_meas_row(line)
 
 
 @pytest.mark.parametrize(
@@ -406,15 +408,7 @@ def test_a_line_not_exactly_as_written_is_refused(old: str, new: str) -> None:
 def test_a_line_of_the_wrong_shape_is_refused(line: str) -> None:
     """Raise DataFileError for a line with the wrong columns."""
     with pytest.raises(DataFileError):
-        files.parse_meas_row(line, ("mc2", "nav23"))
-
-
-def test_a_row_of_another_clock_is_refused() -> None:
-    """Raise DataFileError when the row does not parse for this pair's clock."""
-    pair = files.parse_meas_row(MEAS_EXAMPLE[0], ("mc2", "nav23"))
-    assert pair.measurement is not None
-    with pytest.raises(DataFileError, match="mc3"):
-        files.parse_meas_row(MEAS_EXAMPLE[0], ("mc3", "nav23"))
+        files.parse_meas_row(line)
 
 
 def test_a_double_difference_line_is_checked_as_written() -> None:
@@ -529,15 +523,10 @@ def meas_records(draw: st.DrawFn) -> files.MeasRecord:
         return files.MeasRecord(measurement=None, row=drawn)
     start = datetime_to_mjd(drawn.interpolated_datetime)
     offset = draw(st.integers(min_value=1, max_value=6_900))
-    raw = DASMeasurement(
+    pair = PairMeasurement(
         measurement_mjd=round(start + offset * 1e-6, 6),
         measured_phase=draw(st.integers(0, PHASE_MAX)),
         rms=draw(st.integers(0, RMS_MAX)),
-        switch=draw(st.from_regex(r"2[A-Z][0-9]{2}", fullmatch=True)),
-        clock="nav23",
-    )
-    pair = PairMeasurement(
-        measurement=raw,
         cycle_count=draw(st.integers(-(10**10), 10**10)),
         z=draw(st.integers(-(10**14), 10**14)),
         slip="S" in drawn.flags,
@@ -566,8 +555,8 @@ def test_a_measurement_row_parses_back_to_its_record(record: files.MeasRecord) -
     """Give back the record, and the same text when formatted again (U20)."""
     line = files.format_meas_row(record)
     assert len(line) == files.MEAS_WIDTH
-    assert files.parse_meas_row(line, ("mc2", "nav23")) == record
-    assert files.format_meas_row(files.parse_meas_row(line, ("mc2", "nav23"))) == line
+    assert files.parse_meas_row(line) == record
+    assert files.format_meas_row(files.parse_meas_row(line)) == line
 
 
 @given(ddiff_records())
@@ -614,7 +603,7 @@ def meas_file(tmp_path: Path, rows_text: str, *, head: str | None = None) -> Pat
 def test_a_sound_file_is_good_through_its_last_row(tmp_path: Path) -> None:
     """Give the last row's epoch for a file of whole rows (U26)."""
     path = meas_file(tmp_path, "".join(series_rows(4)))
-    assert files.good_through(path, "meas", KEY) == E + 3 * STEP
+    assert files.good_through(path, "meas") == E + 3 * STEP
 
 
 def test_a_file_cut_inside_its_last_row_is_good_through_the_row_before(
@@ -623,7 +612,7 @@ def test_a_file_cut_inside_its_last_row_is_good_through_the_row_before(
     """Give the epoch of the last whole row of a file with a torn line (U26)."""
     text = "".join(series_rows(4))
     path = meas_file(tmp_path, text[: -files.MEAS_WIDTH // 2])
-    assert files.good_through(path, "meas", KEY) == E + 2 * STEP
+    assert files.good_through(path, "meas") == E + 2 * STEP
 
 
 @pytest.mark.parametrize(
@@ -635,8 +624,8 @@ def test_a_file_without_a_whole_row_holds_nothing_good(
     """Give None for a file cut inside its header, or holding only its header (U26)."""
     whole = files.header("meas", "a", KEY)
     path = meas_file(tmp_path, "", head=whole[:cut])
-    assert files.good_through(path, "meas", KEY) is None
-    assert files.good_through(meas_file(tmp_path, "", head=whole), "meas", KEY) is None
+    assert files.good_through(path, "meas") is None
+    assert files.good_through(meas_file(tmp_path, "", head=whole), "meas") is None
 
 
 def test_a_row_of_the_wrong_length_inside_a_file_ends_what_is_good(
@@ -646,7 +635,7 @@ def test_a_row_of_the_wrong_length_inside_a_file_ends_what_is_good(
     lines = series_rows(5)
     lines[2] = lines[2][:100] + lines[2][101:]
     path = meas_file(tmp_path, "".join(lines))
-    assert files.good_through(path, "meas", KEY) == E + STEP
+    assert files.good_through(path, "meas") == E + STEP
 
 
 def predicted_as_accepted(line: str) -> str:
@@ -662,9 +651,9 @@ def test_a_row_that_breaks_a_record_rule_is_damaged(tmp_path: Path) -> None:
     lines = series_rows(4)
     lines[3] = predicted_as_accepted(lines[3])
     path = meas_file(tmp_path, "".join(lines))
-    assert files.good_through(path, "meas", KEY) == E + 2 * STEP
-    files.roll_back(path, "meas", KEY, E + 2 * STEP)
-    assert files.good_through(path, "meas", KEY) == E + 2 * STEP
+    assert files.good_through(path, "meas") == E + 2 * STEP
+    files.roll_back(path, "meas", E + 2 * STEP)
+    assert files.good_through(path, "meas") == E + 2 * STEP
     assert path.read_text().endswith(series_rows(3)[2])
 
 
@@ -673,7 +662,7 @@ def test_a_sound_file_is_not_scanned(tmp_path: Path) -> None:
     lines = series_rows(5)
     lines[3] = lines[3].replace("        P", "        Q")
     path = meas_file(tmp_path, "".join(lines))
-    assert files.good_through(path, "meas", KEY) == E + 4 * STEP
+    assert files.good_through(path, "meas") == E + 4 * STEP
 
 
 def test_a_file_whose_last_row_does_not_parse_is_scanned(tmp_path: Path) -> None:
@@ -681,14 +670,14 @@ def test_a_file_whose_last_row_does_not_parse_is_scanned(tmp_path: Path) -> None
     lines = series_rows(5)
     lines[4] = lines[4].replace("        P", "        Q")
     path = meas_file(tmp_path, "".join(lines))
-    assert files.good_through(path, "meas", KEY) == E + 3 * STEP
+    assert files.good_through(path, "meas") == E + 3 * STEP
 
 
 def test_a_row_whose_newline_is_lost_is_not_good(tmp_path: Path) -> None:
     """Refuse a slot that does not end in a newline, though its text parses."""
     text = "".join(series_rows(3))
     path = meas_file(tmp_path, text[:-1] + "x")
-    assert files.good_through(path, "meas", KEY) == E + STEP
+    assert files.good_through(path, "meas") == E + STEP
 
 
 def test_the_scan_stops_at_the_first_damaged_line(tmp_path: Path) -> None:
@@ -696,7 +685,7 @@ def test_the_scan_stops_at_the_first_damaged_line(tmp_path: Path) -> None:
     lines = series_rows(5)
     lines[1] = lines[1].replace("        P", "        Q")
     path = meas_file(tmp_path, "".join(lines) + "2025")
-    assert files.good_through(path, "meas", KEY) == E
+    assert files.good_through(path, "meas") == E
 
 
 def test_a_damaged_first_row_cannot_be_placed_in_time(tmp_path: Path) -> None:
@@ -705,7 +694,7 @@ def test_a_damaged_first_row_cannot_be_placed_in_time(tmp_path: Path) -> None:
     lines[0] = lines[0].replace("        P", "        Q")
     path = meas_file(tmp_path, "".join(lines) + "2025")
     with pytest.raises(DataFileError, match="damaged first row"):
-        files.good_through(path, "meas", KEY)
+        files.good_through(path, "meas")
 
 
 @pytest.mark.parametrize(
@@ -714,19 +703,19 @@ def test_a_damaged_first_row_cannot_be_placed_in_time(tmp_path: Path) -> None:
 )
 def test_a_line_that_is_not_a_row_has_no_epoch(line: bytes) -> None:
     """Give no epoch for a header line, a line with no newline, or non-ASCII."""
-    assert files.row_epoch(line + b"\n", "meas", KEY) is None
-    assert files.row_epoch(series_rows(1)[0].encode()[:-1], "meas", KEY) is None
+    assert files.row_epoch(line + b"\n", "meas") is None
+    assert files.row_epoch(series_rows(1)[0].encode()[:-1], "meas") is None
 
 
 def test_a_row_gives_its_epoch() -> None:
     """Give a good row's epoch."""
-    assert files.row_epoch(series_rows(2)[1].encode(), "meas", KEY) == E + STEP
+    assert files.row_epoch(series_rows(2)[1].encode(), "meas") == E + STEP
 
 
 def test_the_last_row_of_a_sound_file_is_read(tmp_path: Path) -> None:
     """Read a sound file's last row back as its row."""
     path = meas_file(tmp_path, "".join(series_rows(3)))
-    last = files.read_last_row(path, "meas", KEY)
+    last = files.read_last_row(path, "meas")
     assert last == row(
         interpolated_datetime=E + 2 * STEP,
         epochs_in_segment=814,
@@ -741,8 +730,8 @@ def test_the_last_row_of_a_double_difference_file_is_read(tmp_path: Path) -> Non
     key = ("mc1", "mc2", "nav23")
     text = files.header("ddiff", "a", key) + DDIFF_EXAMPLE[0] + "\n"
     path.write_bytes(text.encode("ascii"))
-    assert files.read_last_row(path, "ddiff", key).x_fs == 6_666_667_291
-    assert files.good_through(path, "ddiff", key) == E
+    assert files.read_last_row(path, "ddiff").x_fs == 6_666_667_291
+    assert files.good_through(path, "ddiff") == E
 
 
 @pytest.mark.parametrize("cut", [1, 2 * (files.MEAS_WIDTH + 1)])
@@ -751,7 +740,7 @@ def test_the_last_row_is_read_only_from_a_sound_file(tmp_path: Path, cut: int) -
     text = "".join(series_rows(2))
     path = meas_file(tmp_path, text[:-cut])
     with pytest.raises(DataFileError, match="not sound"):
-        files.read_last_row(path, "meas", KEY)
+        files.read_last_row(path, "meas")
 
 
 def test_a_last_row_that_is_not_ascii_is_refused(tmp_path: Path) -> None:
@@ -761,15 +750,15 @@ def test_a_last_row_that_is_not_ascii_is_refused(tmp_path: Path) -> None:
     data[-3] = 0xE9
     path.write_bytes(bytes(data))
     with pytest.raises(DataFileError, match="not ASCII"):
-        files.read_last_row(path, "meas", KEY)
+        files.read_last_row(path, "meas")
 
 
 def test_a_file_that_cannot_be_opened_is_refused(tmp_path: Path) -> None:
     """Raise DataFileError for a file that cannot be read."""
     with pytest.raises(DataFileError, match="cannot read"):
-        files.good_through(tmp_path / "missing.dat", "meas", KEY)
+        files.good_through(tmp_path / "missing.dat", "meas")
     with pytest.raises(DataFileError, match="cannot read"):
-        files.read_last_row(tmp_path / "missing.dat", "meas", KEY)
+        files.read_last_row(tmp_path / "missing.dat", "meas")
 
 
 # ------------------------------------------------------ day buffer and write
@@ -826,7 +815,7 @@ def test_a_new_file_gets_its_header_and_rows_in_one_write(tmp_path: Path) -> Non
         files.format_meas_row(predicted(i)) + "\n" for i in range(2)
     )
     assert pair_path.read_text(encoding="ascii") == expected
-    assert files.good_through(triple_path, "ddiff", TRIPLE) == E + STEP
+    assert files.good_through(triple_path, "ddiff") == E + STEP
 
 
 def test_a_later_write_appends_to_the_file(tmp_path: Path) -> None:
@@ -835,7 +824,7 @@ def test_a_later_write_appends_to_the_file(tmp_path: Path) -> None:
     files.write_buffer(buffer)
     buffer.add(pair_path, KEY, predicted(2))
     files.write_buffer(buffer)
-    assert files.good_through(pair_path, "meas", KEY) == E + 2 * STEP
+    assert files.good_through(pair_path, "meas") == E + 2 * STEP
     assert (
         pair_path.read_text(encoding="ascii").count("das_processor measurement file")
         == 1
@@ -855,10 +844,7 @@ def test_a_series_first_seen_in_a_day_appears_at_the_day_s_write(
     files.write_buffer(buffer)
     text = later.read_text(encoding="ascii")
     assert text.startswith("# das_processor measurement file, format 1")
-    assert (
-        files.read_last_row(later, "meas", ("mc2", "cs7")).interpolated_datetime
-        == E + 2 * STEP
-    )
+    assert files.read_last_row(later, "meas").interpolated_datetime == E + 2 * STEP
 
 
 def test_after_a_write_the_text_is_empty_and_the_last_rows_remain(
@@ -1099,7 +1085,7 @@ def epochs_in(path: Path) -> list[datetime]:
         for i in range(files.MEAS_HEADER_LINES * size, len(data), size)
     ]
     return [
-        files.parse_meas_row(row.decode()[:-1], KEY).row.interpolated_datetime
+        files.parse_meas_row(row.decode()[:-1]).row.interpolated_datetime
         for row in rows
     ]
 
@@ -1109,7 +1095,7 @@ def test_a_file_is_rolled_back_to_just_after_the_common_epoch(
 ) -> None:
     """Truncate just after the row for L, with a WARNING naming file and epoch (6.7)."""
     path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 5)
-    files.roll_back(path, "meas", KEY, E + 2 * STEP)
+    files.roll_back(path, "meas", E + 2 * STEP)
     assert epochs_in(path) == [E, E + STEP, E + 2 * STEP]
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1
@@ -1122,9 +1108,9 @@ def test_a_torn_line_after_the_common_epoch_goes_too(tmp_path: Path) -> None:
     path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 3)
     with path.open("ab") as file:
         file.write(b"2025-09-23 06:3")
-    files.roll_back(path, "meas", KEY, E + 2 * STEP)
+    files.roll_back(path, "meas", E + 2 * STEP)
     assert epochs_in(path) == [E, E + STEP, E + 2 * STEP]
-    assert files.good_through(path, "meas", KEY) == E + 2 * STEP
+    assert files.good_through(path, "meas") == E + 2 * STEP
 
 
 def test_a_sound_file_ending_at_the_common_epoch_is_untouched(
@@ -1133,7 +1119,7 @@ def test_a_sound_file_ending_at_the_common_epoch_is_untouched(
     """Leave a file that already ends at L as it is, unlogged."""
     path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 3)
     before = path.stat()
-    files.roll_back(path, "meas", KEY, E + 2 * STEP)
+    files.roll_back(path, "meas", E + 2 * STEP)
     after = path.stat()
     assert (after.st_ino, after.st_mtime_ns, after.st_size) == (
         before.st_ino,
@@ -1149,7 +1135,7 @@ def test_a_file_with_no_row_at_or_before_the_common_epoch_is_deleted(
 ) -> None:
     """Delete a file whose first row is after L, and every file when there is no L."""
     path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 3)
-    files.roll_back(path, "meas", KEY, common)
+    files.roll_back(path, "meas", common)
     assert not path.exists()
 
 
@@ -1160,31 +1146,31 @@ def test_a_file_without_one_row_per_epoch_is_refused(tmp_path: Path) -> None:
     with path.open("a", encoding="ascii") as file:
         file.write(rows[3])
     with pytest.raises(DataFileError, match="one row per epoch"):
-        files.roll_back(path, "meas", KEY, E + 2 * STEP)
+        files.roll_back(path, "meas", E + 2 * STEP)
 
 
 def test_a_common_epoch_past_the_file_s_rows_is_refused(tmp_path: Path) -> None:
     """Raise DataFileError when the file holds no row for L at all."""
     path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 2)
     with pytest.raises(DataFileError, match="no row for"):
-        files.roll_back(path, "meas", KEY, E + 5 * STEP)
+        files.roll_back(path, "meas", E + 5 * STEP)
 
 
-def archive(tmp_path: Path) -> list[tuple[Path, files.FileKind, SeriesKey]]:
+def archive(tmp_path: Path) -> list[tuple[Path, files.FileKind]]:
     """Write a measurement file of five rows and a double-difference file of three."""
     pair_path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 5)
     triple_path = tmp_path / "ddiff" / "das_a.mc1.mc2.nav23.dat"
     triple_path.parent.mkdir()
     lines = "".join(files.format_ddiff_row(triple_record(i)) + "\n" for i in range(3))
     triple_path.write_text(files.header("ddiff", "a", TRIPLE) + lines, encoding="ascii")
-    return [(pair_path, "meas", KEY), (triple_path, "ddiff", TRIPLE)]
+    return [(pair_path, "meas"), (triple_path, "ddiff")]
 
 
 def test_a_redo_deletes_every_row_at_or_after_its_epoch(tmp_path: Path) -> None:
     """Truncate every file before its first row at or after the mark (6.5)."""
     series = archive(tmp_path)
     files.redo_from(series, E + 2 * STEP)
-    assert [files.good_through(path, kind, key) for path, kind, key in series] == [
+    assert [files.good_through(path, kind) for path, kind in series] == [
         E + STEP,
         E + STEP,
     ]
@@ -1194,14 +1180,14 @@ def test_a_redo_deletes_a_file_with_no_earlier_row(tmp_path: Path) -> None:
     """Delete every file when the redo starts at or before its first row."""
     series = archive(tmp_path)
     files.redo_from(series, E)
-    assert not any(path.exists() for path, _, _ in series)
+    assert not any(path.exists() for path, _ in series)
 
 
 def test_a_redo_past_a_file_s_end_leaves_it(tmp_path: Path) -> None:
     """Keep a file whose rows all come before the redo."""
     series = archive(tmp_path)
     files.redo_from(series, E + 4 * STEP)
-    assert [files.good_through(path, kind, key) for path, kind, key in series] == [
+    assert [files.good_through(path, kind) for path, kind in series] == [
         E + 3 * STEP,
         E + 2 * STEP,
     ]
@@ -1230,7 +1216,7 @@ def test_an_interrupted_redo_finishes_when_run_again(
         files.redo_from(series, E + STEP)
     monkeypatch.undo()
     files.redo_from(series, E + STEP)
-    assert [files.good_through(path, kind, key) for path, kind, key in series] == [E, E]
+    assert [files.good_through(path, kind) for path, kind in series] == [E, E]
 
 
 def test_a_redo_and_a_roll_back_at_one_start_keep_the_archive_in_step(
@@ -1242,17 +1228,17 @@ def test_a_redo_and_a_roll_back_at_one_start_keep_the_archive_in_step(
     with triple_path.open("ab") as file:
         file.write(b"2025-09-23 06:3")
     files.redo_from(series, E + 4 * STEP)
-    good = [files.good_through(path, kind, key) for path, kind, key in series]
+    good = [files.good_through(path, kind) for path, kind in series]
     assert good == [E + 3 * STEP, E + 2 * STEP]
     common = min(mark for mark in good if mark is not None)
-    for path, kind, key in series:
-        files.roll_back(path, kind, key, common)
-    assert [files.good_through(path, kind, key) for path, kind, key in series] == [
+    for path, kind in series:
+        files.roll_back(path, kind, common)
+    assert [files.good_through(path, kind) for path, kind in series] == [
         E + 2 * STEP,
         E + 2 * STEP,
     ]
     assert all(
-        path.stat().st_size % (files.WIDTHS[kind] + 1) == 0 for path, kind, _ in series
+        path.stat().st_size % (files.WIDTHS[kind] + 1) == 0 for path, kind in series
     )
 
 
@@ -1268,13 +1254,13 @@ def test_an_error_deleting_a_file_is_a_data_file_error(
 
     monkeypatch.setattr(Path, "unlink", failing)
     with pytest.raises(DataFileError, match="Permission denied"):
-        files.roll_back(path, "meas", KEY, None)
+        files.roll_back(path, "meas", None)
 
 
 def test_a_file_that_cannot_be_read_is_not_rolled_back(tmp_path: Path) -> None:
     """Raise DataFileError when the file to roll back cannot be read."""
     with pytest.raises(DataFileError, match="cannot read"):
-        files.roll_back(tmp_path / "missing.dat", "meas", KEY, E)
+        files.roll_back(tmp_path / "missing.dat", "meas", E)
 
 
 def test_the_archive_directories_are_made_once(tmp_path: Path) -> None:
@@ -1316,19 +1302,6 @@ def test_a_buffer_takes_nothing_from_a_clashing_one(tmp_path: Path) -> None:
     with pytest.raises(DataFileError, match="series"):
         day.take(epoch)
     assert (dict(day.texts), dict(day.last)) == before
-
-
-def test_a_buffer_keeps_each_pair_s_switch(tmp_path: Path) -> None:
-    """Keep the switch of each pair's newest measurement, for the log."""
-    meas, _ = directories(tmp_path)
-    day = files.DayBuffer("a")
-    epoch = files.DayBuffer("a")
-    epoch.add(
-        meas / "das_a.mc2.nav23.dat", KEY, files.MeasRecord(measurement=PAIR, row=row())
-    )
-    epoch.add(meas / "das_a.mc2.cs7.dat", ("mc2", "cs7"), predicted(0))
-    day.take(epoch)
-    assert day.switches == {KEY: "2B07"}
 
 
 # ---------------------------------------------------------- the write journal
@@ -1475,7 +1448,7 @@ def test_an_error_is_logged_with_its_message(
 ) -> None:
     """Log each data file error at ERROR, in the words it is raised with."""
     with pytest.raises(DataFileError) as raised:
-        files.roll_back(tmp_path / "missing.dat", "meas", KEY, E)
+        files.roll_back(tmp_path / "missing.dat", "meas", E)
     errors = [r for r in caplog.records if r.levelname == "ERROR"]
     assert [r.getMessage() for r in errors] == [str(raised.value)]
     assert str(raised.value).startswith(f"cannot read data file {tmp_path}")
@@ -1486,8 +1459,8 @@ def test_a_roll_back_says_what_it_did_to_each_file(
 ) -> None:
     """Say, at WARNING, which file was cut back to which epoch, or deleted."""
     cut = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 5)
-    files.roll_back(cut, "meas", KEY, E + 2 * STEP)
-    files.roll_back(cut, "meas", KEY, None)
+    files.roll_back(cut, "meas", E + 2 * STEP)
+    files.roll_back(cut, "meas", None)
     assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
         ("WARNING", f"data file {cut} rolled back to {E + 2 * STEP}"),
         ("WARNING", f"data file {cut} deleted: no row at or before None"),
@@ -1498,7 +1471,7 @@ def test_a_redo_says_what_it_did_to_each_file_it_changed(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Say, at INFO, which files a redo cut or deleted, and nothing of the rest."""
-    (pair, _, _), (triple, _, _) = series = archive(tmp_path)
+    (pair, _), (triple, _) = series = archive(tmp_path)
     caplog.set_level(logging.INFO)
     files.redo_from(series, E + 3 * STEP)
     files.redo_from(series[1:], E + 3 * STEP)
@@ -1515,7 +1488,7 @@ def test_a_redo_deletes_a_file_holding_nothing_good(tmp_path: Path) -> None:
     path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 0)
     with path.open("ab") as file:
         file.write(b"2025-09-23 06:0")
-    files.redo_from([(path, "meas", KEY)], E + 3 * STEP)
+    files.redo_from([(path, "meas")], E + 3 * STEP)
     assert not path.exists()
 
 
@@ -1631,14 +1604,14 @@ def test_a_missing_archive_is_made_beside_one_already_there(tmp_path: Path) -> N
 
 def test_a_measurement_time_on_a_whole_second_keeps_its_microseconds() -> None:
     """Write a measurement time on a whole second with its six zeros."""
-    raw = DASMeasurement.model_validate(
-        {
-            name: getattr(RAW, name)
-            for name in ("measured_phase", "rms", "switch", "clock")
-        }
-        | {"measurement_mjd": 60941.25}
+    pair = measure_pair(
+        measurement_mjd=60941.25,
+        measured_phase=34579,
+        rms=3,
+        prediction=State(x=Fraction(1_234_567), y=0.0),
+        w=Fraction(0),
+        anchor=None,
     )
-    pair = measure_pair(raw, State(x=Fraction(1_234_567), y=0.0), Fraction(0), None)
     line = files.format_meas_row(files.MeasRecord(measurement=pair, row=row()))
     assert "2025-09-23 06:00:00.000000+00:00" in line
 
@@ -1673,9 +1646,9 @@ def field_changed(line: str, index: int, text: str) -> str:
 @pytest.mark.parametrize(
     ("kind", "change", "reason"),
     [
-        ("meas", lambda line: line.rsplit(", ", 1)[0], "27 fields, not 28"),
-        ("meas", lambda line: field_changed(line, 10, "nan"), "'nan' is not a finite"),
-        ("meas", lambda line: field_changed(line, 9, "1234574.45"), "three decimals"),
+        ("meas", lambda line: line.rsplit(", ", 1)[0], "26 fields, not 27"),
+        ("meas", lambda line: field_changed(line, 9, "nan"), "'nan' is not a finite"),
+        ("meas", lambda line: field_changed(line, 8, "1234574.45"), "three decimals"),
         ("meas", lambda line: field_changed(line, 0, "-"), "never empty is empty"),
         (
             "ddiff",
@@ -1687,7 +1660,7 @@ def field_changed(line: str, index: int, text: str) -> str:
             lambda line: field_changed(field_changed(line, 4, "-"), 5, "-"),
             "never empty is empty",
         ),
-        ("meas", lambda line: field_changed(line, 18, "60941.243056"), "never empty"),
+        ("meas", lambda line: field_changed(line, 17, "60941.243056"), "never empty"),
     ],
 )
 def test_a_line_that_does_not_parse_says_why(
@@ -1697,7 +1670,7 @@ def test_a_line_that_does_not_parse_says_why(
     line = change(MEAS_EXAMPLE[0] if kind == "meas" else DDIFF_EXAMPLE[0])
     with pytest.raises(DataFileError) as raised:
         if kind == "meas":
-            files.parse_meas_row(line, KEY)
+            files.parse_meas_row(line)
         else:
             files.parse_ddiff_row(line)
     message = str(raised.value)
@@ -1709,7 +1682,7 @@ def test_a_line_not_written_so_names_its_row() -> None:
     """Name the row by its first characters when it is not as written."""
     line = MEAS_EXAMPLE[0].replace("+1.2301290523526430e-02", "+12.301290523526430e-03")
     with pytest.raises(DataFileError) as raised:
-        files.parse_meas_row(line, KEY)
+        files.parse_meas_row(line)
     assert str(raised.value) == (
         f"row {line[:25]!r} is not written as das_processor writes it"
     )
@@ -1719,7 +1692,7 @@ def test_a_field_never_empty_is_refused_in_those_words() -> None:
     """End the refusal of an empty field that is never empty with its reason."""
     line = field_changed(MEAS_EXAMPLE[0], 0, "-")
     with pytest.raises(DataFileError) as raised:
-        files.parse_meas_row(line, KEY)
+        files.parse_meas_row(line)
     assert str(raised.value).endswith(
         " does not parse: a field that is never empty is empty"
     )
@@ -1730,7 +1703,7 @@ def test_a_deletion_by_roll_back_names_the_common_epoch(
 ) -> None:
     """Say which epoch a deleted file had no row at or before."""
     path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 3)
-    files.roll_back(path, "meas", KEY, E - STEP)
+    files.roll_back(path, "meas", E - STEP)
     assert [r.getMessage() for r in caplog.records] == [
         f"data file {path} deleted: no row at or before {E - STEP}"
     ]
@@ -1749,12 +1722,12 @@ def test_a_device_fault_names_the_file_and_what_was_done(
     with monkeypatch.context() as patch:
         patch.setattr(Path, "unlink", device_error)
         with pytest.raises(DataFileError) as raised:
-            files.roll_back(path, "meas", KEY, None)
+            files.roll_back(path, "meas", None)
     assert str(raised.value) == f"cannot delete {path}: [Errno 5] Input/output error"
     with monkeypatch.context() as patch:
         patch.setattr(os, "fsync", device_error)
         with pytest.raises(DataFileError) as raised:
-            files.roll_back(path, "meas", KEY, E)
+            files.roll_back(path, "meas", E)
     assert str(raised.value) == (
         f"cannot cut data file {path}: [Errno 5] Input/output error"
     )

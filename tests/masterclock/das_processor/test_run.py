@@ -14,6 +14,12 @@ slips, corrected before filtering, and filtered with what screening and the
 slip check excluded. The triples are built from the pairs' accepted
 measurements of the same epoch, the local triple given its self pair for
 both links, marked cold when a pair cold-started, and filtered.
+
+The run's events are logged at the design's levels: each epoch with its
+counts at INFO; steps, cold starts, dormancy, configuration changes and
+corrected slips at INFO; rejects, screening failures, a missing self pair,
+undecided slips and switch changes at WARNING; each series' outcome at
+DEBUG and its prediction and update at TRACE.
 """
 
 import math
@@ -25,6 +31,7 @@ import pytest
 from pydantic import ValidationError
 
 from masterclock.app.exceptions import ConfigError
+from masterclock.app.log import TRACE
 from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import datetime_to_mjd, mjd_to_datetime
 from masterclock.das_processor import files, registry, run
@@ -40,7 +47,7 @@ from masterclock.das_processor.read_steering import STEERING_FILE_TEMPLATE
 from masterclock.das_processor.registry import Existing
 from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.phase import PHASE_PERIOD
-from masterclock.domain.series import Row, SeriesKey, TripleKey
+from masterclock.domain.series import PairKey, Row, SeriesKey, TripleKey
 
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """An invented epoch start."""
@@ -62,9 +69,10 @@ CLOCKS: Final = (
     "clocks:\n"
     "  mc1: [{type: mc}]\n"
     "  mc2: [{type: mc}]\n"
+    "  mc3: [{type: mc}]\n"
     "  nav23: [{type: maser}]\n"
 )
-"""An invented clock configuration: two references and a maser."""
+"""An invented clock configuration: three references and a maser."""
 
 
 def deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
@@ -867,3 +875,307 @@ def test_an_epoch_that_fails_adds_none_of_its_rows(
     with pytest.raises(DataFileError, match="injected"):
         run.process_epoch(LATE + T, blocks[1], buffer, config, clocks)
     assert (dict(buffer.texts), dict(buffer.last)) == before
+
+
+# --------------------------------------------------------------- log events
+
+RUN_LOGGER: Final = "masterclock.das_processor.run"
+"""The logger the run's events go to."""
+
+
+def logged(
+    caplog: pytest.LogCaptureFixture,
+    epoch: run.Epoch,
+    last: dict[SeriesKey, Row],
+    switches: dict[PairKey, str] | None = None,
+) -> list[tuple[str, str]]:
+    """Process ``epoch`` and give the run's log records as (level, message)."""
+    pairs = run.process_pairs(epoch, last)
+    triples = run.process_triples(epoch, last, pairs)
+    done = run.EpochDone(epoch=epoch, pairs=pairs, triples=triples)
+    caplog.clear()
+    with caplog.at_level(TRACE, logger=RUN_LOGGER):
+        run.log_epoch(done, last, switches or {}, "a")
+    return [
+        (r.levelname, r.getMessage()) for r in caplog.records if r.name == RUN_LOGGER
+    ]
+
+
+def at(records: list[tuple[str, str]], level: str) -> list[str]:
+    """Give the messages logged at ``level``."""
+    return [message for name, message in records if name == level]
+
+
+def test_an_epoch_is_logged_with_its_counts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log each epoch at INFO with its series, accepted and held (16.2)."""
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
+    records = logged(
+        caplog, epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path), last
+    )
+    assert at(records, "INFO") == [
+        "epoch 2025-09-23 06:00:00+00:00: 5 pairs, 2 triples, 5 accepted, 2 held"
+    ]
+
+
+def test_each_series_outcome_and_update_are_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log each series' flags at DEBUG and its prediction and update at TRACE."""
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
+    records = logged(
+        caplog, epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path), last
+    )
+    debug = at(records, "DEBUG")
+    assert len(debug) == 7
+    assert "das_a.mc2.nav23: A" in debug
+    assert "das_a.mc1.mc2.nav23: RD" in debug
+    trace = at(records, "TRACE")
+    assert len(trace) == 7
+    assert any(
+        line.startswith("das_a.mc2.nav23: prediction 1234574.38")
+        and "x 1234574.457" in line
+        for line in trace
+    )
+
+
+def test_a_reject_is_logged_at_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a counted reject with its innovation, scale and count (16.2)."""
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
+    outlier = DASMeasurement(
+        measurement_mjd=60941.251588,
+        measured_phase=34779,
+        rms=3,
+        switch="2B07",
+        clock="nav23",
+    )
+    records = logged(
+        caplog, epoch_of([*REFERENCE_MEASURED, outlier], last, tmp_path), last
+    )
+    assert at(records, "WARNING") == [
+        "das_a.mc2.nav23 rejected: innovation 202.6 ps, scale 3.0 ps, 1 consecutive"
+    ]
+
+
+def test_a_phase_step_is_logged_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a phase step with its size and the step offset (16.2)."""
+    stepping = WORKED_LAST.model_copy(
+        update={
+            "flags": "R",
+            "consecutive_rejects": 2,
+            "rejects": ((PREVIOUS - T, 150.0), (PREVIOUS, 150.0)),
+            "epochs_since_accept": 2,
+        }
+    )
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): stepping}
+    moved = DASMeasurement(
+        measurement_mjd=60941.251588,
+        measured_phase=34579 + 150 - 3,
+        rms=3,
+        switch="2B07",
+        clock="nav23",
+    )
+    records = logged(
+        caplog, epoch_of([*REFERENCE_MEASURED, moved], last, tmp_path), last
+    )
+    assert "das_a.mc2.nav23 phase step of 150 ps; step offset 150 ps" in at(
+        records, "INFO"
+    )
+
+
+def test_a_cold_start_and_dormancy_are_logged_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a series that cold-starts and one that goes dormant (16.2)."""
+    acquiring = last_row(
+        x_fs=None,
+        y=None,
+        d=None,
+        innovation_scale=None,
+        flags="RD",
+        filter_states=3,
+        time_constant=100.0,
+        scale_time_constant=50.0,
+        rejects=((PREVIOUS - T, 1_234_579.0), (PREVIOUS, 1_234_579.0)),
+    )
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): acquiring}
+    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
+    info = at(logged(caplog, epoch, last), "INFO")
+    assert "das_a.mc2.nav23 cold start: segment 2" in info
+    stopping = {
+        **REFERENCE_LAST,
+        ("mc1", "mc1"): last_row(x_fs=1_000_000, epochs_since_accept=40),
+    }
+    epoch = epoch_of(REFERENCE_MEASURED[1:], stopping, tmp_path / "second")
+    info = at(logged(caplog, epoch, stopping), "INFO")
+    assert "das_a.mc1.mc1 dormant" in info
+
+
+def test_a_configuration_change_is_logged_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a warm start for new time constants (16.2)."""
+    older = WORKED_LAST.model_copy(update={"time_constant": 80.0})
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): older}
+    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
+    info = at(logged(caplog, epoch, last), "INFO")
+    assert (
+        "das_a.mc2.nav23 configuration change: M 80.0 to 100.0, M_sigma 50.0 to 50.0"
+        in info
+    )
+
+
+def test_a_frequency_step_is_logged_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a frequency step and the segment it starts (16.2)."""
+    ramping = WORKED_LAST.model_copy(
+        update={
+            "flags": "R",
+            "consecutive_rejects": 2,
+            "rejects": ((PREVIOUS - T, 30.0), (PREVIOUS, 60.0)),
+            "epochs_since_accept": 2,
+        }
+    )
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): ramping}
+    moved = DASMeasurement(
+        measurement_mjd=60941.251588,
+        measured_phase=34579 + 90 - 3,
+        rms=3,
+        switch="2B07",
+        clock="nav23",
+    )
+    info = at(
+        logged(caplog, epoch_of([*REFERENCE_MEASURED, moved], last, tmp_path), last),
+        "INFO",
+    )
+    assert "das_a.mc2.nav23 frequency step: segment 5" in info
+
+
+def test_screening_and_slip_events_are_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log screening failures at WARNING and a corrected slip at INFO (16.2)."""
+    maser = last_row(
+        x_fs=2_000_000,
+        filter_states=3,
+        time_constant=100.0,
+        scale_time_constant=50.0,
+        innovation_scale=40.0,
+    )
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): maser}
+    shifted = [
+        measured("mc1", "mc1", 1000, 10),
+        measured("mc2", "mc2", 2100, 20),
+        measured("mc1", "mc2", 5000, 30),
+        measured("mc2", "mc1", PHASE_PERIOD - 5000, 40),
+        measured("mc2", "nav23", 2008, 50),
+    ]
+    warnings = at(logged(caplog, epoch_of(shifted, last, tmp_path), last), "WARNING")
+    assert "self-measurement of mc2 failed: excluded das_a.mc2.nav23" in warnings
+
+
+def test_a_missing_self_measurement_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a self pair with a prediction but no measurement at WARNING (10.1)."""
+    last = dict(REFERENCE_LAST)
+    epoch = epoch_of(REFERENCE_MEASURED[1:], last, tmp_path)
+    assert "self-measurement of mc1 missing" in at(
+        logged(caplog, epoch, last), "WARNING"
+    )
+
+
+def test_a_reciprocity_and_a_closure_failure_are_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log the link directions reciprocity excludes, and links closure excludes."""
+    last = dict(REFERENCE_LAST)
+    bad = [
+        *REFERENCE_MEASURED[:2],
+        measured("mc1", "mc2", 5100, 30),
+        REFERENCE_MEASURED[3],
+    ]
+    warnings = at(logged(caplog, epoch_of(bad, last, tmp_path), last), "WARNING")
+    assert (
+        "reciprocity of mc1-mc2 failed: excluded das_a.mc1.mc2, das_a.mc2.mc1"
+        in warnings
+    )
+
+
+def test_slips_corrected_and_undecided_are_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a corrected slip at INFO, as the slip check found it."""
+    jump = PHASE_PERIOD // 2 + 2
+    clock = {
+        "filter_states": 3,
+        "time_constant": 100.0,
+        "scale_time_constant": 50.0,
+        "innovation_scale": 3.0,
+    }
+    last = {
+        **REFERENCE_LAST,
+        ("mc1", "nav23"): last_row(
+            x_fs=1_000_000_000, epochs_in_segment=10, flags="AU", **clock
+        ),
+        ("mc2", "nav23"): last_row(x_fs=2_000_000_000, **clock),
+    }
+    clocks = [
+        measured("mc1", "nav23", (1_000_000 + jump) % PHASE_PERIOD, 50),
+        measured("mc2", "nav23", (2_000_000 + jump - 4) % PHASE_PERIOD, 60),
+    ]
+    records = logged(
+        caplog, epoch_of([*REFERENCE_MEASURED, *clocks], last, tmp_path), last
+    )
+    assert "das_a.mc1.nav23 slip corrected: +1 cycles" in at(records, "INFO")
+    wide = {**clock, "innovation_scale": 25_000.0}
+    last[("mc1", "nav23")] = last_row(x_fs=1_000_000_000, **wide)
+    last[("mc2", "nav23")] = last_row(x_fs=2_000_000_000, **wide)
+    epoch = epoch_of([*REFERENCE_MEASURED, *clocks], last, tmp_path / "second")
+    warnings = at(logged(caplog, epoch, last), "WARNING")
+    assert (
+        "slip of clock nav23 undecided: excluded das_a.mc1.nav23, das_a.mc2.nav23"
+        in warnings
+    )
+
+
+def test_a_switch_change_for_a_pair_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a pair measured through another switch port than before (5.4)."""
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
+    epoch = epoch_of([*REFERENCE_MEASURED, WORKED_RAW], last, tmp_path)
+    records = logged(
+        caplog, epoch, last, {("mc2", "nav23"): "2B06", ("mc1", "mc1"): "1A01"}
+    )
+    assert at(records, "WARNING") == [
+        "das_a.mc2.nav23 switch changed from 2B06 to 2B07"
+    ]
+
+
+def test_a_closure_failure_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log each link closure excludes, at WARNING (10.3)."""
+    refs = ("mc1", "mc2", "mc3")
+    values = {"mc1": 1000, "mc2": 2000, "mc3": 3000}
+    last: dict[SeriesKey, Row] = {}
+    raws = []
+    for index, (a, b) in enumerate((a, b) for a in refs for b in refs):
+        x = values[a] if a == b else 1000 * (int(a[-1]) - int(b[-1]))
+        error = (
+            50 if (a, b) == ("mc2", "mc3") else -50 if (a, b) == ("mc3", "mc2") else 0
+        )
+        last[(a, b)] = last_row(x_fs=x * 1000)
+        raws.append(measured(a, b, (x + error) % PHASE_PERIOD, 10 * (index + 1)))
+    warnings = at(logged(caplog, epoch_of(raws, last, tmp_path), last), "WARNING")
+    assert (
+        "closure of link mc2-mc3 failed: excluded das_a.mc2.mc3, das_a.mc3.mc2"
+        in warnings
+    )

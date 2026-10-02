@@ -1205,6 +1205,34 @@ def read_last_row(path: Path, kind: FileKind, key: SeriesKey) -> Row:
         If the file cannot be read, is not sound, or its last row is not a
         row of the file.
     """
+    return read_last_record(path, kind, key).row
+
+
+def read_last_record(
+    path: Path, kind: FileKind, key: SeriesKey
+) -> MeasRecord | DdiffRecord:
+    """Read the last record of a sound file: its measurement and row.
+
+    Parameters
+    ----------
+    path : Path
+        The file.
+    kind : {'meas', 'ddiff'}
+        The kind of file.
+    key : (str, str) or (str, str, str)
+        The file's series.
+
+    Returns
+    -------
+    MeasRecord or DdiffRecord
+        Its last record.
+
+    Raises
+    ------
+    DataFileError
+        If the file cannot be read, is not sound, or its last row is not a
+        row of the file.
+    """
     size, header_lines = WIDTHS[kind] + 1, HEADER_LINES[kind]
     try:
         with path.open("rb") as file:
@@ -1219,7 +1247,7 @@ def read_last_row(path: Path, kind: FileKind, key: SeriesKey) -> Row:
         text = line[:-1].decode("ascii")
     except UnicodeDecodeError as exc:
         _fail(f"data file {path} is not sound: its last row is not ASCII", exc)
-    return _parse_line(text, kind, key).row
+    return _parse_line(text, kind, key)
 
 
 # --------------------------------------------------- day buffer and write
@@ -1246,6 +1274,8 @@ class DayBuffer:
         Each file's lines since the last write, newlines included.
     last : dict of series key to Row
         Each series' newest row, as a later run would read it back.
+    switches : dict of (str, str) to str
+        Each pair's switch at its newest measurement, for the log.
     """
 
     def __init__(self, channel: RfChannel) -> None:
@@ -1259,6 +1289,7 @@ class DayBuffer:
         self.channel: RfChannel = channel
         self.texts: dict[Path, str] = {}
         self.last: dict[SeriesKey, Row] = {}
+        self.switches: dict[PairKey, str] = {}
         self._series: dict[Path, tuple[FileKind, SeriesKey]] = {}
 
     def add(self, path: Path, key: SeriesKey, record: MeasRecord | DdiffRecord) -> None:
@@ -1293,6 +1324,8 @@ class DayBuffer:
         if isinstance(record, MeasRecord):
             line = format_meas_row(record)
             back = parse_meas_row(line, (key[0], key[1])).row
+            if record.measurement is not None:
+                self.switches[(key[0], key[1])] = record.measurement.measurement.switch
         else:
             line = format_ddiff_row(record)
             back = parse_ddiff_row(line).row
@@ -1321,6 +1354,7 @@ class DayBuffer:
             self._series[path] = other.series_of(path)
             self.texts[path] = self.texts.get(path, "") + text
         self.last.update(other.last)
+        self.switches.update(other.switches)
 
     def series_of(self, path: Path) -> tuple[FileKind, SeriesKey]:
         """Give the kind of file and the series a buffered path is for.

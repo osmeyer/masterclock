@@ -1283,3 +1283,16 @@ def test_a_buffer_takes_nothing_from_a_clashing_one(tmp_path: Path) -> None:
     with pytest.raises(DataFileError, match="series"):
         day.take(epoch)
     assert (dict(day.texts), dict(day.last)) == before
+
+
+def test_a_buffer_keeps_each_pair_s_switch(tmp_path: Path) -> None:
+    """Keep the switch of each pair's newest measurement, for the log."""
+    meas, _ = directories(tmp_path)
+    day = files.DayBuffer("a")
+    epoch = files.DayBuffer("a")
+    epoch.add(
+        meas / "das_a.mc2.nav23.dat", KEY, files.MeasRecord(measurement=PAIR, row=row())
+    )
+    epoch.add(meas / "das_a.mc2.cs7.dat", ("mc2", "cs7"), predicted(0))
+    day.take(epoch)
+    assert day.switches == {KEY: "2B07"}

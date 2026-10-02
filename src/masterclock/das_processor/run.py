@@ -7,7 +7,7 @@ steers a series, and each series' settings. Everything below it receives
 that epoch or plain values.
 """
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
@@ -15,8 +15,10 @@ from typing import Final, Self
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
 
+from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import datetime_to_mjd, mjd_to_datetime
+from masterclock.das_processor.channels import RfChannel
 from masterclock.das_processor.clock_config import ClockConfig
 from masterclock.das_processor.config import AppConfig
 from masterclock.das_processor.epochs import floor_to_ten_minutes
@@ -27,7 +29,7 @@ from masterclock.das_processor.files import (
     MeasRecord,
     ensure_archives,
     good_through,
-    read_last_row,
+    read_last_record,
     roll_back,
     write_buffer,
 )
@@ -47,7 +49,7 @@ from masterclock.das_processor.registry import (
 )
 from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.filter import StepResult, anchor_of, filter_step, predict
-from masterclock.domain.phase import EPOCH_SECONDS
+from masterclock.domain.phase import EPOCH_SECONDS, FS_PER_PS
 from masterclock.domain.screening import Screening, screen_references
 from masterclock.domain.series import (
     PairKey,
@@ -68,6 +70,9 @@ _PAIR: Final[int] = 2
 
 _TRIPLE: Final[int] = 3
 """How many names a triple key holds."""
+
+_log: Final[MasterClockLogger] = get_logger(__name__)
+"""Logger for this module."""
 
 
 class Epoch(BaseModel):
@@ -359,12 +364,15 @@ class TripleStep(BaseModel):
         Each triple's row, and whether it cold-started.
     measurements : dict of (str, str, str) to TripleMeasurement
         Each triple's double difference, where it has one.
+    predictions : dict of (str, str, str) to State or None
+        Each triple's prediction at E.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     results: dict[TripleKey, StepResult]
     measurements: dict[TripleKey, TripleMeasurement]
+    predictions: dict[TripleKey, State | None]
 
 
 def _component(pairs: PairStep, pair: PairKey) -> Component:
@@ -430,6 +438,7 @@ def process_triples(
     mark = epoch.interpolated_datetime
     results: dict[TripleKey, StepResult] = {}
     measurements: dict[TripleKey, TripleMeasurement] = {}
+    predictions: dict[TripleKey, State | None] = {}
     for triple in epoch.triples:
         r, s, c = triple
         value = double_difference(
@@ -442,6 +451,7 @@ def process_triples(
         if measurement is not None:
             measurements[triple] = measurement
         prediction = predict(last.get(triple), steer_u(triple, mark, epoch.steering))
+        predictions[triple] = prediction
         results[triple] = filter_step(
             mark,
             epoch.params[triple],
@@ -449,7 +459,9 @@ def process_triples(
             prediction,
             None if measurement is None else measurement.measured(),
         )
-    return TripleStep(results=results, measurements=measurements)
+    return TripleStep(
+        results=results, measurements=measurements, predictions=predictions
+    )
 
 
 # --------------------------------------------------------------- the epoch loop
@@ -538,8 +550,10 @@ def next_epoch(config: AppConfig) -> datetime:
     return common + _EPOCH
 
 
-def read_last_rows(config: AppConfig) -> dict[SeriesKey, Row]:
-    """Read the last row of every series from its file (I4).
+def read_last_state(
+    config: AppConfig,
+) -> tuple[dict[SeriesKey, Row], dict[PairKey, str]]:
+    """Read every series' last row from its file, and each pair's switch (I4).
 
     Parameters
     ----------
@@ -548,17 +562,23 @@ def read_last_rows(config: AppConfig) -> dict[SeriesKey, Row]:
 
     Returns
     -------
-    dict of series key to Row
-        Each series' last row.
+    tuple of (dict, dict)
+        Each series' last row, and the switch of each pair whose last row
+        holds a measurement.
 
     Raises
     ------
     DataFileError
         If a file cannot be read or is not sound.
     """
-    return {
-        key: read_last_row(path, kind, key) for path, kind, key in data_series(config)
-    }
+    rows: dict[SeriesKey, Row] = {}
+    switches: dict[PairKey, str] = {}
+    for path, kind, key in data_series(config):
+        record = read_last_record(path, kind, key)
+        rows[key] = record.row
+        if isinstance(record, MeasRecord) and record.measurement is not None:
+            switches[(key[0], key[1])] = record.measurement.measurement.switch
+    return rows, switches
 
 
 def process_epoch(
@@ -595,7 +615,10 @@ def process_epoch(
         If anything about the epoch cannot be read, worked out or
         formatted; the buffer then holds none of the epoch's rows.
     """
-    last = dict(buffer.last) if buffer.last else read_last_rows(config)
+    if buffer.last:
+        last, switches = dict(buffer.last), dict(buffer.switches)
+    else:
+        last, switches = read_last_state(config)
     existing = Existing(
         pairs=frozenset((key[0], key[1]) for key in last if len(key) == _PAIR),
         triples=frozenset(
@@ -629,7 +652,9 @@ def process_epoch(
     for key, record in records:
         staged.add(series_file(processed, config.das.rf, key), key, record)
     buffer.take(staged)
-    return EpochDone(epoch=epoch, pairs=pairs, triples=triples)
+    done = EpochDone(epoch=epoch, pairs=pairs, triples=triples)
+    log_epoch(done, last, switches, config.das.rf)
+    return done
 
 
 def run(
@@ -709,3 +734,232 @@ def _next_block(blocks: Iterator[DASData], mark: datetime) -> DASData | None:
         if block.interpolated_datetime >= mark:
             return block
     return None
+
+
+# ---------------------------------------------------------------- log events
+
+
+def series_name(channel: RfChannel, key: SeriesKey) -> str:
+    """Name a series in the log as its file does, without the suffix.
+
+    Parameters
+    ----------
+    channel : {'a', 'b'}
+        The RF channel.
+    key : (str, str) or (str, str, str)
+        The series.
+
+    Returns
+    -------
+    str
+        ``das_<rf>.<names>``.
+
+    Examples
+    --------
+    >>> series_name("a", ("mc2", "nav23"))
+    'das_a.mc2.nav23'
+    """
+    return f"das_{channel}." + ".".join(key)
+
+
+def _names(channel: RfChannel, keys: Iterable[PairKey]) -> str:
+    """Name several pairs in the log.
+
+    Parameters
+    ----------
+    channel : {'a', 'b'}
+        The RF channel.
+    keys : iterable of (str, str)
+        The pairs.
+
+    Returns
+    -------
+    str
+        Their names, sorted, separated by commas.
+    """
+    return ", ".join(series_name(channel, key) for key in sorted(keys))
+
+
+def _log_screening(pairs: PairStep, channel: RfChannel) -> None:
+    """Log what screening and the slip check found (design 16.2).
+
+    Parameters
+    ----------
+    pairs : PairStep
+        What the epoch's pairs gave.
+    channel : {'a', 'b'}
+        The RF channel.
+    """
+    for event in pairs.screening.events:
+        refs = "-".join(event.references)
+        excluded = _names(channel, event.excluded)
+        if event.kind == "self_missing":
+            _log.warning("self-measurement of %s missing", refs)
+        elif event.kind == "self_fail":
+            _log.warning("self-measurement of %s failed: excluded %s", refs, excluded)
+        elif event.kind == "reciprocity_fail":
+            _log.warning("reciprocity of %s failed: excluded %s", refs, excluded)
+        else:
+            _log.warning("closure of link %s failed: excluded %s", refs, excluded)
+    for slip in pairs.slips.events:
+        if slip.kind == "slip_corrected":
+            name = series_name(channel, slip.pairs[0])
+            _log.info("%s slip corrected: %+d cycles", name, slip.cycles)
+        else:
+            _log.warning(
+                "slip of clock %s undecided: excluded %s",
+                slip.clock,
+                _names(channel, slip.pairs),
+            )
+
+
+def _log_series(name: str, result: StepResult, last: Row | None) -> None:
+    """Log what happened to one series at an epoch (design 16.2).
+
+    Parameters
+    ----------
+    name : str
+        The series' name.
+    result : StepResult
+        Its row at the epoch.
+    last : Row or None
+        Its last row, or ``None`` for a new series.
+    """
+    row = result.row
+    _log.debug("%s: %s", name, row.flags)
+    if "R" in row.flags and "D" not in row.flags:
+        _log.warning(
+            "%s rejected: innovation %.1f ps, scale %.1f ps, %d consecutive",
+            name,
+            row.innovation,
+            row.innovation_scale,
+            row.consecutive_rejects,
+        )
+    if result.cold:
+        _log.info("%s cold start: segment %d", name, row.segment)
+    if last is not None and "D" not in last.flags:
+        _log_changes(name, row, last)
+
+
+def _log_changes(name: str, row: Row, last: Row) -> None:
+    """Log how a tracked series changed at an epoch (design 16.2).
+
+    Parameters
+    ----------
+    name : str
+        The series' name.
+    row : Row
+        Its row at the epoch.
+    last : Row
+        Its last row, which held a state.
+    """
+    if "D" in row.flags:
+        _log.info("%s dormant", name)
+        return
+    changed = (last.time_constant, last.scale_time_constant) != (
+        row.time_constant,
+        row.scale_time_constant,
+    )
+    if changed:
+        _log.info(
+            "%s configuration change: M %s to %s, M_sigma %s to %s",
+            name,
+            last.time_constant,
+            row.time_constant,
+            last.scale_time_constant,
+            row.scale_time_constant,
+        )
+    if "A" in row.flags and row.segment - last.segment == 1 + int(changed):
+        _log.info("%s frequency step: segment %d", name, row.segment)
+    elif "A" in row.flags and row.step_offset != last.step_offset:
+        _log.info(
+            "%s phase step of %d ps; step offset %d ps",
+            name,
+            row.step_offset - last.step_offset,
+            row.step_offset,
+        )
+
+
+def _log_trace(name: str, row: Row, prediction: State | None) -> None:
+    """Log a series' prediction and update at TRACE (design 16.2).
+
+    Parameters
+    ----------
+    name : str
+        The series' name.
+    row : Row
+        Its row at the epoch.
+    prediction : State or None
+        Its prediction at the epoch.
+    """
+    _log.trace(
+        "%s: prediction %s, innovation %s, x %s, y %s, d %s",
+        name,
+        None if prediction is None else float(prediction.x),
+        row.innovation,
+        None if row.x_fs is None else f"{row.x_fs / FS_PER_PS:.3f}",
+        row.y,
+        row.d,
+    )
+
+
+def log_epoch(
+    done: EpochDone,
+    last: Mapping[SeriesKey, Row],
+    switches: Mapping[PairKey, str],
+    channel: RfChannel,
+) -> None:
+    """Log everything an epoch did, at the design's levels (design 16.2).
+
+    Parameters
+    ----------
+    done : EpochDone
+        The epoch and what its pairs and triples gave.
+    last : Mapping of series key to Row
+        Each series' last row.
+    switches : Mapping of (str, str) to str
+        Each pair's switch at its last measurement, where known.
+    channel : {'a', 'b'}
+        The RF channel.
+
+    Notes
+    -----
+    Screening, slip, reject and switch-change events go at WARNING except
+    corrected slips; steps, cold starts, dormancy, configuration changes
+    and the epoch's counts at INFO; each series' outcome at DEBUG and its
+    prediction and update at TRACE. Series are logged in key order, pairs
+    first.
+    """
+    pairs, triples = done.pairs, done.triples
+    _log_screening(pairs, channel)
+    for pair, measurement in sorted(pairs.measurements.items()):
+        before = switches.get(pair)
+        now = measurement.measurement.switch
+        if before is not None and before != now:
+            _log.warning(
+                "%s switch changed from %s to %s",
+                series_name(channel, pair),
+                before,
+                now,
+            )
+    results: list[tuple[SeriesKey, StepResult, State | None]] = [
+        (pair, result, pairs.predictions[pair])
+        for pair, result in pairs.results.items()
+    ]
+    results += [
+        (triple, result, triples.predictions[triple])
+        for triple, result in triples.results.items()
+    ]
+    for key, result, prediction in results:
+        name = series_name(channel, key)
+        _log_series(name, result, last.get(key))
+        _log_trace(name, result.row, prediction)
+    accepted = sum("A" in result.row.flags for _, result, _ in results)
+    _log.info(
+        "epoch %s: %d pairs, %d triples, %d accepted, %d held",
+        done.epoch.interpolated_datetime,
+        len(pairs.results),
+        len(triples.results),
+        accepted,
+        len(results) - accepted,
+    )

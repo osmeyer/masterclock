@@ -12,13 +12,14 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Final
 
 from masterclock.app.timeutil import ensure_utc
+from masterclock.domain.phase import EPOCH_SECONDS
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from masterclock.app.timeutil import DatetimeLike
 
-EPOCH_LENGTH: Final[timedelta] = timedelta(minutes=10)
+EPOCH_LENGTH: Final[timedelta] = timedelta(seconds=EPOCH_SECONDS)
 """How long one epoch lasts: from one ten-minute mark to the next."""
 
 _CACHE_SIZE: Final[int] = 1024

@@ -1,7 +1,9 @@
 """The phase of a 5 MHz signal, as the measurements give it, and exact sums of it.
 
 A phase is a whole number of picoseconds. It wraps at one period of the
-signal, so a reading can only say where in the period it fell.
+signal, so a reading can only say where in the period it fell. Decycling
+puts back the whole periods a reading lost (:func:`decycle`), by comparing
+it with where the estimator expected the phase to be.
 
 Where a phase is combined with a float - a rate times a time, say - the sum
 is formed exactly, as a :class:`~fractions.Fraction`, and rounded once,
@@ -16,11 +18,15 @@ from datetime import timedelta
 from fractions import Fraction
 from typing import TYPE_CHECKING, Final
 
+from pydantic import BaseModel, ConfigDict
+
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError, PhaseError
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+    from masterclock.domain.series import State
 
 PHASE_PERIOD: Final[int] = 200_000
 """One period of a 5 MHz signal, in picoseconds."""
@@ -29,6 +35,12 @@ PHASE_MAX: Final[int] = PHASE_PERIOD - 1
 """The largest phase a reading can give, in picoseconds.
 
 A whole period would be indistinguishable from zero.
+"""
+
+EPOCH_SECONDS: Final[int] = 600
+"""How long one epoch lasts, in seconds: from one ten-minute mark to the next.
+
+A whole number, so a phase moved on by a rate over one epoch stays exact.
 """
 
 _MICROSECOND: Final[timedelta] = timedelta(microseconds=1)
@@ -133,3 +145,118 @@ def round_even(value: Fraction | int) -> int:
     1234577
     """
     return round(value)
+
+
+class Decycled(BaseModel):
+    """A reading with its whole periods put back, referred to its epoch start.
+
+    Parameters
+    ----------
+    cycle_count : int
+        The whole periods added to the reading: n.
+    z : int
+        The decycled phase at the epoch start, ps: z_E.
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If a value is not an int, or a field is unknown.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    cycle_count: int
+    z: int
+
+
+def _check_reading(phi: int, delta: Fraction) -> None:
+    """Refuse a reading that is not a phase, or not taken within its epoch.
+
+    Parameters
+    ----------
+    phi : int
+        The reading, ps.
+    delta : Fraction
+        The measurement time after the epoch start, s.
+
+    Raises
+    ------
+    PhaseError
+        If ``phi`` is outside 0 to :data:`PHASE_MAX`, or ``delta`` is
+        outside 0 to :data:`EPOCH_SECONDS`, the end excluded.
+    """
+    if not 0 <= phi <= PHASE_MAX:
+        message = f"reading {phi} is not within one period"
+        _log.error(message)
+        raise PhaseError(message)
+    if not 0 <= delta < EPOCH_SECONDS:
+        message = (
+            f"measurement time {delta} s after its epoch start is not within its epoch"
+        )
+        _log.error(message)
+        raise PhaseError(message)
+
+
+def decycle(
+    phi: int,
+    delta: Fraction,
+    w: Fraction,
+    prediction: State | None,
+    anchor: int | None,
+) -> Decycled:
+    """Put back a reading's whole periods and refer it to its epoch start.
+
+    With a prediction, the reading is decycled against the phase the
+    estimator predicts at the measurement time,
+    x̂(t) = x⁻ + y⁻δ + ½d⁻δ² + w, and the motion and steering since the
+    epoch start are taken off again. Without one, it is decycled against
+    ``anchor``, the last measurement a dormant series buffered, or given no
+    whole periods when there is none. Every sum is exact; z_E is rounded
+    once, a tie to even.
+
+    Parameters
+    ----------
+    phi : int
+        The reading, ps, from 0 to :data:`PHASE_MAX`.
+    delta : Fraction
+        The measurement time after the epoch start, s: δ, from 0 to
+        :data:`EPOCH_SECONDS`, the end excluded.
+    w : Fraction
+        Steering applied between the epoch start and the measurement, ps.
+    prediction : State or None
+        The predicted state at the epoch start, or ``None`` when the series
+        has none.
+    anchor : int or None
+        The last buffered measurement of a series without a prediction, ps,
+        or ``None``. Not used when there is a prediction.
+
+    Returns
+    -------
+    Decycled
+        The whole periods added and the decycled phase at the epoch start.
+
+    Raises
+    ------
+    PhaseError
+        If ``phi`` is not a phase within one period, or ``delta`` is not
+        within the epoch.
+
+    Examples
+    --------
+    The worked epoch of the design: the last row held x = 1 234 567 and
+    y = 0.0123 ps/s, and the reading 34 579 ps came 137.2032 s after the
+    mark.
+
+    >>> from masterclock.domain.series import State
+    >>> prediction = State(x=1_234_567 + exact(0.0123) * 600, y=0.0123)
+    >>> decycle(34_579, Fraction(1_372_032, 10_000), Fraction(0), prediction, None)
+    Decycled(cycle_count=6, z=1234577)
+    """
+    _check_reading(phi, delta)
+    if prediction is None:
+        n = 0 if anchor is None else round_even((anchor - phi + w) / PHASE_PERIOD)
+        return Decycled(cycle_count=n, z=round_even(phi + n * PHASE_PERIOD - w))
+    motion = exact(prediction.y) * delta + exact(prediction.d) * delta * delta / 2
+    predicted = prediction.x + motion + w
+    n = round_even((predicted - phi) / PHASE_PERIOD)
+    return Decycled(cycle_count=n, z=round_even(phi + n * PHASE_PERIOD - motion - w))

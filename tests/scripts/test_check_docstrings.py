@@ -13,7 +13,7 @@ import pytest
 
 import check_docstrings
 
-COMPLETE: Final = '''"""A module."""
+COMPLETE_MODULE: Final = '''"""A module."""
 
 
 class Thing:
@@ -42,19 +42,19 @@ async def waiting() -> None:
 '''
 
 
-def write(directory: Path, name: str, text: str) -> Path:
-    """Write ``text`` to a file in ``directory`` and return its path."""
-    path = directory / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    return path
+def write_source(source_directory: Path, file_name: str, source_text: str) -> Path:
+    """Write ``source_text`` to a file in ``source_directory`` and return its path."""
+    source_file = source_directory / file_name
+    source_file.parent.mkdir(parents=True, exist_ok=True)
+    source_file.write_text(source_text, encoding="utf-8")
+    return source_file
 
 
 def test_every_definition_with_a_docstring_passes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Pass a file where every definition has a docstring, and print the count."""
-    write(tmp_path, "complete.py", COMPLETE)
+    write_source(tmp_path, "complete.py", COMPLETE_MODULE)
     assert check_docstrings.main([str(tmp_path)]) == 0
     assert (
         "files examined: 1, definitions examined: 8, problems: 0"
@@ -63,7 +63,7 @@ def test_every_definition_with_a_docstring_passes(
 
 
 @pytest.mark.parametrize(
-    ("old", "new", "reported"),
+    ("docstring_text", "replacement_text", "reported_problem"),
     [
         ('"""A module."""\n', "", "1: module has no docstring"),
         ('    """A class."""\n', "    pass\n", "class Thing has no docstring"),
@@ -100,53 +100,55 @@ def test_every_definition_with_a_docstring_passes(
 def test_each_kind_of_missing_docstring_is_reported(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
-    old: str,
-    new: str,
-    reported: str,
+    docstring_text: str,
+    replacement_text: str,
+    reported_problem: str,
 ) -> None:
     """Fail when any one docstring is removed or empty, and name the definition."""
-    assert old in COMPLETE
-    path = write(tmp_path, "gap.py", COMPLETE.replace(old, new, 1))
+    assert docstring_text in COMPLETE_MODULE
+    source_file = write_source(
+        tmp_path, "gap.py", COMPLETE_MODULE.replace(docstring_text, replacement_text, 1)
+    )
     assert check_docstrings.main([str(tmp_path)]) == 1
-    output = capsys.readouterr().out
-    assert f"{path}:" in output
-    assert reported in output
-    assert "problems: 1" in output
+    printed_output = capsys.readouterr().out
+    assert f"{source_file}:" in printed_output
+    assert reported_problem in printed_output
+    assert "problems: 1" in printed_output
 
 
 @pytest.mark.parametrize(
-    "content",
+    "file_bytes",
     [b"def (:\n", b"x = '\xff'\n", b"x = 1\x00\n"],
     ids=["bad syntax", "not utf-8", "null byte"],
 )
 def test_a_file_that_cannot_be_parsed_fails(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], content: bytes
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], file_bytes: bytes
 ) -> None:
     """Fail on a file the parser rejects, rather than skipping it as clean."""
-    path = tmp_path / "broken.py"
-    path.write_bytes(content)
+    source_file = tmp_path / "broken.py"
+    source_file.write_bytes(file_bytes)
     assert check_docstrings.main([str(tmp_path)]) == 1
-    assert f"{path}: cannot be parsed:" in capsys.readouterr().out
+    assert f"{source_file}: cannot be parsed:" in capsys.readouterr().out
 
 
 def test_a_file_that_cannot_be_read_fails(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Report a file that can't be read, rather than stopping with a traceback."""
-    path = write(tmp_path, "locked.py", COMPLETE)
-    path.chmod(0)
+    source_file = write_source(tmp_path, "locked.py", COMPLETE_MODULE)
+    source_file.chmod(0)
     try:
         assert check_docstrings.main([str(tmp_path)]) == 1
     finally:
-        path.chmod(0o644)
-    assert f"{path}: cannot be read:" in capsys.readouterr().out
+        source_file.chmod(0o644)
+    assert f"{source_file}: cannot be read:" in capsys.readouterr().out
 
 
 def test_a_folder_named_like_a_python_file_is_not_a_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Leave out a folder whose name ends in .py, since it holds no source itself."""
-    write(tmp_path, "real.py", COMPLETE)
+    write_source(tmp_path, "real.py", COMPLETE_MODULE)
     (tmp_path / "folder.py").mkdir()
     assert check_docstrings.main([str(tmp_path)]) == 0
     assert "files examined: 1," in capsys.readouterr().out
@@ -156,7 +158,7 @@ def test_files_in_subdirectories_are_found(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Examine Python files in nested folders."""
-    write(tmp_path, "a/b/deep.py", COMPLETE)
+    write_source(tmp_path, "a/b/deep.py", COMPLETE_MODULE)
     assert check_docstrings.main([str(tmp_path)]) == 0
     assert "files examined: 1," in capsys.readouterr().out
 
@@ -165,31 +167,31 @@ def test_no_python_files_fails(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Fail on a folder with no Python files, because nothing was checked."""
-    write(tmp_path, "notes.txt", "not python")
+    write_source(tmp_path, "notes.txt", "not python")
     assert check_docstrings.main([str(tmp_path)]) == 1
     assert "no Python files found" in capsys.readouterr().out
 
 
 def test_no_directory_given_is_a_usage_error() -> None:
     """Exit with status 2 when no folder is given."""
-    with pytest.raises(SystemExit) as stopped:
+    with pytest.raises(SystemExit) as program_exit:
         check_docstrings.main([])
-    assert stopped.value.code == 2
+    assert program_exit.value.code == 2
 
 
 def test_a_missing_directory_is_a_usage_error(tmp_path: Path) -> None:
     """Exit with status 2 when the folder doesn't exist."""
-    with pytest.raises(SystemExit) as stopped:
+    with pytest.raises(SystemExit) as program_exit:
         check_docstrings.main([str(tmp_path / "absent")])
-    assert stopped.value.code == 2
+    assert program_exit.value.code == 2
 
 
 def test_running_the_file_as_a_script_exits_with_the_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Exit with the status main returns when run as a program."""
-    write(tmp_path, "complete.py", COMPLETE)
+    write_source(tmp_path, "complete.py", COMPLETE_MODULE)
     monkeypatch.setattr(sys, "argv", ["check_docstrings.py", str(tmp_path)])
-    with pytest.raises(SystemExit) as stopped:
+    with pytest.raises(SystemExit) as program_exit:
         runpy.run_path(check_docstrings.__file__, run_name="__main__")
-    assert stopped.value.code == 0
+    assert program_exit.value.code == 0

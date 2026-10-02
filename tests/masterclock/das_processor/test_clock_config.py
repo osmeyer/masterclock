@@ -27,7 +27,7 @@ from masterclock.app.exceptions import ConfigError
 from masterclock.das_processor import clock_config
 from masterclock.domain.series import SeriesParams
 
-BASE: Final = (
+BASE_YAML: Final = (
     "rejects_before_restart: 36\n"
     "rms_limit:\n"
     "  default: 50\n"
@@ -50,24 +50,26 @@ BASE: Final = (
 )
 """An invented clock configuration of the design's shape."""
 
-BEFORE: Final = datetime(2025, 10, 31, 23, 50, tzinfo=UTC)
+MARK_BEFORE_MJD_60980: Final = datetime(2025, 10, 31, 23, 50, tzinfo=UTC)
 """The mark just before MJD 60980 begins."""
 
-AT: Final = datetime(2025, 11, 1, 0, 0, tzinfo=UTC)
+MJD_60980_START: Final = datetime(2025, 11, 1, 0, 0, tzinfo=UTC)
 """The mark at which MJD 60980 begins."""
 
 
-def load(tmp_path: Path, text: str = BASE) -> clock_config.ClockConfig:
-    """Write ``text`` as a clock configuration file and read it."""
-    path = tmp_path / "clock_config.yaml"
-    path.write_text(text, encoding="utf-8")
-    return clock_config.read_clock_config(path)
+def read_config_text(
+    tmp_path: Path, yaml_text: str = BASE_YAML
+) -> clock_config.ClockConfig:
+    """Write ``yaml_text`` as a clock configuration file and read it."""
+    config_file = tmp_path / "clock_config.yaml"
+    config_file.write_text(yaml_text, encoding="utf-8")
+    return clock_config.read_clock_config(config_file)
 
 
-def refused(tmp_path: Path, text: str, match: str) -> None:
-    """Check that ``text`` is refused with a ConfigError matching ``match``."""
-    with pytest.raises(ConfigError, match=match):
-        load(tmp_path, text)
+def assert_refused(tmp_path: Path, yaml_text: str, error_pattern: str) -> None:
+    """Check that ``yaml_text`` is refused with a ConfigError matching the pattern."""
+    with pytest.raises(ConfigError, match=error_pattern):
+        read_config_text(tmp_path, yaml_text)
 
 
 # ------------------------------------------------------------------- entries
@@ -75,8 +77,8 @@ def refused(tmp_path: Path, text: str, match: str) -> None:
 
 def test_an_entry_starts_from_its_type_default(tmp_path: Path) -> None:
     """Give a clock with one entry its type's values."""
-    entry = load(tmp_path).entry_for("cs7", AT)
-    assert entry == clock_config.ClockEntry(
+    clock_entry = read_config_text(tmp_path).entry_for("cs7", MJD_60980_START)
+    assert clock_entry == clock_config.ClockEntry(
         filter_states=2,
         time_constant=30.0,
         scale_time_constant=50.0,
@@ -87,60 +89,72 @@ def test_an_entry_starts_from_its_type_default(tmp_path: Path) -> None:
 
 def test_a_later_entry_takes_effect_at_its_mjd(tmp_path: Path) -> None:
     """Apply an entry from the mark its effective_mjd falls on, not before."""
-    config = load(tmp_path)
-    assert config.entry_for("ox23", BEFORE).time_constant == 100.0
-    assert config.entry_for("ox23", AT).time_constant == 150.0
-    assert config.entry_for("ox23", AT).scale_time_constant == 50.0
+    loaded_config = read_config_text(tmp_path)
+    assert loaded_config.entry_for("ox23", MARK_BEFORE_MJD_60980).time_constant == 100.0
+    assert loaded_config.entry_for("ox23", MJD_60980_START).time_constant == 150.0
+    assert loaded_config.entry_for("ox23", MJD_60980_START).scale_time_constant == 50.0
 
 
 def test_an_effective_mjd_between_two_marks_takes_effect_at_the_next(
     tmp_path: Path,
 ) -> None:
     """Apply an entry dated between two marks from the second of them."""
-    text = BASE.replace("effective_mjd: 60980.0", "effective_mjd: 60980.003")
-    config = load(tmp_path, text)
-    assert config.entry_for("ox23", AT).time_constant == 100.0
-    assert config.entry_for("ox23", AT + timedelta(minutes=10)).time_constant == 150.0
+    yaml_text = BASE_YAML.replace("effective_mjd: 60980.0", "effective_mjd: 60980.003")
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    assert loaded_config.entry_for("ox23", MJD_60980_START).time_constant == 100.0
+    assert (
+        loaded_config.entry_for(
+            "ox23", MJD_60980_START + timedelta(minutes=10)
+        ).time_constant
+        == 150.0
+    )
 
 
 def test_entries_apply_in_order_of_effective_mjd(tmp_path: Path) -> None:
     """Apply entries by their dates, whatever order the file lists them in."""
-    text = BASE.replace(
+    yaml_text = BASE_YAML.replace(
         "    - {effective_mjd: 60980.0, time_constant: 150.0}\n",
         "    - {effective_mjd: 60990.0, time_constant: 200.0}\n"
         "    - {effective_mjd: 60980.0, time_constant: 150.0}\n",
     )
-    config = load(tmp_path, text)
-    late = datetime(2025, 11, 20, tzinfo=UTC)
-    assert config.entry_for("ox23", AT).time_constant == 150.0
-    assert config.entry_for("ox23", late).time_constant == 200.0
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    late_mark = datetime(2025, 11, 20, tzinfo=UTC)
+    assert loaded_config.entry_for("ox23", MJD_60980_START).time_constant == 150.0
+    assert loaded_config.entry_for("ox23", late_mark).time_constant == 200.0
 
 
 def test_an_entry_without_a_date_applies_from_the_start(tmp_path: Path) -> None:
     """Apply an undated entry at every mark, after the type default."""
-    text = BASE.replace(
+    yaml_text = BASE_YAML.replace(
         "  cs7: [{type: cesium}]", "  cs7: [{type: cesium, gap_limit: 300}]"
     )
-    assert load(tmp_path, text).entry_for("cs7", BEFORE).gap_limit == 300
+    assert (
+        read_config_text(tmp_path, yaml_text)
+        .entry_for("cs7", MARK_BEFORE_MJD_60980)
+        .gap_limit
+        == 300
+    )
 
 
 def test_a_mark_without_a_timezone_is_refused(tmp_path: Path) -> None:
     """Raise ConfigError for a naive mark, which names no one instant."""
     with pytest.raises(ConfigError, match="no timezone"):
-        load(tmp_path).entry_for("ox23", AT.replace(tzinfo=None))
+        read_config_text(tmp_path).entry_for(
+            "ox23", MJD_60980_START.replace(tzinfo=None)
+        )
 
 
 def test_an_unknown_clock_has_no_entry(tmp_path: Path) -> None:
     """Raise ConfigError for a clock the file does not name."""
     with pytest.raises(ConfigError, match="no entry for clock qx9"):
-        load(tmp_path).entry_for("qx9", AT)
+        read_config_text(tmp_path).entry_for("qx9", MJD_60980_START)
 
 
 # ------------------------------------------------------------------ the checks
 
 
 @pytest.mark.parametrize(
-    ("old", "new", "match"),
+    ("yaml_old", "yaml_new", "error_pattern"),
     [
         ("  cs7: [{type: cesium}]", "  cs7: []", "cs7 has no entry"),
         ("  mc1: [{type: mc}]", "  mc1: [{type: cesium}]", "mc1 .* type mc"),
@@ -224,15 +238,15 @@ def test_an_unknown_clock_has_no_entry(tmp_path: Path) -> None:
     ],
 )
 def test_every_check_refuses_the_file(
-    tmp_path: Path, old: str, new: str, match: str
+    tmp_path: Path, yaml_old: str, yaml_new: str, error_pattern: str
 ) -> None:
     """Raise ConfigError for each item of the design's list (15.2, U14 load part)."""
-    assert old in BASE
-    refused(tmp_path, BASE.replace(old, new), match)
+    assert yaml_old in BASE_YAML
+    assert_refused(tmp_path, BASE_YAML.replace(yaml_old, yaml_new), error_pattern)
 
 
 @pytest.mark.parametrize(
-    ("old", "new"),
+    ("yaml_old", "yaml_new"),
     [
         (
             "rejects_before_restart: 36\n",
@@ -245,27 +259,29 @@ def test_every_check_refuses_the_file(
     ],
 )
 def test_a_repeated_key_is_refused_at_any_level(
-    tmp_path: Path, old: str, new: str
+    tmp_path: Path, yaml_old: str, yaml_new: str
 ) -> None:
     """Refuse a key that a mapping holds twice, however deep (req 8)."""
-    refused(tmp_path, BASE.replace(old, new), "repeated key")
+    assert_refused(tmp_path, BASE_YAML.replace(yaml_old, yaml_new), "repeated key")
 
 
 def test_a_merge_key_is_refused(tmp_path: Path) -> None:
     """Refuse a YAML merge key, which would hide where a value came from."""
-    text = BASE.replace("  cs7: [{type: cesium}]", "  cs7: [{<<: {type: cesium}}]")
-    refused(tmp_path, text, "merge key")
+    yaml_text = BASE_YAML.replace(
+        "  cs7: [{type: cesium}]", "  cs7: [{<<: {type: cesium}}]"
+    )
+    assert_refused(tmp_path, yaml_text, "merge key")
 
 
 @pytest.mark.parametrize(
-    "text",
+    "yaml_text",
     ["[1, 2]\n", "rejects_before_restart: [\n", "!!python/object:os.system {}\n", ""],
 )
 def test_a_file_that_is_not_a_configuration_is_refused(
-    tmp_path: Path, text: str
+    tmp_path: Path, yaml_text: str
 ) -> None:
     """Refuse a file that does not parse, or is not a mapping, safely."""
-    refused(tmp_path, text, "clock configuration")
+    assert_refused(tmp_path, yaml_text, "clock configuration")
 
 
 def test_an_unreadable_file_is_refused(tmp_path: Path) -> None:
@@ -276,17 +292,17 @@ def test_an_unreadable_file_is_refused(tmp_path: Path) -> None:
 
 def test_a_file_that_is_not_utf_8_is_refused(tmp_path: Path) -> None:
     """Raise ConfigError for bytes that are not UTF-8."""
-    path = tmp_path / "clock_config.yaml"
-    path.write_bytes(b"rejects_before_restart: \xff\n")
+    config_file = tmp_path / "clock_config.yaml"
+    config_file.write_bytes(b"rejects_before_restart: \xff\n")
     with pytest.raises(ConfigError, match="cannot read"):
-        clock_config.read_clock_config(path)
+        clock_config.read_clock_config(config_file)
 
 
 # ----------------------------------------------------------------- RMS limit
 
 
 @pytest.mark.parametrize(
-    ("pair", "limit"),
+    ("pair", "expected_limit"),
     [
         (("mc2", "ox23"), 80),
         (("mc2", "cs7"), 40),
@@ -295,16 +311,18 @@ def test_a_file_that_is_not_utf_8_is_refused(tmp_path: Path) -> None:
     ],
 )
 def test_the_rms_limit_is_the_pair_s_else_the_reference_s_else_the_default(
-    tmp_path: Path, pair: tuple[str, str], limit: int
+    tmp_path: Path, pair: tuple[str, str], expected_limit: int
 ) -> None:
     """Give the pair's own limit, else its reference's, else the default."""
-    assert load(tmp_path).rms_limit(pair) == limit
+    assert read_config_text(tmp_path).rms_limit(pair) == expected_limit
 
 
 def test_the_rms_limits_need_only_a_default(tmp_path: Path) -> None:
     """Read an rms_limit section that gives only the default."""
-    text = BASE.replace("  references: {mc2: 40}\n  pairs: {mc2.ox23: 80}\n", "")
-    assert load(tmp_path, text).rms_limit(("mc2", "ox23")) == 50
+    yaml_text = BASE_YAML.replace(
+        "  references: {mc2: 40}\n  pairs: {mc2.ox23: 80}\n", ""
+    )
+    assert read_config_text(tmp_path, yaml_text).rms_limit(("mc2", "ox23")) == 50
 
 
 # ---------------------------------------------------------------- series
@@ -312,7 +330,9 @@ def test_the_rms_limits_need_only_a_default(tmp_path: Path) -> None:
 
 def test_a_pair_takes_its_second_clock_s_settings(tmp_path: Path) -> None:
     """Give a pair the entry of its clock b and its RMS limit (8.1)."""
-    assert load(tmp_path).params_for(("mc2", "ox23"), AT) == SeriesParams(
+    assert read_config_text(tmp_path).params_for(
+        ("mc2", "ox23"), MJD_60980_START
+    ) == SeriesParams(
         filter_states=3,
         M=150.0,
         M_sigma=50.0,
@@ -325,8 +345,15 @@ def test_a_pair_takes_its_second_clock_s_settings(tmp_path: Path) -> None:
 
 def test_a_self_or_link_pair_takes_the_reference_s_settings(tmp_path: Path) -> None:
     """Give (r, r) and (r, s) the reference's 1-state entry."""
-    params = load(tmp_path).params_for(("mc1", "mc2"), AT)
-    assert (params.filter_states, params.M, params.sigma0, params.rms_max) == (
+    series_params = read_config_text(tmp_path).params_for(
+        ("mc1", "mc2"), MJD_60980_START
+    )
+    assert (
+        series_params.filter_states,
+        series_params.M,
+        series_params.sigma0,
+        series_params.rms_max,
+    ) == (
         1,
         None,
         3.0,
@@ -336,8 +363,14 @@ def test_a_self_or_link_pair_takes_the_reference_s_settings(tmp_path: Path) -> N
 
 def test_a_triple_takes_its_clock_s_settings_and_no_rms_limit(tmp_path: Path) -> None:
     """Give (r, s, c) the entry of c and no RMS limit (8.1, 12.5)."""
-    params = load(tmp_path).params_for(("mc1", "mc2", "ox23"), BEFORE)
-    assert (params.filter_states, params.M, params.rms_max) == (3, 100.0, None)
+    series_params = read_config_text(tmp_path).params_for(
+        ("mc1", "mc2", "ox23"), MARK_BEFORE_MJD_60980
+    )
+    assert (series_params.filter_states, series_params.M, series_params.rms_max) == (
+        3,
+        100.0,
+        None,
+    )
 
 
 # ------------------------------------------------------------------ example
@@ -345,34 +378,37 @@ def test_a_triple_takes_its_clock_s_settings_and_no_rms_limit(tmp_path: Path) ->
 
 def test_the_example_file_loads() -> None:
     """Read the committed example and find every clock it names usable."""
-    path = Path(__file__).parents[3] / "etc" / "clock_config.yaml.example"
-    config = clock_config.read_clock_config(path)
-    mark = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
-    for clock in config.clocks:
-        assert config.entry_for(clock, mark).gap_limit >= config.rejects_before_restart
+    example_file = Path(__file__).parents[3] / "etc" / "clock_config.yaml.example"
+    loaded_config = clock_config.read_clock_config(example_file)
+    epoch_start = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
+    for clock_name in loaded_config.clocks:
+        assert (
+            loaded_config.entry_for(clock_name, epoch_start).gap_limit
+            >= loaded_config.rejects_before_restart
+        )
 
 
 # ------------------------------------------------- what a person reads, exactly
 
 
-def message_for(tmp_path: Path, text: str) -> str:
-    """Give the message a file holding ``text`` is refused with."""
+def refusal_message(tmp_path: Path, yaml_text: str) -> str:
+    """Give the message a file holding ``yaml_text`` is refused with."""
     with pytest.raises(ConfigError) as raised:
-        load(tmp_path, text)
+        read_config_text(tmp_path, yaml_text)
     return str(raised.value)
 
 
 def test_a_refusal_names_the_file_and_the_problem(tmp_path: Path) -> None:
     """Start every refusal with the file, then say what is wrong (15.2)."""
-    path = tmp_path / "clock_config.yaml"
-    assert message_for(tmp_path, "[1, 2]\n") == (
-        f"clock configuration {path}: is not a mapping of the sections"
+    config_file = tmp_path / "clock_config.yaml"
+    assert refusal_message(tmp_path, "[1, 2]\n") == (
+        f"clock configuration {config_file}: is not a mapping of the sections"
     )
-    assert message_for(tmp_path, "rejects_before_restart: [\n").startswith(
-        f"clock configuration {path}: while parsing"
+    assert refusal_message(tmp_path, "rejects_before_restart: [\n").startswith(
+        f"clock configuration {config_file}: while parsing"
     )
-    assert message_for(tmp_path, "rejects_before_restart: x\n").startswith(
-        f"clock configuration {path}: rejects_before_restart: Input should be"
+    assert refusal_message(tmp_path, "rejects_before_restart: x\n").startswith(
+        f"clock configuration {config_file}: rejects_before_restart: Input should be"
     )
     with pytest.raises(ConfigError) as raised:
         clock_config.read_clock_config(tmp_path / "missing.yaml")
@@ -383,47 +419,53 @@ def test_a_refusal_names_the_file_and_the_problem(tmp_path: Path) -> None:
 
 def test_a_merge_or_repeated_key_is_named_where_it_stands(tmp_path: Path) -> None:
     """Say which line and column of the file hold the key refused."""
-    merge = message_for(tmp_path, "a: 1\nb: &x {k: 1}\nc: {<<: *x}\n")
-    assert ": merge keys are not read\\n" in merge
-    assert "line 3, column 5" in merge
-    repeated = message_for(tmp_path, "a: 1\na: 2\n")
-    assert ": repeated key 'a'\\n" in repeated
-    assert "line 2, column 1" in repeated
+    merge_refusal = refusal_message(tmp_path, "a: 1\nb: &x {k: 1}\nc: {<<: *x}\n")
+    assert ": merge keys are not read\\n" in merge_refusal
+    assert "line 3, column 5" in merge_refusal
+    repeated_refusal = refusal_message(tmp_path, "a: 1\na: 2\n")
+    assert ": repeated key 'a'\\n" in repeated_refusal
+    assert "line 2, column 1" in repeated_refusal
 
 
 def test_every_refusal_is_logged_as_raised(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log each ConfigError at ERROR in the words it is raised with."""
-    message = message_for(tmp_path, "[1, 2]\n")
-    assert [r.getMessage() for r in caplog.records] == [message]
+    refusal_text = refusal_message(tmp_path, "[1, 2]\n")
+    assert [log_record.getMessage() for log_record in caplog.records] == [refusal_text]
     caplog.clear()
     with pytest.raises(ConfigError) as raised:
-        load(tmp_path).entry_for("ox23", AT.replace(tzinfo=None))
-    assert [r.getMessage() for r in caplog.records] == [str(raised.value)]
+        read_config_text(tmp_path).entry_for(
+            "ox23", MJD_60980_START.replace(tzinfo=None)
+        )
+    assert [log_record.getMessage() for log_record in caplog.records] == [
+        str(raised.value)
+    ]
 
 
 def test_an_undated_entry_listed_last_still_comes_first(tmp_path: Path) -> None:
     """Apply undated entries before dated ones, wherever the file lists them."""
-    text = BASE.replace(
+    yaml_text = BASE_YAML.replace(
         "    - {effective_mjd: 60980.0, time_constant: 150.0}\n",
         "    - {effective_mjd: 60980.0, time_constant: 150.0}\n"
         "    - {time_constant: 120.0}\n",
     )
-    config = load(tmp_path, text)
-    assert config.entry_for("ox23", BEFORE).time_constant == 120.0
-    assert config.entry_for("ox23", AT).time_constant == 150.0
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    assert loaded_config.entry_for("ox23", MARK_BEFORE_MJD_60980).time_constant == 120.0
+    assert loaded_config.entry_for("ox23", MJD_60980_START).time_constant == 150.0
 
 
 def test_rejects_before_restart_may_equal_the_gap_limit(tmp_path: Path) -> None:
     """Take a gap limit equal to rejects_before_restart (15.2)."""
-    text = BASE.replace("rejects_before_restart: 36", "rejects_before_restart: 432")
-    assert load(tmp_path, text).rejects_before_restart == 432
+    yaml_text = BASE_YAML.replace(
+        "rejects_before_restart: 36", "rejects_before_restart: 432"
+    )
+    assert read_config_text(tmp_path, yaml_text).rejects_before_restart == 432
 
 
 # ------------------------------------------- a first entry with its own settings
 
-OWN: Final = (
+OWN_SETTINGS_ENTRY: Final = (
     "{filter_states: 2, time_constant: 40.0, scale_time_constant: 20.0,"
     " initial_innovation_scale: 6.0, gap_limit: 300}"
 )
@@ -434,9 +476,13 @@ def test_a_first_entry_may_give_every_setting_instead_of_a_type(
     tmp_path: Path,
 ) -> None:
     """Take a clock's own settings, from the start, when it fits no type."""
-    text = BASE.replace("  cs7: [{type: cesium}]", f"  rb9: [{OWN}]")
-    config = load(tmp_path, text)
-    assert config.entry_for("rb9", BEFORE) == clock_config.ClockEntry(
+    yaml_text = BASE_YAML.replace(
+        "  cs7: [{type: cesium}]", f"  rb9: [{OWN_SETTINGS_ENTRY}]"
+    )
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    assert loaded_config.entry_for(
+        "rb9", MARK_BEFORE_MJD_60980
+    ) == clock_config.ClockEntry(
         filter_states=2,
         time_constant=40.0,
         scale_time_constant=20.0,
@@ -449,31 +495,38 @@ def test_a_clock_with_its_own_settings_takes_later_entries_too(
     tmp_path: Path,
 ) -> None:
     """Apply a later entry over a first entry's own settings, from its date."""
-    later = "    - {effective_mjd: 60980.0, time_constant: 80.0}\n"
-    text = BASE.replace("  cs7: [{type: cesium}]", f"  rb9:\n    - {OWN}\n{later}")
-    config = load(tmp_path, text)
-    assert config.entry_for("rb9", BEFORE).time_constant == 40.0
-    assert config.entry_for("rb9", AT).time_constant == 80.0
+    later_entry = "    - {effective_mjd: 60980.0, time_constant: 80.0}\n"
+    yaml_text = BASE_YAML.replace(
+        "  cs7: [{type: cesium}]", f"  rb9:\n    - {OWN_SETTINGS_ENTRY}\n{later_entry}"
+    )
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    assert loaded_config.entry_for("rb9", MARK_BEFORE_MJD_60980).time_constant == 40.0
+    assert loaded_config.entry_for("rb9", MJD_60980_START).time_constant == 80.0
 
 
 @pytest.mark.parametrize(
-    ("entry", "match"),
+    ("first_entry", "error_pattern"),
     [
         (
             "{filter_states: 2, time_constant: 40.0, scale_time_constant: 20.0}",
             "rb9 gives no type, so it gives every setting; it leaves out"
             " initial_innovation_scale, gap_limit",
         ),
-        (OWN.replace("{", "{effective_mjd: 60980.0, "), "rb9 .* no effective_mjd"),
-        (OWN.replace(" time_constant: 40.0,", ""), "time constant"),
+        (
+            OWN_SETTINGS_ENTRY.replace("{", "{effective_mjd: 60980.0, "),
+            "rb9 .* no effective_mjd",
+        ),
+        (OWN_SETTINGS_ENTRY.replace(" time_constant: 40.0,", ""), "time constant"),
     ],
 )
 def test_a_first_entry_with_its_own_settings_gives_them_all_from_the_start(
-    tmp_path: Path, entry: str, match: str
+    tmp_path: Path, first_entry: str, error_pattern: str
 ) -> None:
     """Refuse one that leaves a setting out, or holds only from a date."""
-    refused(
-        tmp_path, BASE.replace("  cs7: [{type: cesium}]", f"  rb9: [{entry}]"), match
+    assert_refused(
+        tmp_path,
+        BASE_YAML.replace("  cs7: [{type: cesium}]", f"  rb9: [{first_entry}]"),
+        error_pattern,
     )
 
 
@@ -481,14 +534,18 @@ def test_a_reference_has_the_reference_type_not_its_own_settings(
     tmp_path: Path,
 ) -> None:
     """Refuse a reference whose first entry gives settings instead of type mc."""
-    text = BASE.replace("  mc1: [{type: mc}]", f"  mc1: [{OWN}]")
-    refused(tmp_path, text, "mc1 is a reference, so of type mc")
+    yaml_text = BASE_YAML.replace(
+        "  mc1: [{type: mc}]", f"  mc1: [{OWN_SETTINGS_ENTRY}]"
+    )
+    assert_refused(tmp_path, yaml_text, "mc1 is a reference, so of type mc")
 
 
 def test_a_clock_with_its_own_settings_keeps_its_number_of_states(
     tmp_path: Path,
 ) -> None:
     """Refuse a later entry that changes the states its first entry gave."""
-    later = "    - {effective_mjd: 60980.0, filter_states: 3}\n"
-    text = BASE.replace("  cs7: [{type: cesium}]", f"  rb9:\n    - {OWN}\n{later}")
-    refused(tmp_path, text, "changes the filter_states of rb9")
+    later_entry = "    - {effective_mjd: 60980.0, filter_states: 3}\n"
+    yaml_text = BASE_YAML.replace(
+        "  cs7: [{type: cesium}]", f"  rb9:\n    - {OWN_SETTINGS_ENTRY}\n{later_entry}"
+    )
+    assert_refused(tmp_path, yaml_text, "changes the filter_states of rb9")

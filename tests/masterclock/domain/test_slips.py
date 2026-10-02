@@ -33,39 +33,45 @@ from masterclock.domain.series import PairKey
 P: Final = PHASE_PERIOD
 """One period, ps."""
 
-THREE: Final = ("mc1", "mc2", "mc3")
+THREE_REFS: Final = ("mc1", "mc2", "mc3")
 """Three invented references."""
 
 
-def epoch(
+def epoch_innovations(
     refs: tuple[str, ...],
-    clocks: dict[str, int],
+    clock_innovations: dict[str, int],
     link_errors: dict[PairKey, int] | None = None,
 ) -> dict[PairKey, Fraction]:
     """Give the innovations of ``refs``' links and of ox1 against each.
 
-    ``clocks`` gives each reference's (r, ox1) innovation; a link error x
+    ``clock_innovations`` gives each reference's (r, ox1) innovation; a link error x
     on (a, b) puts x on (a, b) and -x on (b, a), changing its two-way value.
     """
     innovations = {pair: Fraction(0) for pair in permutations(refs, 2)}
     for (a, b), x in (link_errors or {}).items():
         innovations[(a, b)] += x
         innovations[(b, a)] -= x
-    for r, value in clocks.items():
-        innovations[(r, "ox1")] = Fraction(value)
+    for r, clock_innovation in clock_innovations.items():
+        innovations[(r, "ox1")] = Fraction(clock_innovation)
     return innovations
 
 
-def of_ox1(found: slips.Slips) -> slips.Slips:
+def of_ox1(slip_result: slips.Slips) -> slips.Slips:
     """Keep only what the slip check found for the clock ox1."""
     return slips.Slips(
-        corrections={p: k for p, k in found.corrections.items() if p[1] == "ox1"},
-        excluded=frozenset(p for p in found.excluded if p[1] == "ox1"),
-        events=tuple(e for e in found.events if e.clock == "ox1"),
+        corrections={
+            pair: cycles
+            for pair, cycles in slip_result.corrections.items()
+            if pair[1] == "ox1"
+        },
+        excluded=frozenset(pair for pair in slip_result.excluded if pair[1] == "ox1"),
+        events=tuple(
+            slip_event for slip_event in slip_result.events if slip_event.clock == "ox1"
+        ),
     )
 
 
-def check(
+def run_slip_check(
     innovations: dict[PairKey, Fraction],
     refs: tuple[str, ...],
     last_flags: dict[PairKey, str] | None = None,
@@ -73,11 +79,13 @@ def check(
     scales: dict[PairKey, float] | None = None,
 ) -> slips.Slips:
     """Run the slip check with 1 ps scales and settled rows unless given."""
-    flags = dict.fromkeys(innovations, "A") if last_flags is None else last_flags
+    last_row_flags = (
+        dict.fromkeys(innovations, "A") if last_flags is None else last_flags
+    )
     return slips.slip_check(
         innovations,
         scales or dict.fromkeys(innovations, 1.0),
-        flags,
+        last_row_flags,
         frozenset(refs),
         excluded,
     )
@@ -87,122 +95,148 @@ def check(
 
 
 @pytest.mark.parametrize(
-    ("ref", "shift", "cycles"), [("mc1", P, -1), ("mc2", -P, 1), ("mc3", 2 * P, -2)]
+    ("slipped_ref", "phase_shift", "cycles"),
+    [("mc1", P, -1), ("mc2", -P, 1), ("mc3", 2 * P, -2)],
 )
 def test_a_slip_against_one_of_three_references_is_corrected(
-    ref: str, shift: int, cycles: int
+    slipped_ref: str, phase_shift: int, cycles: int
 ) -> None:
     """Correct the one pair in every flagged D by whole periods (U17)."""
-    clocks = {r: (shift + 3 if r == ref else 0) for r in THREE}
-    result = check(epoch(THREE, clocks), THREE)
-    assert result.corrections == {(ref, "ox1"): cycles}
-    assert result.excluded == frozenset()
-    assert [(e.finding, e.clock, e.pairs, e.cycles) for e in result.events] == [
-        ("slip_corrected", "ox1", ((ref, "ox1"),), cycles)
-    ]
+    clock_innovations = {
+        r: (phase_shift + 3 if r == slipped_ref else 0) for r in THREE_REFS
+    }
+    slip_result = run_slip_check(
+        epoch_innovations(THREE_REFS, clock_innovations), THREE_REFS
+    )
+    assert slip_result.corrections == {(slipped_ref, "ox1"): cycles}
+    assert slip_result.excluded == frozenset()
+    assert [
+        (slip_event.finding, slip_event.clock, slip_event.pairs, slip_event.cycles)
+        for slip_event in slip_result.events
+    ] == [("slip_corrected", "ox1", ((slipped_ref, "ox1"),), cycles)]
 
 
 def test_no_slip_gives_nothing() -> None:
     """Correct and exclude nothing when every D is near zero."""
-    result = check(epoch(THREE, dict.fromkeys(THREE, 2)), THREE)
-    assert result == slips.Slips(corrections={}, excluded=frozenset(), events=())
+    slip_result = run_slip_check(
+        epoch_innovations(THREE_REFS, dict.fromkeys(THREE_REFS, 2)), THREE_REFS
+    )
+    assert slip_result == slips.Slips(corrections={}, excluded=frozenset(), events=())
 
 
 def test_a_d_far_from_a_whole_period_is_not_a_slip() -> None:
     """Leave a D more than five combined scales from mP unflagged."""
-    clocks = {"mc1": P + 100, "mc2": 0, "mc3": 0}
-    assert check(epoch(THREE, clocks), THREE).corrections == {}
+    clock_innovations = {"mc1": P + 100, "mc2": 0, "mc3": 0}
+    assert (
+        run_slip_check(
+            epoch_innovations(THREE_REFS, clock_innovations), THREE_REFS
+        ).corrections
+        == {}
+    )
 
 
 def test_the_link_s_two_way_value_is_taken_off() -> None:
     """Flag D = nu(r,c) - nu(s,c) - two-way(r,s), not the bare difference."""
-    clocks = {"mc1": P, "mc2": 0, "mc3": 0}
-    innovations = epoch(THREE, clocks, {("mc1", "mc2"): P, ("mc1", "mc3"): P})
-    assert check(innovations, THREE).corrections == {}
+    clock_innovations = {"mc1": P, "mc2": 0, "mc3": 0}
+    innovations = epoch_innovations(
+        THREE_REFS, clock_innovations, {("mc1", "mc2"): P, ("mc1", "mc3"): P}
+    )
+    assert run_slip_check(innovations, THREE_REFS).corrections == {}
 
 
 def test_a_pair_in_a_clean_d_is_not_corrected() -> None:
     """Leave undecided a slip whose candidates both sit in an unflagged D."""
-    innovations = epoch(THREE, {"mc1": P, "mc2": 0, "mc3": 0}, {("mc1", "mc3"): P})
-    result = of_ox1(check(innovations, THREE))
-    assert result.corrections == {}
-    assert result.excluded == frozenset({("mc1", "ox1"), ("mc2", "ox1")})
-    assert [(e.finding, e.pairs, e.cycles) for e in result.events] == [
-        ("slip_undecided", (("mc1", "ox1"), ("mc2", "ox1")), 0)
-    ]
+    innovations = epoch_innovations(
+        THREE_REFS, {"mc1": P, "mc2": 0, "mc3": 0}, {("mc1", "mc3"): P}
+    )
+    slip_result = of_ox1(run_slip_check(innovations, THREE_REFS))
+    assert slip_result.corrections == {}
+    assert slip_result.excluded == frozenset({("mc1", "ox1"), ("mc2", "ox1")})
+    assert [
+        (slip_event.finding, slip_event.pairs, slip_event.cycles)
+        for slip_event in slip_result.events
+    ] == [("slip_undecided", (("mc1", "ox1"), ("mc2", "ox1")), 0)]
 
 
 def test_the_one_common_pair_in_a_clean_d_is_not_corrected() -> None:
     """Leave undecided the one pair of every flagged D when an unflagged D has it."""
-    four = (*THREE, "mc4")
-    clocks = {"mc1": P, "mc2": 0, "mc3": 0, "mc4": 0}
-    innovations = epoch(four, clocks, {("mc1", "mc4"): P})
-    result = of_ox1(check(innovations, four))
-    assert result.corrections == {}
-    assert result.excluded == frozenset(
+    four_refs = (*THREE_REFS, "mc4")
+    clock_innovations = {"mc1": P, "mc2": 0, "mc3": 0, "mc4": 0}
+    innovations = epoch_innovations(four_refs, clock_innovations, {("mc1", "mc4"): P})
+    slip_result = of_ox1(run_slip_check(innovations, four_refs))
+    assert slip_result.corrections == {}
+    assert slip_result.excluded == frozenset(
         {("mc1", "ox1"), ("mc2", "ox1"), ("mc3", "ox1")}
     )
 
 
 def test_corrections_that_disagree_are_undecided() -> None:
     """Correct nothing when the flagged Ds give the common pair two corrections."""
-    clocks = {"mc1": P, "mc2": 0, "mc3": 2 * P}
-    innovations = epoch(THREE, clocks, {("mc2", "mc3"): -2 * P})
-    result = of_ox1(check(innovations, THREE))
-    assert result.corrections == {}
-    assert result.excluded == frozenset((r, "ox1") for r in THREE)
+    clock_innovations = {"mc1": P, "mc2": 0, "mc3": 2 * P}
+    innovations = epoch_innovations(
+        THREE_REFS, clock_innovations, {("mc2", "mc3"): -2 * P}
+    )
+    slip_result = of_ox1(run_slip_check(innovations, THREE_REFS))
+    assert slip_result.corrections == {}
+    assert slip_result.excluded == frozenset((r, "ox1") for r in THREE_REFS)
 
 
 def test_no_pair_common_to_every_flagged_d_is_undecided() -> None:
     """Correct nothing when the flagged Ds share no pair."""
-    clocks = {"mc1": P, "mc2": 0, "mc3": -P}
-    result = check(epoch(THREE, clocks), THREE)
-    assert result.corrections == {}
-    assert result.excluded == frozenset((r, "ox1") for r in THREE)
+    clock_innovations = {"mc1": P, "mc2": 0, "mc3": -P}
+    slip_result = run_slip_check(
+        epoch_innovations(THREE_REFS, clock_innovations), THREE_REFS
+    )
+    assert slip_result.corrections == {}
+    assert slip_result.excluded == frozenset((r, "ox1") for r in THREE_REFS)
 
 
 # ------------------------------------------------------- two references
 
-TWO: Final = ("mc1", "mc2")
+TWO_REFS: Final = ("mc1", "mc2")
 """Two invented references."""
 
 
-@pytest.mark.parametrize("weak", ["P", "R", "X", "AU", "new"])
-def test_with_two_references_the_weak_pair_is_corrected(weak: str) -> None:
+@pytest.mark.parametrize("weak_flags", ["P", "R", "X", "AU", "new"])
+def test_with_two_references_the_weak_pair_is_corrected(weak_flags: str) -> None:
     """Correct the pair whose last row is not a settled acceptance (U17)."""
-    innovations = epoch(TWO, {"mc1": 0, "mc2": P})
-    flags = dict.fromkeys(innovations, "A")
-    if weak == "new":
-        del flags[("mc2", "ox1")]
+    innovations = epoch_innovations(TWO_REFS, {"mc1": 0, "mc2": P})
+    last_flags = dict.fromkeys(innovations, "A")
+    if weak_flags == "new":
+        del last_flags[("mc2", "ox1")]
     else:
-        flags[("mc2", "ox1")] = weak
-    result = check(innovations, TWO, flags)
-    assert result.corrections == {("mc2", "ox1"): -1}
-    assert result.events[0].finding == "slip_corrected"
+        last_flags[("mc2", "ox1")] = weak_flags
+    slip_result = run_slip_check(innovations, TWO_REFS, last_flags)
+    assert slip_result.corrections == {("mc2", "ox1"): -1}
+    assert slip_result.events[0].finding == "slip_corrected"
 
 
 def test_the_first_pair_weak_is_corrected_the_other_way() -> None:
     """Give -m to the first pair of a D, +m to the second."""
-    innovations = epoch(TWO, {"mc1": P, "mc2": 0})
-    flags = {**dict.fromkeys(innovations, "A"), ("mc1", "ox1"): "R"}
-    assert check(innovations, TWO, flags).corrections == {("mc1", "ox1"): -1}
+    innovations = epoch_innovations(TWO_REFS, {"mc1": P, "mc2": 0})
+    last_flags = {**dict.fromkeys(innovations, "A"), ("mc1", "ox1"): "R"}
+    assert run_slip_check(innovations, TWO_REFS, last_flags).corrections == {
+        ("mc1", "ox1"): -1
+    }
 
 
-@pytest.mark.parametrize("flags", [("A", "A"), ("AU", "P")])
+@pytest.mark.parametrize("pair_flags", [("A", "A"), ("AU", "P")])
 def test_with_two_references_both_or_neither_weak_is_undecided(
-    flags: tuple[str, str],
+    pair_flags: tuple[str, str],
 ) -> None:
     """Exclude both clock pairs when both or neither are weak."""
-    innovations = epoch(TWO, {"mc1": 0, "mc2": P})
-    last = {
+    innovations = epoch_innovations(TWO_REFS, {"mc1": 0, "mc2": P})
+    last_flags = {
         **dict.fromkeys(innovations, "A"),
-        ("mc1", "ox1"): flags[0],
-        ("mc2", "ox1"): flags[1],
+        ("mc1", "ox1"): pair_flags[0],
+        ("mc2", "ox1"): pair_flags[1],
     }
-    result = check(innovations, TWO, last)
-    assert result.corrections == {}
-    assert result.excluded == frozenset({("mc1", "ox1"), ("mc2", "ox1")})
-    assert [e.finding for e in result.events] == ["slip_undecided"]
+    slip_result = run_slip_check(innovations, TWO_REFS, last_flags)
+    assert slip_result.corrections == {}
+    assert slip_result.excluded == frozenset({("mc1", "ox1"), ("mc2", "ox1")})
+    assert [slip_event.finding for slip_event in slip_result.events] == [
+        "slip_undecided"
+    ]
 
 
 # ---------------------------------------------------------------- what is used
@@ -210,47 +244,69 @@ def test_with_two_references_both_or_neither_weak_is_undecided(
 
 def test_a_pair_excluded_by_screening_is_not_used() -> None:
     """Leave out a clock pair that screening excluded."""
-    clocks = {"mc1": P, "mc2": 0, "mc3": 0}
-    excluded = frozenset({("mc1", "ox1")})
-    assert check(epoch(THREE, clocks), THREE, excluded=excluded).corrections == {}
+    clock_innovations = {"mc1": P, "mc2": 0, "mc3": 0}
+    excluded_pairs = frozenset({("mc1", "ox1")})
+    assert (
+        run_slip_check(
+            epoch_innovations(THREE_REFS, clock_innovations),
+            THREE_REFS,
+            excluded=excluded_pairs,
+        ).corrections
+        == {}
+    )
 
 
 def test_a_link_not_usable_both_ways_gives_no_d() -> None:
     """Form no D across a link with a direction missing or excluded."""
-    innovations = epoch(TWO, {"mc1": 0, "mc2": P})
-    flags = {**dict.fromkeys(innovations, "A"), ("mc2", "ox1"): "AU"}
+    innovations = epoch_innovations(TWO_REFS, {"mc1": 0, "mc2": P})
+    last_flags = {**dict.fromkeys(innovations, "A"), ("mc2", "ox1"): "AU"}
     del innovations[("mc2", "mc1")]
-    assert check(innovations, TWO, flags).corrections == {}
-    innovations = epoch(TWO, {"mc1": 0, "mc2": P})
-    excluded = frozenset({("mc1", "mc2")})
-    assert check(innovations, TWO, flags, excluded).corrections == {}
+    assert run_slip_check(innovations, TWO_REFS, last_flags).corrections == {}
+    innovations = epoch_innovations(TWO_REFS, {"mc1": 0, "mc2": P})
+    excluded_pairs = frozenset({("mc1", "mc2")})
+    assert (
+        run_slip_check(innovations, TWO_REFS, last_flags, excluded_pairs).corrections
+        == {}
+    )
 
 
 def test_a_reference_measured_as_a_clock_is_checked_too() -> None:
     """Correct a link that slipped, the reference at its far end checked as a clock."""
-    four = (*THREE, "mc4")
-    innovations = epoch(four, {})
+    four_refs = (*THREE_REFS, "mc4")
+    innovations = epoch_innovations(four_refs, {})
     innovations[("mc1", "mc4")] += P
-    result = check(innovations, four)
-    assert result.corrections == {("mc1", "mc4"): -1}
-    assert [(e.finding, e.clock) for e in result.events] == [("slip_corrected", "mc4")]
+    slip_result = run_slip_check(innovations, four_refs)
+    assert slip_result.corrections == {("mc1", "mc4"): -1}
+    assert [
+        (slip_event.finding, slip_event.clock) for slip_event in slip_result.events
+    ] == [("slip_corrected", "mc4")]
 
 
 def test_the_tolerance_is_five_combined_scales() -> None:
     """Flag a D within 5 sigma_D of mP and not one just beyond it."""
     sigma_d = (1 + 1 + 0.25 * 2) ** 0.5
-    near = {"mc1": 0, "mc2": P + int(5 * sigma_d)}
-    far = {"mc1": 0, "mc2": P + int(5 * sigma_d) + 1}
-    flags = {**dict.fromkeys(epoch(TWO, near), "A"), ("mc2", "ox1"): "R"}
-    assert check(epoch(TWO, near), TWO, flags).corrections == {("mc2", "ox1"): -1}
-    assert check(epoch(TWO, far), TWO, flags).corrections == {}
+    within_tolerance = {"mc1": 0, "mc2": P + int(5 * sigma_d)}
+    beyond_tolerance = {"mc1": 0, "mc2": P + int(5 * sigma_d) + 1}
+    last_flags = {
+        **dict.fromkeys(epoch_innovations(TWO_REFS, within_tolerance), "A"),
+        ("mc2", "ox1"): "R",
+    }
+    assert run_slip_check(
+        epoch_innovations(TWO_REFS, within_tolerance), TWO_REFS, last_flags
+    ).corrections == {("mc2", "ox1"): -1}
+    assert (
+        run_slip_check(
+            epoch_innovations(TWO_REFS, beyond_tolerance), TWO_REFS, last_flags
+        ).corrections
+        == {}
+    )
 
 
 def test_a_pair_needs_a_scale() -> None:
     """Raise FilterError for a pair with an innovation but no scale."""
-    innovations = epoch(TWO, {"mc1": 0, "mc2": 0})
+    innovations = epoch_innovations(TWO_REFS, {"mc1": 0, "mc2": 0})
     with pytest.raises(FilterError, match="no innovation scale"):
-        slips.slip_check(innovations, {}, {}, frozenset(TWO), frozenset())
+        slips.slip_check(innovations, {}, {}, frozenset(TWO_REFS), frozenset())
 
 
 def test_an_event_names_a_known_kind() -> None:
@@ -264,7 +320,7 @@ def test_an_event_names_a_known_kind() -> None:
 # ------------------------------------------ tolerances and gathering, exactly
 
 
-SCALES: Final = {
+EXACT_D_SCALES: Final = {
     ("mc1", "ox1"): 2.0,
     ("mc2", "ox1"): 14.0,
     ("mc1", "mc2"): 6.0,
@@ -281,38 +337,42 @@ WEAK_FIRST: Final = {
 """Last flags that name (mc1, ox1) the weak pair of two."""
 
 
-@pytest.mark.parametrize(("offset", "slipped"), [(74, True), (75, False)])
+@pytest.mark.parametrize(("offset_ps", "slipped"), [(74, True), (75, False)])
 def test_a_slip_lies_strictly_within_five_d_scales_of_a_period(
-    offset: int, slipped: bool
+    offset_ps: int, slipped: bool
 ) -> None:
     """Combine the clock pairs' scales and a quarter of the links' (11.1)."""
-    innovations = epoch(TWO, {"mc1": P + offset, "mc2": 0})
-    found = check(innovations, TWO, WEAK_FIRST, scales=SCALES)
-    assert found.corrections == ({("mc1", "ox1"): -1} if slipped else {})
+    innovations = epoch_innovations(TWO_REFS, {"mc1": P + offset_ps, "mc2": 0})
+    slip_result = run_slip_check(
+        innovations, TWO_REFS, WEAK_FIRST, scales=EXACT_D_SCALES
+    )
+    assert slip_result.corrections == ({("mc1", "ox1"): -1} if slipped else {})
 
 
-@pytest.mark.parametrize("offset", [60, 70])
-def test_a_slip_well_inside_the_tolerance_is_found(offset: int) -> None:
+@pytest.mark.parametrize("offset_ps", [60, 70])
+def test_a_slip_well_inside_the_tolerance_is_found(offset_ps: int) -> None:
     """Find a slip at 4 and at 4.7 D scales from a period."""
-    innovations = epoch(TWO, {"mc1": P + offset, "mc2": 0})
-    found = check(innovations, TWO, WEAK_FIRST, scales=SCALES)
-    assert found.corrections == {("mc1", "ox1"): -1}
+    innovations = epoch_innovations(TWO_REFS, {"mc1": P + offset_ps, "mc2": 0})
+    slip_result = run_slip_check(
+        innovations, TWO_REFS, WEAK_FIRST, scales=EXACT_D_SCALES
+    )
+    assert slip_result.corrections == {("mc1", "ox1"): -1}
 
 
 def test_a_link_that_gives_no_d_does_not_stop_the_others() -> None:
     """Work out every later D after a pair of references with no usable link."""
-    innovations = epoch(THREE, {"mc1": 0, "mc2": 0, "mc3": P})
+    innovations = epoch_innovations(THREE_REFS, {"mc1": 0, "mc2": 0, "mc3": P})
     del innovations[("mc1", "mc2")], innovations[("mc2", "mc1")]
-    found = check(innovations, THREE)
-    assert found.corrections == {("mc3", "ox1"): -1}
+    slip_result = run_slip_check(innovations, THREE_REFS)
+    assert slip_result.corrections == {("mc3", "ox1"): -1}
 
 
 def test_every_undecided_clock_s_pairs_are_excluded() -> None:
     """Exclude the clock pairs of each undecided slip, every clock's together."""
-    innovations = epoch(TWO, {"mc1": P, "mc2": 0})
+    innovations = epoch_innovations(TWO_REFS, {"mc1": P, "mc2": 0})
     innovations |= {("mc1", "ox2"): Fraction(P), ("mc2", "ox2"): Fraction(0)}
-    found = check(innovations, TWO)
-    assert found.excluded == frozenset(
+    slip_result = run_slip_check(innovations, TWO_REFS)
+    assert slip_result.excluded == frozenset(
         {("mc1", "ox1"), ("mc2", "ox1"), ("mc1", "ox2"), ("mc2", "ox2")}
     )
 
@@ -323,4 +383,6 @@ def test_a_missing_scale_is_logged_as_raised(caplog: pytest.LogCaptureFixture) -
         slips.slip_check(
             {("mc1", "ox1"): Fraction(0)}, {}, {}, frozenset({"mc1"}), frozenset()
         )
-    assert [r.getMessage() for r in caplog.records] == [str(raised.value)]
+    assert [log_record.getMessage() for log_record in caplog.records] == [
+        str(raised.value)
+    ]

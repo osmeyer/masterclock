@@ -40,34 +40,45 @@ REQUIRED_LINES: dict[str, str] = {
 """One invented line of each required setting, with its section header."""
 
 
-def ini(tmp_path: Path, extra: dict[str, str] | None = None) -> Path:
-    """Write an INI file of every required setting plus ``extra`` entries.
+def write_ini_file(tmp_path: Path, extra_entries: dict[str, str] | None = None) -> Path:
+    """Write an INI file of every required setting plus ``extra_entries``.
 
-    ``extra`` maps ``"SECTION entry"`` to the value written for it.
+    ``extra_entries`` maps ``"SECTION entry"`` to the value written for it.
     """
-    sections: dict[str, list[str]] = {}
-    for text in REQUIRED_LINES.values():
-        header, line = text.splitlines()
-        sections.setdefault(header, []).append(line)
-    for key, value in (extra or {}).items():
-        section, entry = key.split()
-        sections.setdefault(f"[{section}]", []).append(f"{entry} = {value}")
-    path = tmp_path / "das.ini"
-    path.write_text(
-        "".join(f"{h}\n" + "".join(f"{e}\n" for e in es) for h, es in sections.items()),
+    section_lines: dict[str, list[str]] = {}
+    for required_text in REQUIRED_LINES.values():
+        section_header, entry_line = required_text.splitlines()
+        section_lines.setdefault(section_header, []).append(entry_line)
+    for section_entry, entry_value in (extra_entries or {}).items():
+        ini_section, ini_entry = section_entry.split()
+        section_lines.setdefault(f"[{ini_section}]", []).append(
+            f"{ini_entry} = {entry_value}"
+        )
+    ini_file = tmp_path / "das.ini"
+    ini_file.write_text(
+        "".join(
+            f"{section_header}\n"
+            + "".join(f"{entry_line}\n" for entry_line in entry_lines)
+            for section_header, entry_lines in section_lines.items()
+        ),
         encoding="utf-8",
     )
-    return path
+    return ini_file
 
 
-def built(tmp_path: Path, *argv: str, **extra: str) -> config.AppConfig:
+def build_from_ini(
+    tmp_path: Path, *argv: str, **extra_entries: str
+) -> config.AppConfig:
     """Build the configuration from an INI file and ``argv``.
 
     Keyword names are ``SECTION__entry``, written into the file.
     """
-    entries = {key.replace("__", " "): value for key, value in extra.items()}
-    path = ini(tmp_path, entries)
-    return config.build_config(cli.parse_args(["--config-file", str(path), *argv]))
+    ini_entries = {
+        keyword.replace("__", " "): entry_value
+        for keyword, entry_value in extra_entries.items()
+    }
+    ini_file = write_ini_file(tmp_path, ini_entries)
+    return config.build_config(cli.parse_args(["--config-file", str(ini_file), *argv]))
 
 
 # ------------------------------------------------------------- the table
@@ -75,34 +86,38 @@ def built(tmp_path: Path, *argv: str, **extra: str) -> config.AppConfig:
 
 def test_every_command_line_setting_is_described_once() -> None:
     """Describe every CliOptions field but the three that back no entry."""
-    fields = set(cli.CliOptions.model_fields) - {
+    setting_fields = set(cli.CliOptions.model_fields) - {
         "config_file",
         "steps",
         "redo_from_mjd",
     }
-    attributes = [setting.options_field for setting in config.SETTINGS]
-    assert sorted(attributes) == sorted(fields)
+    options_fields = [setting.options_field for setting in config.SETTINGS]
+    assert sorted(options_fields) == sorted(setting_fields)
 
 
 def test_each_setting_is_named_by_a_flag_the_parser_knows() -> None:
     """Name each setting by its flag, its entry and its command-line field alike."""
-    flags = cli.build_parser()._option_string_actions
+    parser_actions = cli.build_parser()._option_string_actions
     for setting in config.SETTINGS:
-        assert flags[setting.cli_flag].dest == setting.options_field
+        assert parser_actions[setting.cli_flag].dest == setting.options_field
         assert setting.ini_entry == setting.options_field
 
 
 def test_the_required_settings_come_first() -> None:
     """List the required settings first, in the order of the help."""
-    required = [setting.required for setting in config.SETTINGS]
-    assert required == sorted(required, reverse=True)
-    assert [entry for _, entry, _ in config.REQUIRED_SETTINGS] == list(REQUIRED_LINES)
+    required_marks = [setting.required for setting in config.SETTINGS]
+    assert required_marks == sorted(required_marks, reverse=True)
+    assert [ini_entry for _, ini_entry, _ in config.REQUIRED_SETTINGS] == list(
+        REQUIRED_LINES
+    )
 
 
 def test_none_is_accepted_by_the_settings_whose_options_accept_it() -> None:
     """Accept the literal None in the file exactly where the command line does."""
-    accepting = {s.options_field for s in config.SETTINGS if s.allow_none}
-    assert accepting == {
+    none_accepting_fields = {
+        setting.options_field for setting in config.SETTINGS if setting.allow_none
+    }
+    assert none_accepting_fields == {
         "log_file",
         "log_level",
         "backup_count",
@@ -126,18 +141,18 @@ def test_the_sections_and_entries_come_from_the_table() -> None:
 
 def test_a_file_of_the_required_settings_builds(tmp_path: Path) -> None:
     """Build from the file alone, the optional settings None and the start 59500."""
-    built_ = built(tmp_path)
-    assert built_.das.model_dump() == {
+    app_config = build_from_ini(tmp_path)
+    assert app_config.das.model_dump() == {
         "rf": "a",
         "cd5m5m_path": Path("/data/cd5m5m"),
         "steering_path": Path("/data/steering"),
     }
-    assert built_.processed.model_dump() == {
+    assert app_config.processed.model_dump() == {
         "processed_path": Path("/data/processed"),
         "start_from_mjd": cli.START_FROM_MJD,
         "clock_config_file": Path("/etc/clocks.yaml"),
     }
-    assert built_.logging.model_dump() == {
+    assert app_config.logging.model_dump() == {
         "log_file": Path("/logs/das.log"),
         "log_level": "INFO",
         "backup_count": None,
@@ -146,7 +161,7 @@ def test_a_file_of_the_required_settings_builds(tmp_path: Path) -> None:
 
 def test_the_command_line_alone_is_enough() -> None:
     """Build with no file when the command line gives every required setting."""
-    built_ = config.build_config(
+    app_config = config.build_config(
         cli.parse_args(
             [
                 "--rf", "b",
@@ -159,16 +174,16 @@ def test_the_command_line_alone_is_enough() -> None:
             ]
         )
     )  # fmt: skip
-    assert built_.das.rf == "b"
-    assert built_.das.steering_path == Path("/s")
-    assert built_.processed.clock_config_file == Path("/c.yaml")
-    assert built_.logging.log_file is None
-    assert built_.logging.log_level is None
+    assert app_config.das.rf == "b"
+    assert app_config.das.steering_path == Path("/s")
+    assert app_config.processed.clock_config_file == Path("/c.yaml")
+    assert app_config.logging.log_file is None
+    assert app_config.logging.log_level is None
 
 
 def test_the_command_line_wins(tmp_path: Path) -> None:
     """Take the command line's value where both sources give one."""
-    built_ = built(
+    app_config = build_from_ini(
         tmp_path,
         "--rf",
         "b",
@@ -180,20 +195,20 @@ def test_the_command_line_wins(tmp_path: Path) -> None:
         "/other/clocks.yaml",
         PROCESSED__start_from_mjd="61000",
     )
-    assert built_.das.rf == "b"
-    assert built_.processed.start_from_mjd == 60000.0
-    assert built_.das.steering_path == Path("/other/steering")
-    assert built_.processed.clock_config_file == Path("/other/clocks.yaml")
+    assert app_config.das.rf == "b"
+    assert app_config.processed.start_from_mjd == 60000.0
+    assert app_config.das.steering_path == Path("/other/steering")
+    assert app_config.processed.clock_config_file == Path("/other/clocks.yaml")
 
 
 def test_a_start_given_in_the_file_is_kept(tmp_path: Path) -> None:
     """Use the file's start MJD, read as the command line reads it."""
-    built_ = built(tmp_path, PROCESSED__start_from_mjd="6_0010.5")
-    assert built_.processed.start_from_mjd == cli.data_mjd("6_0010.5")
+    app_config = build_from_ini(tmp_path, PROCESSED__start_from_mjd="6_0010.5")
+    assert app_config.processed.start_from_mjd == cli.data_mjd("6_0010.5")
 
 
 @pytest.mark.parametrize(
-    ("key", "value", "reason"),
+    ("entry_keyword", "entry_value", "expected_reason"),
     [
         ("PROCESSED__start_from_mjd", "None", "invalid positive float value"),
         ("PROCESSED__start_from_mjd", "1", "MJD must be on a day from 50000"),
@@ -201,20 +216,28 @@ def test_a_start_given_in_the_file_is_kept(tmp_path: Path) -> None:
     ],
 )
 def test_a_bad_value_in_the_file_is_refused(
-    tmp_path: Path, key: str, value: str, reason: str
+    tmp_path: Path, entry_keyword: str, entry_value: str, expected_reason: str
 ) -> None:
     """Refuse a value the command line would refuse, naming the setting."""
-    with pytest.raises(ConfigError, match=reason):
-        built(tmp_path, **{key: value})
+    with pytest.raises(ConfigError, match=expected_reason):
+        build_from_ini(tmp_path, **{entry_keyword: entry_value})
 
 
 @pytest.mark.parametrize(
-    ("line", "replacement", "reason"),
+    ("required_line", "replacement_line", "expected_reason"),
     [
         ("rf = a", "rf = A", "das.rf"),
         ("rf = a", "rf = None", "das.rf"),
-        ("cd5m5m_path = /data/cd5m5m", "cd5m5m_path = data", "path must be absolute"),
-        ("cd5m5m_path = /data/cd5m5m", "cd5m5m_path = None", "path must be absolute"),
+        (
+            "cd5m5m_path = /data/cd5m5m",
+            "cd5m5m_path = data",
+            "path must be absolute",
+        ),
+        (
+            "cd5m5m_path = /data/cd5m5m",
+            "cd5m5m_path = None",
+            "path must be absolute",
+        ),
         (
             "processed_path = /data/processed",
             "processed_path =",
@@ -245,31 +268,31 @@ def test_a_bad_value_in_the_file_is_refused(
     ],
 )
 def test_a_bad_required_value_in_the_file_is_refused(
-    tmp_path: Path, line: str, replacement: str, reason: str
+    tmp_path: Path, required_line: str, replacement_line: str, expected_reason: str
 ) -> None:
     """Refuse a wrong channel, a relative path or None where it is not accepted."""
-    path = ini(tmp_path)
-    path.write_text(path.read_text().replace(line, replacement))
-    with pytest.raises(ConfigError, match=reason):
-        config.build_config(cli.parse_args(["--config-file", str(path)]))
+    ini_file = write_ini_file(tmp_path)
+    ini_file.write_text(ini_file.read_text().replace(required_line, replacement_line))
+    with pytest.raises(ConfigError, match=expected_reason):
+        config.build_config(cli.parse_args(["--config-file", str(ini_file)]))
 
 
 def test_none_in_the_file_sets_no_value_where_accepted(tmp_path: Path) -> None:
     """Read the literal None as no value in the settings that accept it."""
-    built_ = built(
+    app_config = build_from_ini(
         tmp_path,
         LOGGING__backup_count="None",
     )
-    assert built_.logging.backup_count is None
+    assert app_config.logging.backup_count is None
 
 
 def test_required_settings_given_by_neither_are_named(tmp_path: Path) -> None:
     """Raise MissingSettingsError naming each missing setting, in table order."""
-    path = tmp_path / "das.ini"
-    path.write_text(REQUIRED_LINES["cd5m5m_path"])
-    with pytest.raises(MissingSettingsError) as raised:
-        config.build_config(cli.parse_args(["--config-file", str(path)]))
-    assert str(raised.value).endswith(
+    ini_file = tmp_path / "das.ini"
+    ini_file.write_text(REQUIRED_LINES["cd5m5m_path"])
+    with pytest.raises(MissingSettingsError) as missing_error:
+        config.build_config(cli.parse_args(["--config-file", str(ini_file)]))
+    assert str(missing_error.value).endswith(
         "[DAS] rf (--rf), [DAS] steering_path (--steering-path), "
         "[PROCESSED] processed_path (--processed-path), "
         "[PROCESSED] clock_config_file (--clock-config-file), "
@@ -277,44 +300,46 @@ def test_required_settings_given_by_neither_are_named(tmp_path: Path) -> None:
     )
 
 
-@pytest.mark.parametrize("name", ["steering_path", "clock_config_file"])
+@pytest.mark.parametrize("setting_name", ["steering_path", "clock_config_file"])
 def test_the_new_required_settings_given_by_neither_are_named(
-    tmp_path: Path, name: str
+    tmp_path: Path, setting_name: str
 ) -> None:
     """Raise MissingSettingsError naming a missing steering or clock setting."""
-    path = ini(tmp_path)
-    path.write_text(path.read_text().replace(REQUIRED_LINES[name].split("\n")[1], ""))
-    with pytest.raises(MissingSettingsError, match=f"] {name} "):
-        config.build_config(cli.parse_args(["--config-file", str(path)]))
+    ini_file = write_ini_file(tmp_path)
+    ini_file.write_text(
+        ini_file.read_text().replace(REQUIRED_LINES[setting_name].split("\n")[1], "")
+    )
+    with pytest.raises(MissingSettingsError, match=f"] {setting_name} "):
+        config.build_config(cli.parse_args(["--config-file", str(ini_file)]))
 
 
 def test_an_entry_the_program_does_not_read_is_refused(tmp_path: Path) -> None:
     """Refuse a file naming an entry no setting reads."""
     with pytest.raises(ConfigError, match=r"\[DAS\] colour"):
-        built(tmp_path, DAS__colour="red")
+        build_from_ini(tmp_path, DAS__colour="red")
 
 
 def test_a_time_constants_file_is_an_entry_no_setting_reads(tmp_path: Path) -> None:
     """Refuse the time-constants entry, which the clock configuration replaced."""
     with pytest.raises(ConfigError, match=r"\[PROCESSED\] time_constants_file"):
-        built(tmp_path, PROCESSED__time_constants_file="/etc/tc.yaml")
+        build_from_ini(tmp_path, PROCESSED__time_constants_file="/etc/tc.yaml")
 
 
 @pytest.mark.parametrize(
-    "model", [config.DasConfig, config.ProcessedConfig, config.AppConfig]
+    "config_model", [config.DasConfig, config.ProcessedConfig, config.AppConfig]
 )
-def test_every_model_refuses_unknown_fields(model: type[object]) -> None:
+def test_every_model_refuses_unknown_fields(config_model: type[object]) -> None:
     """Refuse a field the model does not declare."""
-    assert isinstance(model, type)
+    assert isinstance(config_model, type)
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
-        model.model_validate({"colour": "red"})  # type: ignore[attr-defined]
+        config_model.model_validate({"colour": "red"})  # type: ignore[attr-defined]
 
 
 def test_the_models_are_frozen(tmp_path: Path) -> None:
     """Refuse any change to a built configuration."""
-    built_ = built(tmp_path)
+    app_config = build_from_ini(tmp_path)
     with pytest.raises(ValidationError, match="frozen"):
-        built_.das.rf = "b"  # type: ignore[misc]
+        app_config.das.rf = "b"  # type: ignore[misc]
 
 
 # ------------------------------------------------- names under processed_path
@@ -322,50 +347,52 @@ def test_the_models_are_frozen(tmp_path: Path) -> None:
 
 def test_the_subdirectories_are_named_under_processed_path(tmp_path: Path) -> None:
     """Put meas and ddiff directly under processed_path, and nothing else."""
-    processed = built(tmp_path).processed
-    root = Path("/data/processed")
-    assert (processed.meas_path, processed.ddiff_path) == (
-        root / "meas",
-        root / "ddiff",
+    processed_config = build_from_ini(tmp_path).processed
+    processed_root = Path("/data/processed")
+    assert (processed_config.meas_path, processed_config.ddiff_path) == (
+        processed_root / "meas",
+        processed_root / "ddiff",
     )
     assert not hasattr(config, "FILT_SUBDIRECTORY")
 
 
 def test_each_channel_has_its_own_lock_file_a_lock_accepts(tmp_path: Path) -> None:
     """Name one plain lock file per channel, beside the subdirectories."""
-    names = {config.LOCK_FILE_TEMPLATE.format(rf=rf) for rf in ("a", "b")}
-    assert names == {"das_processor_a.lock", "das_processor_b.lock"}
-    for name in names:
-        assert RunLock(tmp_path, name).path == tmp_path / name
-    assert not names & {config.MEAS_SUBDIRECTORY, config.DDIFF_SUBDIRECTORY}
+    lock_names = {config.LOCK_FILE_TEMPLATE.format(rf=rf) for rf in ("a", "b")}
+    assert lock_names == {"das_processor_a.lock", "das_processor_b.lock"}
+    for lock_name in lock_names:
+        assert RunLock(tmp_path, lock_name).path == tmp_path / lock_name
+    assert not lock_names & {config.MEAS_SUBDIRECTORY, config.DDIFF_SUBDIRECTORY}
 
 
 # ------------------------------------------------------------- check_paths
 
 
-def configured(
-    root: Path,
-    data: Path,
-    processed: Path,
-    steering: Path | None = None,
-    clocks: Path | None = None,
+def build_config_with_paths(
+    scratch_directory: Path,
+    data_directory: Path,
+    processed_directory: Path,
+    steering_directory: Path | None = None,
+    clock_config_file: Path | None = None,
 ) -> config.AppConfig:
-    """Build a configuration naming ``data`` and ``processed``.
+    """Build a configuration naming ``data_directory`` and ``processed_directory``.
 
-    The steering directory is ``data`` unless given, and the clock
-    configuration file a readable file made in ``root`` unless given.
+    The steering directory is ``data_directory`` unless given, and the clock
+    configuration file a readable file made in ``scratch_directory`` unless given.
     """
-    if clocks is None:
-        clocks = root / "clocks.yaml"
-        clocks.write_text("")
+    if steering_directory is None:
+        steering_directory = data_directory
+    if clock_config_file is None:
+        clock_config_file = scratch_directory / "clocks.yaml"
+        clock_config_file.write_text("")
     return config.build_config(
         cli.parse_args(
             [
                 "--rf", "a",
-                "--cd5m5m-path", str(data),
-                "--steering-path", str(data if steering is None else steering),
-                "--processed-path", str(processed),
-                "--clock-config-file", str(clocks),
+                "--cd5m5m-path", str(data_directory),
+                "--steering-path", str(steering_directory),
+                "--processed-path", str(processed_directory),
+                "--clock-config-file", str(clock_config_file),
                 "--log-file", "None",
                 "--log-level", "None",
             ]
@@ -375,106 +402,128 @@ def configured(
 
 def test_usable_paths_pass(tmp_path: Path) -> None:
     """Accept every input path the run can read and a processed path it can write."""
-    for name in ("data", "steering", "processed"):
-        (tmp_path / name).mkdir()
+    for directory_name in ("data", "steering", "processed"):
+        (tmp_path / directory_name).mkdir()
     config.check_paths(
-        configured(
+        build_config_with_paths(
             tmp_path,
             tmp_path / "data",
             tmp_path / "processed",
-            steering=tmp_path / "steering",
+            steering_directory=tmp_path / "steering",
         )
     )
 
 
 def test_a_processed_directory_not_yet_made_passes(tmp_path: Path) -> None:
     """Accept a processed_path that is not there yet."""
-    config.check_paths(configured(tmp_path, tmp_path, tmp_path / "not yet"))
+    config.check_paths(
+        build_config_with_paths(tmp_path, tmp_path, tmp_path / "not yet")
+    )
 
 
-@pytest.mark.parametrize("make", ["missing", "file"])
+@pytest.mark.parametrize("made_as", ["missing", "file"])
 def test_a_data_path_that_is_not_a_directory_is_refused(
-    tmp_path: Path, make: str
+    tmp_path: Path, made_as: str
 ) -> None:
     """Refuse a cd5m5m_path that is missing or is a file."""
-    data = tmp_path / "data"
-    if make == "file":
-        data.write_text("")
+    data_directory = tmp_path / "data"
+    if made_as == "file":
+        data_directory.write_text("")
     with pytest.raises(ConfigError, match=r"\[DAS\] cd5m5m_path: .* is not a dir"):
-        config.check_paths(configured(tmp_path, data, tmp_path, steering=tmp_path))
+        config.check_paths(
+            build_config_with_paths(
+                tmp_path, data_directory, tmp_path, steering_directory=tmp_path
+            )
+        )
 
 
-@pytest.mark.parametrize("make", ["missing", "file"])
+@pytest.mark.parametrize("made_as", ["missing", "file"])
 def test_a_steering_path_that_is_not_a_directory_is_refused(
-    tmp_path: Path, make: str
+    tmp_path: Path, made_as: str
 ) -> None:
     """Refuse a steering_path that is missing or is a file."""
-    steering = tmp_path / "steering"
-    if make == "file":
-        steering.write_text("")
+    steering_directory = tmp_path / "steering"
+    if made_as == "file":
+        steering_directory.write_text("")
     with pytest.raises(ConfigError, match=r"\[DAS\] steering_path: .* is not a dir"):
-        config.check_paths(configured(tmp_path, tmp_path, tmp_path, steering=steering))
+        config.check_paths(
+            build_config_with_paths(
+                tmp_path, tmp_path, tmp_path, steering_directory=steering_directory
+            )
+        )
 
 
 def test_a_steering_directory_that_cannot_be_listed_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Refuse a steering_path whose listing fails, naming the setting."""
-    steering = tmp_path / "steering"
-    steering.mkdir()
-    listed: list[Path] = []
-    iterdir = Path.iterdir
+    steering_directory = tmp_path / "steering"
+    steering_directory.mkdir()
+    listed_directories: list[Path] = []
+    real_iterdir = Path.iterdir
 
-    def refuse(self: Path) -> object:
+    def refuse_steering_listing(self: Path) -> object:
         """Fail as listing an unreadable directory fails, for steering only."""
-        listed.append(self)
-        if self == steering:
+        listed_directories.append(self)
+        if self == steering_directory:
             raise PermissionError(13, "Permission denied")
-        return iterdir(self)
+        return real_iterdir(self)
 
-    monkeypatch.setattr(Path, "iterdir", refuse)
+    monkeypatch.setattr(Path, "iterdir", refuse_steering_listing)
     with pytest.raises(
         ConfigError, match=r"\[DAS\] steering_path: .* cannot be listed"
     ):
-        config.check_paths(configured(tmp_path, tmp_path, tmp_path, steering=steering))
-    assert listed == [tmp_path, steering]
+        config.check_paths(
+            build_config_with_paths(
+                tmp_path, tmp_path, tmp_path, steering_directory=steering_directory
+            )
+        )
+    assert listed_directories == [tmp_path, steering_directory]
 
 
-@pytest.mark.parametrize("make", ["missing", "directory"])
+@pytest.mark.parametrize("made_as", ["missing", "directory"])
 def test_a_clock_configuration_that_is_not_a_file_is_refused(
-    tmp_path: Path, make: str
+    tmp_path: Path, made_as: str
 ) -> None:
     """Refuse a clock_config_file that is missing or is a directory."""
-    clocks = tmp_path / "clocks.yaml"
-    if make == "directory":
-        clocks.mkdir()
+    clock_config_file = tmp_path / "clocks.yaml"
+    if made_as == "directory":
+        clock_config_file.mkdir()
     with pytest.raises(
         ConfigError, match=r"\[PROCESSED\] clock_config_file: .* is not a file"
     ):
-        config.check_paths(configured(tmp_path, tmp_path, tmp_path, clocks=clocks))
+        config.check_paths(
+            build_config_with_paths(
+                tmp_path, tmp_path, tmp_path, clock_config_file=clock_config_file
+            )
+        )
 
 
 def test_a_clock_configuration_that_cannot_be_read_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Refuse a clock_config_file that cannot be opened for reading."""
-    clocks = tmp_path / "clocks.yaml"
-    clocks.write_text("")
-    opened: list[tuple[Path, str]] = []
+    clock_config_file = tmp_path / "clocks.yaml"
+    clock_config_file.write_text("")
+    opened_files: list[tuple[Path, str]] = []
 
-    def refuse(self: Path, mode: str = "r", *_args: object, **_kwargs: object) -> None:
+    def refuse_opening(
+        self: Path, open_mode: str = "r", *_args: object, **_kwargs: object
+    ) -> None:
         """Fail as opening an unreadable file fails."""
-        opened.append((self, mode))
+        opened_files.append((self, open_mode))
         raise PermissionError(13, "Permission denied")
 
-    settings = configured(tmp_path, tmp_path, tmp_path, clocks=clocks)
-    monkeypatch.setattr(Path, "open", refuse)
+    app_config = build_config_with_paths(
+        tmp_path, tmp_path, tmp_path, clock_config_file=clock_config_file
+    )
+    monkeypatch.setattr(Path, "open", refuse_opening)
     with pytest.raises(
         ConfigError,
         match=r"\[PROCESSED\] clock_config_file: .* cannot be read: .*Permission",
     ):
-        config.check_paths(settings)
-    assert opened == [(clocks, "rb")]
+        config.check_paths(app_config)
+    assert opened_files == [(clock_config_file, "rb")]
 
 
 def test_a_data_directory_that_cannot_be_listed_is_refused(
@@ -482,15 +531,17 @@ def test_a_data_directory_that_cannot_be_listed_is_refused(
 ) -> None:
     """Refuse a cd5m5m_path whose listing fails, giving the reason."""
 
-    def refuse(_self: Path) -> object:
+    def refuse_listing(_self: Path) -> object:
         """Fail as listing an unreadable directory fails."""
         raise PermissionError(13, "Permission denied")
 
-    monkeypatch.setattr(Path, "iterdir", refuse)
+    monkeypatch.setattr(Path, "iterdir", refuse_listing)
     with pytest.raises(
         ConfigError, match=r"cd5m5m_path: .* cannot be listed: .*Permission denied"
     ):
-        config.check_paths(configured(tmp_path, tmp_path, tmp_path / "not yet"))
+        config.check_paths(
+            build_config_with_paths(tmp_path, tmp_path, tmp_path / "not yet")
+        )
 
 
 def test_a_file_in_place_of_the_processed_directory_is_refused(
@@ -499,73 +550,87 @@ def test_a_file_in_place_of_the_processed_directory_is_refused(
     """Refuse a processed_path that is something other than a directory."""
     (tmp_path / "processed").write_text("")
     with pytest.raises(ConfigError, match="is not a directory to write"):
-        config.check_paths(configured(tmp_path, tmp_path, tmp_path / "processed"))
+        config.check_paths(
+            build_config_with_paths(tmp_path, tmp_path, tmp_path / "processed")
+        )
 
 
 def test_a_processed_directory_that_cannot_be_written_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Refuse a processed directory this process cannot make files in."""
-    processed = tmp_path / "processed"
-    processed.mkdir()
-    asked: list[tuple[object, int]] = []
+    processed_directory = tmp_path / "processed"
+    processed_directory.mkdir()
+    access_calls: list[tuple[object, int]] = []
 
-    def access(path: object, mode: int) -> bool:
+    def deny_access(asked_path: object, access_mode: int) -> bool:
         """Answer as a directory without write permission answers."""
-        asked.append((path, mode))
+        access_calls.append((asked_path, access_mode))
         return False
 
-    monkeypatch.setattr(os, "access", access)
+    monkeypatch.setattr(os, "access", deny_access)
     with pytest.raises(ConfigError, match="cannot write into"):
-        config.check_paths(configured(tmp_path, tmp_path, processed))
-    assert asked == [(processed, os.W_OK | os.X_OK)]
+        config.check_paths(
+            build_config_with_paths(tmp_path, tmp_path, processed_directory)
+        )
+    assert access_calls == [(processed_directory, os.W_OK | os.X_OK)]
 
 
 def test_a_processed_directory_refusal_is_word_for_word(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Say why the processed directory cannot be used, in the program's words."""
-    processed = tmp_path / "processed"
-    processed.write_text("")
-    with pytest.raises(ConfigError) as raised:
-        config.check_paths(configured(tmp_path, tmp_path, processed))
-    assert str(raised.value).endswith(
-        f"[PROCESSED] processed_path: {processed} is not a directory to write"
+    processed_directory = tmp_path / "processed"
+    processed_directory.write_text("")
+    with pytest.raises(ConfigError) as config_error:
+        config.check_paths(
+            build_config_with_paths(tmp_path, tmp_path, processed_directory)
+        )
+    assert str(config_error.value).endswith(
+        f"[PROCESSED] processed_path: {processed_directory} is not a directory to write"
         " processed files into"
     )
-    processed.unlink()
-    processed.mkdir()
+    processed_directory.unlink()
+    processed_directory.mkdir()
     monkeypatch.setattr(os, "access", lambda _path, _mode: False)
-    with pytest.raises(ConfigError) as raised:
-        config.check_paths(configured(tmp_path, tmp_path, processed))
-    assert str(raised.value).endswith(
-        f"[PROCESSED] processed_path: {processed} is a directory this process"
+    with pytest.raises(ConfigError) as config_error:
+        config.check_paths(
+            build_config_with_paths(tmp_path, tmp_path, processed_directory)
+        )
+    assert str(config_error.value).endswith(
+        f"[PROCESSED] processed_path: {processed_directory} is a directory this process"
         " cannot write into"
     )
 
 
-@pytest.mark.parametrize("entry", ["redo_from_mjd", "steps"])
+@pytest.mark.parametrize("command_line_entry", ["redo_from_mjd", "steps"])
 def test_a_redo_or_a_count_of_epochs_in_the_file_is_refused(
-    tmp_path: Path, entry: str
+    tmp_path: Path, command_line_entry: str
 ) -> None:
     """Refuse a file naming either: they are given for one run, on its command line."""
-    with pytest.raises(ConfigError, match=entry):
-        built(tmp_path, **{f"PROCESSED__{entry}": "60010"})
+    with pytest.raises(ConfigError, match=command_line_entry):
+        build_from_ini(tmp_path, **{f"PROCESSED__{command_line_entry}": "60010"})
 
 
 def test_the_logging_settings_are_built_alone(tmp_path: Path) -> None:
     """Build the logging settings with other required settings missing."""
-    path = tmp_path / "das.ini"
-    path.write_text("[LOGGING]\nlog_file = None\nlog_level = INFO\n", encoding="utf-8")
-    options = cli.parse_args(["--config-file", str(path)])
-    built_ = config.build_logging_config(options)
-    assert (built_.log_file, built_.log_level, built_.backup_count) == (
+    ini_file = tmp_path / "das.ini"
+    ini_file.write_text(
+        "[LOGGING]\nlog_file = None\nlog_level = INFO\n", encoding="utf-8"
+    )
+    cli_options = cli.parse_args(["--config-file", str(ini_file)])
+    logging_config = config.build_logging_config(cli_options)
+    assert (
+        logging_config.log_file,
+        logging_config.log_level,
+        logging_config.backup_count,
+    ) == (
         None,
         "INFO",
         None,
     )
-    path.write_text(
+    ini_file.write_text(
         "[LOGGING]\nlog_file = run.log\nlog_level = INFO\n", encoding="utf-8"
     )
     with pytest.raises(ConfigError, match=r"logging: .*path must be absolute"):
-        config.build_logging_config(options)
+        config.build_logging_config(cli_options)

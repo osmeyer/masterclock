@@ -22,16 +22,18 @@ from pydantic import ValidationError
 from masterclock.domain import phase, steering
 from masterclock.domain.series import State
 
-MARK: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
+EPOCH_START: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """An invented ten-minute mark, E."""
 
 T: Final = timedelta(seconds=phase.EPOCH_SECONDS)
 """One epoch."""
 
 
-def event(at: datetime, dx: float = 0.0, dy: float = 0.0) -> steering.SteerEvent:
-    """Build a steering event at ``at``."""
-    return steering.SteerEvent(applied_datetime=at, dx=dx, dy=dy)
+def steer_event(
+    applied_at: datetime, dx: float = 0.0, dy: float = 0.0
+) -> steering.SteerEvent:
+    """Build a steering event at ``applied_at``."""
+    return steering.SteerEvent(applied_datetime=applied_at, dx=dx, dy=dy)
 
 
 # ------------------------------------------------------------------- events
@@ -39,45 +41,56 @@ def event(at: datetime, dx: float = 0.0, dy: float = 0.0) -> steering.SteerEvent
 
 def test_an_event_holds_its_changes() -> None:
     """Keep the instant and both changes as given."""
-    made = event(MARK, 1.5, -0.00012)
-    assert (made.applied_datetime, made.dx, made.dy) == (MARK, 1.5, -0.00012)
+    built_event = steer_event(EPOCH_START, 1.5, -0.00012)
+    assert (built_event.applied_datetime, built_event.dx, built_event.dy) == (
+        EPOCH_START,
+        1.5,
+        -0.00012,
+    )
 
 
-@pytest.mark.parametrize("field", ["dx", "dy"])
-@pytest.mark.parametrize("value", [float("nan"), float("inf")])
-def test_an_event_refuses_a_change_that_is_not_finite(field: str, value: float) -> None:
+@pytest.mark.parametrize("change_field", ["dx", "dy"])
+@pytest.mark.parametrize("bad_change", [float("nan"), float("inf")])
+def test_an_event_refuses_a_change_that_is_not_finite(
+    change_field: str, bad_change: float
+) -> None:
     """Refuse nan and infinity for either change."""
-    with pytest.raises(ValidationError, match=field):
+    with pytest.raises(ValidationError, match=change_field):
         steering.SteerEvent.model_validate(
-            {"applied_datetime": MARK, "dx": 0.0, "dy": 0.0, field: value}
+            {
+                "applied_datetime": EPOCH_START,
+                "dx": 0.0,
+                "dy": 0.0,
+                change_field: bad_change,
+            }
         )
 
 
 @pytest.mark.parametrize(
-    "values",
+    "event_fields",
     [
-        {"applied_datetime": MARK.replace(tzinfo=None), "dx": 0.0, "dy": 0.0},
-        {"applied_datetime": MARK, "dx": "1", "dy": 0.0},
-        {"applied_datetime": MARK, "dx": 0.0, "dy": 0.0, "colour": "red"},
+        {"applied_datetime": EPOCH_START.replace(tzinfo=None), "dx": 0.0, "dy": 0.0},
+        {"applied_datetime": EPOCH_START, "dx": "1", "dy": 0.0},
+        {"applied_datetime": EPOCH_START, "dx": 0.0, "dy": 0.0, "colour": "red"},
     ],
 )
-def test_an_event_is_strict(values: dict[str, object]) -> None:
+def test_an_event_is_strict(event_fields: dict[str, object]) -> None:
     """Refuse a naive instant, text for a number, and an unknown field."""
     with pytest.raises(ValidationError):
-        steering.SteerEvent.model_validate(values)
+        steering.SteerEvent.model_validate(event_fields)
 
 
 def test_an_event_is_frozen() -> None:
     """Refuse a change to a built event."""
     with pytest.raises(ValidationError, match="frozen"):
-        event(MARK).dx = 1.0  # type: ignore[misc]
+        steer_event(EPOCH_START).dx = 1.0  # type: ignore[misc]
 
 
 # -------------------------------------------------------------------- signs
 
 
 @pytest.mark.parametrize(
-    ("key", "signs"),
+    ("series_key", "expected_signs"),
     [
         (("mc1", "mc1"), {}),
         (("mc1", "mc2"), {"mc1": 1, "mc2": -1}),
@@ -88,10 +101,10 @@ def test_an_event_is_frozen() -> None:
     ],
 )
 def test_each_series_is_steered_with_the_signs_of_its_difference(
-    key: tuple[str, ...], signs: dict[str, int]
+    series_key: tuple[str, ...], expected_signs: dict[str, int]
 ) -> None:
     """Give the signs of design 7.1 for self, link and clock pairs and triples (U5)."""
-    assert steering.signs(key) == signs
+    assert steering.signs(series_key) == expected_signs
 
 
 # ----------------------------------------------------------------------- u
@@ -99,33 +112,39 @@ def test_each_series_is_steered_with_the_signs_of_its_difference(
 
 def test_u_moves_each_event_on_to_the_epoch_start() -> None:
     """Sum dx and dy times the time from the event to E, exactly."""
-    at = MARK - timedelta(seconds=100)
-    events = {"mc2": (event(at, dx=3.0, dy=0.25),)}
-    ux, uy = steering.steer_u(("mc2", "ox23"), MARK, events)
+    applied_at = EPOCH_START - timedelta(seconds=100)
+    steering_events = {"mc2": (steer_event(applied_at, dx=3.0, dy=0.25),)}
+    ux, uy = steering.steer_u(("mc2", "ox23"), EPOCH_START, steering_events)
     assert ux == 3 + Fraction(1, 4) * 100
     assert uy == 0.25
 
 
 def test_u_takes_each_reference_with_its_sign() -> None:
     """Add the first reference's events and take away the second's."""
-    events = {
-        "mc1": (event(MARK, dx=5.0, dy=0.5),),
-        "mc2": (event(MARK, dx=2.0, dy=0.125),),
+    steering_events = {
+        "mc1": (steer_event(EPOCH_START, dx=5.0, dy=0.5),),
+        "mc2": (steer_event(EPOCH_START, dx=2.0, dy=0.125),),
     }
-    assert steering.steer_u(("mc1", "mc2"), MARK, events) == (Fraction(3), 0.375)
-    assert steering.steer_u(("mc1", "mc1"), MARK, events) == (Fraction(0), 0.0)
+    assert steering.steer_u(("mc1", "mc2"), EPOCH_START, steering_events) == (
+        Fraction(3),
+        0.375,
+    )
+    assert steering.steer_u(("mc1", "mc1"), EPOCH_START, steering_events) == (
+        Fraction(0),
+        0.0,
+    )
 
 
 def test_u_is_exact() -> None:
     """Hold 0.1 ps as the float it is, not as one tenth."""
-    events = {"mc1": (event(MARK, dx=0.1),)}
-    ux, _ = steering.steer_u(("mc1", "c"), MARK, events)
+    steering_events = {"mc1": (steer_event(EPOCH_START, dx=0.1),)}
+    ux, _ = steering.steer_u(("mc1", "c"), EPOCH_START, steering_events)
     assert ux == phase.exact(0.1)
     assert isinstance(ux, Fraction)
 
 
 @pytest.mark.parametrize(
-    ("offset", "counted"),
+    ("event_offset", "is_counted"),
     [
         (-T, False),
         (-T + timedelta(microseconds=1), True),
@@ -134,17 +153,17 @@ def test_u_is_exact() -> None:
     ],
 )
 def test_u_counts_the_events_after_one_epoch_ago_through_the_start(
-    offset: timedelta, counted: bool
+    event_offset: timedelta, is_counted: bool
 ) -> None:
     """Leave out an event at E - T or after E; count one just after E - T and at E."""
-    events = {"mc1": (event(MARK + offset, dx=7.0),)}
-    ux, _ = steering.steer_u(("mc1", "c"), MARK, events)
-    assert ux == (7 if counted else 0)
+    steering_events = {"mc1": (steer_event(EPOCH_START + event_offset, dx=7.0),)}
+    ux, _ = steering.steer_u(("mc1", "c"), EPOCH_START, steering_events)
+    assert ux == (7 if is_counted else 0)
 
 
 def test_a_reference_with_no_events_adds_nothing() -> None:
     """Give no input for a series whose references were never steered."""
-    assert steering.steer_u(("mc1", "mc2"), MARK, {}) == (Fraction(0), 0.0)
+    assert steering.steer_u(("mc1", "mc2"), EPOCH_START, {}) == (Fraction(0), 0.0)
 
 
 # ----------------------------------------------------------------------- w
@@ -152,14 +171,16 @@ def test_a_reference_with_no_events_adds_nothing() -> None:
 
 def test_w_moves_each_event_on_to_the_measurement() -> None:
     """Sum dx and dy times the time from the event to t, exactly."""
-    measured = MARK + timedelta(seconds=137, microseconds=203_200)
-    at = MARK + timedelta(seconds=37, microseconds=203_200)
-    events = {"mc1": (event(at, dx=-1.0, dy=0.5),)}
-    assert steering.steer_w(("mc1", "c"), MARK, events, measured) == Fraction(49)
+    measured_at = EPOCH_START + timedelta(seconds=137, microseconds=203_200)
+    applied_at = EPOCH_START + timedelta(seconds=37, microseconds=203_200)
+    steering_events = {"mc1": (steer_event(applied_at, dx=-1.0, dy=0.5),)}
+    assert steering.steer_w(
+        ("mc1", "c"), EPOCH_START, steering_events, measured_at
+    ) == Fraction(49)
 
 
 @pytest.mark.parametrize(
-    ("offset", "counted"),
+    ("event_offset", "is_counted"),
     [
         (timedelta(0), False),
         (timedelta(microseconds=1), True),
@@ -168,13 +189,13 @@ def test_w_moves_each_event_on_to_the_measurement() -> None:
     ],
 )
 def test_w_counts_the_events_after_the_start_through_the_measurement(
-    offset: timedelta, counted: bool
+    event_offset: timedelta, is_counted: bool
 ) -> None:
     """Leave out an event at E or after t; count one just after E and at t."""
-    measured = MARK + timedelta(seconds=137)
-    events = {"mc2": (event(MARK + offset, dx=-4.0),)}
-    w = steering.steer_w(("mc1", "mc2"), MARK, events, measured)
-    assert w == (4 if counted else 0)
+    measured_at = EPOCH_START + timedelta(seconds=137)
+    steering_events = {"mc2": (steer_event(EPOCH_START + event_offset, dx=-4.0),)}
+    w = steering.steer_w(("mc1", "mc2"), EPOCH_START, steering_events, measured_at)
+    assert w == (4 if is_counted else 0)
 
 
 # ------------------------------------------------------- an epoch's event
@@ -187,21 +208,21 @@ def test_an_event_inside_the_epoch_is_taken_off_and_counted_next_epoch() -> None
     rate. mc2 is steered by 40 ps and 0.002 ps/s 100 s after E, and the pair
     is measured 300 s after E.
     """
-    key = ("mc2", "ox23")
-    steered_at = MARK + timedelta(seconds=100)
-    measured = MARK + timedelta(seconds=300)
-    events = {"mc2": (event(steered_at, dx=40.0, dy=0.002),)}
+    series_key = ("mc2", "ox23")
+    steered_at = EPOCH_START + timedelta(seconds=100)
+    measured_at = EPOCH_START + timedelta(seconds=300)
+    steering_events = {"mc2": (steer_event(steered_at, dx=40.0, dy=0.002),)}
     true_at_mark = 1_000_000
     true_at_measurement = true_at_mark + 40 + phase.exact(0.002) * 200
     reading = round(true_at_measurement) % phase.PHASE_PERIOD
 
-    w = steering.steer_w(key, MARK, events, measured)
+    w = steering.steer_w(series_key, EPOCH_START, steering_events, measured_at)
     prediction = State(x=Fraction(true_at_mark), y=0.0)
     decycled = phase.decycle(reading, Fraction(300), w, prediction, None)
     assert decycled.z == true_at_mark
 
-    following = MARK + T
-    ux, uy = steering.steer_u(key, following, events)
+    next_epoch_start = EPOCH_START + T
+    ux, uy = steering.steer_u(series_key, next_epoch_start, steering_events)
     true_at_following = true_at_mark + 40 + phase.exact(0.002) * 500
     assert decycled.z + ux == true_at_following
     assert uy == 0.002
@@ -209,11 +230,13 @@ def test_an_event_inside_the_epoch_is_taken_off_and_counted_next_epoch() -> None
 
 def test_w_adds_up_every_event_inside_the_epoch() -> None:
     """Sum the events of the epoch up to t, not keep the last alone."""
-    measured = MARK + timedelta(seconds=137)
-    events = {
+    measured_at = EPOCH_START + timedelta(seconds=137)
+    steering_events = {
         "mc2": (
-            event(MARK + timedelta(seconds=10), dx=-4.0),
-            event(MARK + timedelta(seconds=20), dx=-1.0),
+            steer_event(EPOCH_START + timedelta(seconds=10), dx=-4.0),
+            steer_event(EPOCH_START + timedelta(seconds=20), dx=-1.0),
         )
     }
-    assert steering.steer_w(("mc1", "mc2"), MARK, events, measured) == 5
+    assert (
+        steering.steer_w(("mc1", "mc2"), EPOCH_START, steering_events, measured_at) == 5
+    )

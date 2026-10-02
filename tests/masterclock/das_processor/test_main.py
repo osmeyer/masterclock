@@ -16,16 +16,16 @@ from masterclock import das_processor
 
 def test_the_das_processor_command_is_declared_once() -> None:
     """Declare exactly one command named das_processor."""
-    declared = entry_points(group="console_scripts", name="das_processor")
-    assert len(declared) == 1
+    declared_commands = entry_points(group="console_scripts", name="das_processor")
+    assert len(declared_commands) == 1
 
 
 def test_the_module_calls_the_declared_main() -> None:
     """Call, from __main__, the same function the das_processor command calls."""
-    (declared,) = entry_points(group="console_scripts", name="das_processor")
-    module = importlib.import_module("masterclock.das_processor.__main__")
-    assert module.main is declared.load()
-    assert module.main is das_processor.main
+    (declared_command,) = entry_points(group="console_scripts", name="das_processor")
+    main_module = importlib.import_module("masterclock.das_processor.__main__")
+    assert main_module.main is declared_command.load()
+    assert main_module.main is das_processor.main
 
 
 def test_running_the_module_exits_with_the_status_main_returns(
@@ -37,6 +37,6 @@ def test_running_the_module_exits_with_the_status_main_returns(
         sys.modules, "masterclock.das_processor.__main__", raising=False
     )
     monkeypatch.setattr(das_processor, "main", lambda: 7)
-    with pytest.raises(SystemExit) as stopped:
+    with pytest.raises(SystemExit) as program_exit:
         runpy.run_module("masterclock.das_processor", run_name="__main__")
-    assert stopped.value.code == 7
+    assert program_exit.value.code == 7

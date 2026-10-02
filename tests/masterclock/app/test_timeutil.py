@@ -25,13 +25,15 @@ from masterclock.app import timeutil
 
 # The range the property tests draw from: from MJD zero to the end of 2199.
 # The tolerances below are worked out from the size of the numbers in it.
-FIRST: Final = datetime(1858, 11, 17, tzinfo=UTC)
-LAST: Final = datetime(2199, 12, 31, 23, 59, 59, 999_999, tzinfo=UTC)
-UNIX_FIRST: Final = (FIRST - datetime(1970, 1, 1, tzinfo=UTC)).total_seconds()
-UNIX_LAST: Final = (LAST - datetime(1970, 1, 1, tzinfo=UTC)).total_seconds()
-MJD_LAST: Final = UNIX_LAST / 86_400 + 40_587
-JD_FIRST: Final = 2_400_000.5
-JD_LAST: Final = MJD_LAST + JD_FIRST
+RANGE_START: Final = datetime(1858, 11, 17, tzinfo=UTC)
+RANGE_END: Final = datetime(2199, 12, 31, 23, 59, 59, 999_999, tzinfo=UTC)
+UNIX_RANGE_START: Final = (
+    RANGE_START - datetime(1970, 1, 1, tzinfo=UTC)
+).total_seconds()
+UNIX_RANGE_END: Final = (RANGE_END - datetime(1970, 1, 1, tzinfo=UTC)).total_seconds()
+MJD_RANGE_END: Final = UNIX_RANGE_END / 86_400 + 40_587
+JD_RANGE_START: Final = 2_400_000.5
+JD_RANGE_END: Final = MJD_RANGE_END + JD_RANGE_START
 # The same offset as JD_FIRST, held exactly for the rational arithmetic.
 JD_OFFSET: Final = Fraction(4_800_001, 2)
 
@@ -63,22 +65,22 @@ DATETIME_FUNCTIONS: Final = (
     timeutil.datetime_to_mjd,
     timeutil.datetime_to_jd,
 )
-TO_DATETIME: Final = (
+TO_DATETIME_FUNCTIONS: Final = (
     timeutil.unix_to_datetime,
     timeutil.mjd_to_datetime,
     timeutil.jd_to_datetime,
 )
 
 instants: Final = st.datetimes(
-    min_value=FIRST.replace(tzinfo=None),
-    max_value=LAST.replace(tzinfo=None),
+    min_value=RANGE_START.replace(tzinfo=None),
+    max_value=RANGE_END.replace(tzinfo=None),
     timezones=st.just(UTC),
 )
 naive_instants: Final = st.datetimes(
-    min_value=FIRST.replace(tzinfo=None) + timedelta(days=1),
-    max_value=LAST.replace(tzinfo=None) - timedelta(days=1),
+    min_value=RANGE_START.replace(tzinfo=None) + timedelta(days=1),
+    max_value=RANGE_END.replace(tzinfo=None) - timedelta(days=1),
 )
-offsets: Final = st.builds(
+zone_offsets: Final = st.builds(
     timezone,
     st.integers(min_value=-23 * 60 - 59, max_value=23 * 60 + 59).map(
         lambda minutes: timedelta(minutes=minutes)
@@ -86,27 +88,27 @@ offsets: Final = st.builds(
 )
 # Kept a day inside the range, so no offset can move them outside it.
 zoned_instants: Final = st.builds(
-    lambda moment, zone: moment.replace(tzinfo=zone), naive_instants, offsets
+    lambda moment, zone: moment.replace(tzinfo=zone), naive_instants, zone_offsets
 )
-unix_seconds: Final = st.floats(min_value=UNIX_FIRST, max_value=UNIX_LAST)
-mjds: Final = st.floats(min_value=0.0, max_value=MJD_LAST)
-jds: Final = st.floats(min_value=JD_FIRST, max_value=JD_LAST)
+unix_seconds: Final = st.floats(min_value=UNIX_RANGE_START, max_value=UNIX_RANGE_END)
+mjds: Final = st.floats(min_value=0.0, max_value=MJD_RANGE_END)
+jds: Final = st.floats(min_value=JD_RANGE_START, max_value=JD_RANGE_END)
 
 
-def exact_unix(moment: datetime) -> Fraction:
-    """Return the exact seconds from the Unix epoch to ``moment``."""
-    since = moment - datetime(1970, 1, 1, tzinfo=UTC)
-    return Fraction(since // timedelta(microseconds=1)) * MICROSECOND
+def exact_unix(instant: datetime) -> Fraction:
+    """Return the exact seconds from the Unix epoch to ``instant``."""
+    since_unix_epoch = instant - datetime(1970, 1, 1, tzinfo=UTC)
+    return Fraction(since_unix_epoch // timedelta(microseconds=1)) * MICROSECOND
 
 
-def exact_mjd(moment: datetime) -> Fraction:
-    """Return the exact Modified Julian Day of ``moment``."""
-    return exact_unix(moment) / DAY_SECONDS + 40_587
+def exact_mjd(instant: datetime) -> Fraction:
+    """Return the exact Modified Julian Day of ``instant``."""
+    return exact_unix(instant) / DAY_SECONDS + 40_587
 
 
-def within(value: float, exact: Fraction, tolerance: Fraction) -> bool:
-    """Say whether ``value`` is no further than ``tolerance`` from ``exact``."""
-    return abs(Fraction(value) - exact) <= tolerance
+def within(converted: float, exact_value: Fraction, tolerance: Fraction) -> bool:
+    """Say whether ``converted`` is within ``tolerance`` of ``exact_value``."""
+    return abs(Fraction(converted) - exact_value) <= tolerance
 
 
 def test_the_constants_agree_with_the_calendar() -> None:
@@ -125,14 +127,14 @@ def test_the_constants_agree_with_the_calendar() -> None:
 
 def test_a_naive_datetime_is_taken_as_utc() -> None:
     """Tag a naive datetime as UTC without moving it."""
-    result = timeutil.ensure_utc(datetime(2031, 4, 9, 17, 3, 11, 25))
-    assert result == datetime(2031, 4, 9, 17, 3, 11, 25, tzinfo=UTC)
-    assert result.tzinfo is UTC
+    utc_datetime = timeutil.ensure_utc(datetime(2031, 4, 9, 17, 3, 11, 25))
+    assert utc_datetime == datetime(2031, 4, 9, 17, 3, 11, 25, tzinfo=UTC)
+    assert utc_datetime.tzinfo is UTC
 
 
 @contextmanager
-def local_time(zone: str) -> Iterator[None]:
-    """Set the local time zone to ``zone`` inside the block, and start caches empty.
+def local_time(time_zone: str) -> Iterator[None]:
+    """Set the local time zone to ``time_zone`` in the block, and start caches empty.
 
     A test run on a machine whose local time is UTC cannot tell reading a
     naive datetime as UTC from reading it as local time, so the tests that
@@ -140,39 +142,43 @@ def local_time(zone: str) -> Iterator[None]:
     """
     try:
         # patch.dict puts the environment back as it was, TZ included.
-        with mock.patch.dict(os.environ, {"TZ": zone}):
+        with mock.patch.dict(os.environ, {"TZ": time_zone}):
             time.tzset()
-            for function in NUMBER_FUNCTIONS + DATETIME_FUNCTIONS:
-                function.cache_clear()
+            for cached_function in NUMBER_FUNCTIONS + DATETIME_FUNCTIONS:
+                cached_function.cache_clear()
             yield
     finally:
         time.tzset()
 
 
-@pytest.mark.parametrize("zone", ["UTC0", "XST+09:30", "YST-13"])
-def test_naive_datetimes_are_utc_whatever_the_local_time(zone: str) -> None:
+@pytest.mark.parametrize("time_zone", ["UTC0", "XST+09:30", "YST-13"])
+def test_naive_datetimes_are_utc_whatever_the_local_time(time_zone: str) -> None:
     """Read a naive datetime as UTC, not local time, in any local zone."""
-    naive = datetime(2031, 4, 9, 17, 3, 11, 25)
-    aware = naive.replace(tzinfo=UTC)
-    with local_time(zone):
-        assert timeutil.ensure_utc(naive) == aware
-        assert timeutil.ensure_utc(naive.isoformat()) == aware
-        assert timeutil.datetime_to_unix(naive) == aware.timestamp()
-        assert timeutil.datetime_to_mjd(naive) == timeutil.datetime_to_mjd(aware)
-        assert timeutil.datetime_to_jd(naive) == timeutil.datetime_to_jd(aware)
-        assert timeutil.unix_to_datetime(aware.timestamp()) == aware
+    naive_datetime = datetime(2031, 4, 9, 17, 3, 11, 25)
+    aware_datetime = naive_datetime.replace(tzinfo=UTC)
+    with local_time(time_zone):
+        assert timeutil.ensure_utc(naive_datetime) == aware_datetime
+        assert timeutil.ensure_utc(naive_datetime.isoformat()) == aware_datetime
+        assert timeutil.datetime_to_unix(naive_datetime) == aware_datetime.timestamp()
+        assert timeutil.datetime_to_mjd(naive_datetime) == timeutil.datetime_to_mjd(
+            aware_datetime
+        )
+        assert timeutil.datetime_to_jd(naive_datetime) == timeutil.datetime_to_jd(
+            aware_datetime
+        )
+        assert timeutil.unix_to_datetime(aware_datetime.timestamp()) == aware_datetime
 
 
 def test_an_aware_datetime_is_converted_to_utc() -> None:
     """Convert an aware datetime in another zone to the same instant in UTC."""
-    zone = timezone(timedelta(hours=-7, minutes=-30))
-    result = timeutil.ensure_utc(datetime(2031, 4, 9, 17, 3, tzinfo=zone))
-    assert result == datetime(2031, 4, 10, 0, 33, tzinfo=UTC)
-    assert result.tzinfo is UTC
+    time_zone = timezone(timedelta(hours=-7, minutes=-30))
+    utc_datetime = timeutil.ensure_utc(datetime(2031, 4, 9, 17, 3, tzinfo=time_zone))
+    assert utc_datetime == datetime(2031, 4, 10, 0, 33, tzinfo=UTC)
+    assert utc_datetime.tzinfo is UTC
 
 
 @pytest.mark.parametrize(
-    ("text", "expected"),
+    ("iso_text", "expected_datetime"),
     [
         ("2031-04-09T17:03:11", datetime(2031, 4, 9, 17, 3, 11, tzinfo=UTC)),
         ("2031-04-09 17:03:11+01:00", datetime(2031, 4, 9, 16, 3, 11, tzinfo=UTC)),
@@ -181,45 +187,45 @@ def test_an_aware_datetime_is_converted_to_utc() -> None:
     ],
 )
 def test_an_iso_8601_string_is_read_as_a_datetime(
-    text: str, expected: datetime
+    iso_text: str, expected_datetime: datetime
 ) -> None:
     """Read an ISO 8601 string, naive meaning UTC, into a UTC datetime."""
-    result = timeutil.ensure_utc(text)
-    assert result == expected
-    assert result.tzinfo is UTC
+    utc_datetime = timeutil.ensure_utc(iso_text)
+    assert utc_datetime == expected_datetime
+    assert utc_datetime.tzinfo is UTC
 
 
 @given(zoned_instants)
-def test_ensure_utc_keeps_the_instant(moment: datetime) -> None:
+def test_ensure_utc_keeps_the_instant(zoned_instant: datetime) -> None:
     """Return the same instant as given, in UTC, whatever the zone."""
-    result = timeutil.ensure_utc(moment)
-    assert result == moment
-    assert result.tzinfo is UTC
+    utc_datetime = timeutil.ensure_utc(zoned_instant)
+    assert utc_datetime == zoned_instant
+    assert utc_datetime.tzinfo is UTC
 
 
-@pytest.mark.parametrize("function", DATETIME_FUNCTIONS)
+@pytest.mark.parametrize("conversion", DATETIME_FUNCTIONS)
 @pytest.mark.parametrize(
-    "text", ["not a date", "2016-12-31T23:59:60+00:00", "2031-02-30T00:00:00"]
+    "bad_text", ["not a date", "2016-12-31T23:59:60+00:00", "2031-02-30T00:00:00"]
 )
 def test_a_string_that_is_not_a_datetime_is_refused(
-    function: Callable[[str], object], text: str
+    conversion: Callable[[str], object], bad_text: str
 ) -> None:
     """Raise ValueError for bad ISO 8601, a leap second or a day that isn't."""
     with pytest.raises(ValueError, match=r"."):
-        function(text)
+        conversion(bad_text)
 
 
-@pytest.mark.parametrize("function", NUMBER_FUNCTIONS)
+@pytest.mark.parametrize("conversion", NUMBER_FUNCTIONS)
 def test_a_string_that_is_not_a_number_is_refused(
-    function: Callable[[str], object],
+    conversion: Callable[[str], object],
 ) -> None:
     """Raise ValueError for a string float() cannot read."""
     with pytest.raises(ValueError, match="could not convert"):
-        function("forty")
+        conversion("forty")
 
 
 @pytest.mark.parametrize(
-    ("function", "value", "expected"),
+    ("conversion", "given_number", "expected_number"),
     [
         (timeutil.unix_to_mjd, 0.0, 40_587.0),
         (timeutil.unix_to_mjd, 86_400, 40_588.0),
@@ -234,14 +240,14 @@ def test_a_string_that_is_not_a_number_is_refused(
     ],
 )
 def test_known_values_convert_exactly(
-    function: Callable[[float], float], value: float, expected: float
+    conversion: Callable[[float], float], given_number: float, expected_number: float
 ) -> None:
     """Convert values whose answer is known and exact in floats."""
-    assert function(value) == expected
+    assert conversion(given_number) == expected_number
 
 
 @pytest.mark.parametrize(
-    ("function", "value"),
+    ("conversion", "given_number"),
     [
         (timeutil.unix_to_mjd, 1_234_567_890.25),
         (timeutil.mjd_to_unix, 61_234.125),
@@ -255,92 +261,104 @@ def test_known_values_convert_exactly(
     ],
 )
 def test_a_number_as_text_gives_what_the_number_gives(
-    function: Callable[[float | str], object], value: float
+    conversion: Callable[[float | str], object], given_number: float
 ) -> None:
     """Give the same answer for a number and for its text."""
-    assert function(repr(value)) == function(value)
-    assert function(f"  {value}  ") == function(value)
+    assert conversion(repr(given_number)) == conversion(given_number)
+    assert conversion(f"  {given_number}  ") == conversion(given_number)
 
 
 @given(unix_seconds)
-def test_unix_to_mjd_and_jd_agree_with_exact_arithmetic(seconds: float) -> None:
+def test_unix_to_mjd_and_jd_agree_with_exact_arithmetic(unix_time: float) -> None:
     """Match the exact MJD and JD of a Unix timestamp within float spacing."""
-    exact = Fraction(seconds) / DAY_SECONDS + 40_587
-    assert within(timeutil.unix_to_mjd(seconds), exact, MJD_TOLERANCE)
-    assert within(timeutil.unix_to_jd(seconds), exact + JD_OFFSET, JD_TOLERANCE)
+    exact_mjd_value = Fraction(unix_time) / DAY_SECONDS + 40_587
+    assert within(timeutil.unix_to_mjd(unix_time), exact_mjd_value, MJD_TOLERANCE)
+    assert within(
+        timeutil.unix_to_jd(unix_time), exact_mjd_value + JD_OFFSET, JD_TOLERANCE
+    )
 
 
 @given(mjds)
 def test_mjd_to_unix_and_jd_agree_with_exact_arithmetic(mjd: float) -> None:
     """Match the exact Unix timestamp and JD of an MJD within float spacing."""
-    exact = (Fraction(mjd) - 40_587) * DAY_SECONDS
-    assert within(timeutil.mjd_to_unix(mjd), exact, UNIX_TOLERANCE)
+    exact_unix_value = (Fraction(mjd) - 40_587) * DAY_SECONDS
+    assert within(timeutil.mjd_to_unix(mjd), exact_unix_value, UNIX_TOLERANCE)
     assert within(timeutil.mjd_to_jd(mjd), Fraction(mjd) + JD_OFFSET, JD_TOLERANCE)
 
 
 @given(jds)
 def test_jd_to_unix_and_mjd_agree_with_exact_arithmetic(jd: float) -> None:
     """Match the exact Unix timestamp and MJD of a JD within float spacing."""
-    mjd = Fraction(jd) - JD_OFFSET
-    assert within(timeutil.jd_to_unix(jd), (mjd - 40_587) * DAY_SECONDS, UNIX_TOLERANCE)
-    assert within(timeutil.jd_to_mjd(jd), mjd, MJD_TOLERANCE)
+    exact_mjd_value = Fraction(jd) - JD_OFFSET
+    assert within(
+        timeutil.jd_to_unix(jd),
+        (exact_mjd_value - 40_587) * DAY_SECONDS,
+        UNIX_TOLERANCE,
+    )
+    assert within(timeutil.jd_to_mjd(jd), exact_mjd_value, MJD_TOLERANCE)
 
 
 @given(instants)
-def test_datetime_conversions_agree_with_exact_arithmetic(moment: datetime) -> None:
+def test_datetime_conversions_agree_with_exact_arithmetic(instant: datetime) -> None:
     """Match the exact Unix timestamp, MJD and JD of a datetime."""
-    mjd = exact_mjd(moment)
-    assert within(timeutil.datetime_to_unix(moment), exact_unix(moment), UNIX_TOLERANCE)
-    assert within(timeutil.datetime_to_mjd(moment), mjd, MJD_TOLERANCE)
-    assert within(timeutil.datetime_to_jd(moment), mjd + JD_OFFSET, JD_TOLERANCE)
+    exact_mjd_value = exact_mjd(instant)
+    assert within(
+        timeutil.datetime_to_unix(instant), exact_unix(instant), UNIX_TOLERANCE
+    )
+    assert within(timeutil.datetime_to_mjd(instant), exact_mjd_value, MJD_TOLERANCE)
+    assert within(
+        timeutil.datetime_to_jd(instant), exact_mjd_value + JD_OFFSET, JD_TOLERANCE
+    )
 
 
 @given(instants)
-def test_a_naive_datetime_converts_as_utc(moment: datetime) -> None:
+def test_a_naive_datetime_converts_as_utc(instant: datetime) -> None:
     """Convert a naive datetime as though it carried UTC."""
-    naive = moment.replace(tzinfo=None)
-    assert timeutil.datetime_to_unix(naive) == timeutil.datetime_to_unix(moment)
-    assert timeutil.datetime_to_mjd(naive) == timeutil.datetime_to_mjd(moment)
-    assert timeutil.datetime_to_jd(naive) == timeutil.datetime_to_jd(moment)
+    naive_datetime = instant.replace(tzinfo=None)
+    assert timeutil.datetime_to_unix(naive_datetime) == timeutil.datetime_to_unix(
+        instant
+    )
+    assert timeutil.datetime_to_mjd(naive_datetime) == timeutil.datetime_to_mjd(instant)
+    assert timeutil.datetime_to_jd(naive_datetime) == timeutil.datetime_to_jd(instant)
 
 
 @given(zoned_instants)
 def test_a_datetime_in_another_zone_converts_as_its_instant(
-    moment: datetime,
+    zoned_instant: datetime,
 ) -> None:
     """Convert an aware datetime by the instant it names, not its wall clock."""
     assert within(
-        timeutil.datetime_to_mjd(moment),
-        exact_mjd(moment),
+        timeutil.datetime_to_mjd(zoned_instant),
+        exact_mjd(zoned_instant),
         MJD_TOLERANCE,
     )
 
 
 @given(instants)
 def test_a_datetime_survives_the_round_trip_through_unix_time(
-    moment: datetime,
+    instant: datetime,
 ) -> None:
     """Come back to the same microsecond from a datetime by way of Unix time."""
-    result = timeutil.unix_to_datetime(timeutil.datetime_to_unix(moment))
-    assert result == moment
-    assert result.tzinfo is UTC
+    round_trip_datetime = timeutil.unix_to_datetime(timeutil.datetime_to_unix(instant))
+    assert round_trip_datetime == instant
+    assert round_trip_datetime.tzinfo is UTC
 
 
 @given(instants)
 def test_a_datetime_survives_the_round_trip_through_mjd_and_jd(
-    moment: datetime,
+    instant: datetime,
 ) -> None:
     """Come back to the same instant within float spacing by way of MJD or JD."""
-    by_mjd = timeutil.mjd_to_datetime(timeutil.datetime_to_mjd(moment))
-    by_jd = timeutil.jd_to_datetime(timeutil.datetime_to_jd(moment))
-    assert abs(by_mjd - moment) <= timedelta(microseconds=2)
-    assert abs(by_jd - moment) <= timedelta(microseconds=25)
+    by_mjd = timeutil.mjd_to_datetime(timeutil.datetime_to_mjd(instant))
+    by_jd = timeutil.jd_to_datetime(timeutil.datetime_to_jd(instant))
+    assert abs(by_mjd - instant) <= timedelta(microseconds=2)
+    assert abs(by_jd - instant) <= timedelta(microseconds=25)
     assert by_mjd.tzinfo is UTC
     assert by_jd.tzinfo is UTC
 
 
 @pytest.mark.parametrize(
-    ("function", "value"),
+    ("conversion", "epoch_number"),
     [
         (timeutil.unix_to_datetime, 0.0),
         (timeutil.mjd_to_datetime, 40_587.0),
@@ -348,16 +366,16 @@ def test_a_datetime_survives_the_round_trip_through_mjd_and_jd(
     ],
 )
 def test_the_unix_epoch_converts_to_a_utc_datetime(
-    function: Callable[[float], datetime], value: float
+    conversion: Callable[[float], datetime], epoch_number: float
 ) -> None:
     """Give midnight on 1970-01-01, in UTC, for the Unix epoch."""
-    result = function(value)
-    assert result == datetime(1970, 1, 1, tzinfo=UTC)
-    assert result.tzinfo is UTC
+    utc_datetime = conversion(epoch_number)
+    assert utc_datetime == datetime(1970, 1, 1, tzinfo=UTC)
+    assert utc_datetime.tzinfo is UTC
 
 
 @pytest.mark.parametrize(
-    ("function", "first", "last"),
+    ("conversion", "first_number", "last_number"),
     [
         (timeutil.unix_to_datetime, -62_135_596_800.0, 253_402_300_799.0),
         (timeutil.mjd_to_datetime, -678_575.0, 2_973_483.9999),
@@ -365,20 +383,20 @@ def test_the_unix_epoch_converts_to_a_utc_datetime(
     ],
 )
 def test_years_1_to_9999_are_the_range_of_datetimes(
-    function: Callable[[float], datetime], first: float, last: float
+    conversion: Callable[[float], datetime], first_number: float, last_number: float
 ) -> None:
     """Accept numbers inside years 1 to 9999 and refuse the ones outside."""
-    assert function(first) == datetime(1, 1, 1, tzinfo=UTC)
-    assert function(last).year == 9999
+    assert conversion(first_number) == datetime(1, 1, 1, tzinfo=UTC)
+    assert conversion(last_number).year == 9999
     with pytest.raises(ValueError, match="not 0"):
-        function(first - 1)
+        conversion(first_number - 1)
     with pytest.raises(ValueError, match="not 10000"):
-        function(last + 1)
+        conversion(last_number + 1)
 
 
-@pytest.mark.parametrize("function", TO_DATETIME)
+@pytest.mark.parametrize("conversion", TO_DATETIME_FUNCTIONS)
 @pytest.mark.parametrize(
-    ("value", "error", "message"),
+    ("number_text", "expected_error", "error_text"),
     [
         ("nan", ValueError, "NaN"),
         ("inf", OverflowError, "out of range"),
@@ -386,32 +404,32 @@ def test_years_1_to_9999_are_the_range_of_datetimes(
     ],
 )
 def test_a_number_that_names_no_instant_is_refused(
-    function: Callable[[str], datetime],
-    value: str,
-    error: type[Exception],
-    message: str,
+    conversion: Callable[[str], datetime],
+    number_text: str,
+    expected_error: type[Exception],
+    error_text: str,
 ) -> None:
     """Raise ValueError for NaN and OverflowError for infinity."""
-    with pytest.raises(error, match=message):
-        function(value)
+    with pytest.raises(expected_error, match=error_text):
+        conversion(number_text)
 
 
 def test_every_function_is_cached() -> None:
     """Wrap every function the module defines in an LRU cache of the set size."""
     # Names with double underscores are left out: Python itself adds
     # __annotate__ to a module whose names carry annotations.
-    functions = {
-        name: value
-        for name, value in vars(timeutil).items()
-        if not name.startswith("__")
-        and inspect.isfunction(inspect.unwrap(value))
-        and inspect.unwrap(value).__module__ == timeutil.__name__
+    module_functions = {
+        function_name: module_value
+        for function_name, module_value in vars(timeutil).items()
+        if not function_name.startswith("__")
+        and inspect.isfunction(inspect.unwrap(module_value))
+        and inspect.unwrap(module_value).__module__ == timeutil.__name__
     }
-    assert "ensure_utc" in functions
-    assert "jd_to_datetime" in functions
-    expected = {"maxsize": timeutil._CACHE_SIZE, "typed": False}
-    settings: dict[str, object] = {
-        name: getattr(function, "cache_parameters", dict)()
-        for name, function in functions.items()
+    assert "ensure_utc" in module_functions
+    assert "jd_to_datetime" in module_functions
+    expected_cache_settings = {"maxsize": timeutil._CACHE_SIZE, "typed": False}
+    cache_settings: dict[str, object] = {
+        function_name: getattr(cached_function, "cache_parameters", dict)()
+        for function_name, cached_function in module_functions.items()
     }
-    assert settings == dict.fromkeys(functions, expected)
+    assert cache_settings == dict.fromkeys(module_functions, expected_cache_settings)

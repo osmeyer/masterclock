@@ -43,53 +43,62 @@ TOP_LEVEL_NAMES: Final = (
 )
 
 
-def _project_root(text: str) -> Path:
+def _project_root(cli_argument: str) -> Path:
     """Convert a command-line argument to a folder that holds ``pyproject.toml``."""
-    path = Path(text)
-    if not (path / "pyproject.toml").is_file():
-        message = f"not a project folder (no pyproject.toml): {text}"
-        raise argparse.ArgumentTypeError(message)
-    return path
+    project_folder = Path(cli_argument)
+    if not (project_folder / "pyproject.toml").is_file():
+        refusal = f"not a project folder (no pyproject.toml): {cli_argument}"
+        raise argparse.ArgumentTypeError(refusal)
+    return project_folder
 
 
 def _cache_folders(folder: Path, skipped: frozenset[str]) -> list[Path]:
     """Return the ``__pycache__`` folders under ``folder``, not entering ``skipped``."""
-    found: list[Path] = []
-    for child in folder.iterdir():
-        if not child.is_dir() or child.is_symlink() or child.name in skipped:
+    cache_folders_found: list[Path] = []
+    for folder_entry in folder.iterdir():
+        if (
+            not folder_entry.is_dir()
+            or folder_entry.is_symlink()
+            or folder_entry.name in skipped
+        ):
             continue
-        if child.name == CACHE_FOLDER:
-            found.append(child)
+        if folder_entry.name == CACHE_FOLDER:
+            cache_folders_found.append(folder_entry)
         else:
-            found.extend(_cache_folders(child, NEVER_ENTERED))
-    return found
+            cache_folders_found.extend(_cache_folders(folder_entry, NEVER_ENTERED))
+    return cache_folders_found
 
 
-def generated_paths(root: Path) -> list[Path]:
-    """Return every generated path under ``root`` that the script removes.
+def generated_paths(project_folder: Path) -> list[Path]:
+    """Return every generated path under ``project_folder`` that the script removes.
 
     A ``__pycache__`` folder inside a folder that is removed whole is left out,
     since removing the outer folder removes it too.
     """
-    top = [
-        child
-        for child in root.iterdir()
-        if any(fnmatch(child.name, pattern) for pattern in TOP_LEVEL_NAMES)
+    top_level_paths = [
+        folder_entry
+        for folder_entry in project_folder.iterdir()
+        if any(
+            fnmatch(folder_entry.name, name_pattern) for name_pattern in TOP_LEVEL_NAMES
+        )
     ]
-    caches = [
-        cache
-        for cache in _cache_folders(root, NEVER_ENTERED | KEPT_AT_TOP)
-        if not any(cache.is_relative_to(folder) for folder in top)
+    cache_folders = [
+        cache_folder
+        for cache_folder in _cache_folders(project_folder, NEVER_ENTERED | KEPT_AT_TOP)
+        if not any(
+            cache_folder.is_relative_to(removed_folder)
+            for removed_folder in top_level_paths
+        )
     ]
-    return sorted(top + caches)
+    return sorted(top_level_paths + cache_folders)
 
 
-def remove(path: Path) -> None:
+def remove(removed_path: Path) -> None:
     """Remove a file, a folder, or a symbolic link without following it."""
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
+    if removed_path.is_dir() and not removed_path.is_symlink():
+        shutil.rmtree(removed_path)
     else:
-        path.unlink()
+        removed_path.unlink()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -98,12 +107,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Remove the files and folders the development tools generate."
     )
     parser.add_argument("root", type=_project_root, help="the project folder")
-    root: Path = parser.parse_args(argv).root
-    paths = generated_paths(root)
-    for path in paths:
-        remove(path)
-        print(f"removed {path}")
-    print(f"clean: paths removed: {len(paths)}")
+    project_folder: Path = parser.parse_args(argv).root
+    removed_paths = generated_paths(project_folder)
+    for removed_path in removed_paths:
+        remove(removed_path)
+        print(f"removed {removed_path}")
+    print(f"clean: paths removed: {len(removed_paths)}")
     return 0
 
 

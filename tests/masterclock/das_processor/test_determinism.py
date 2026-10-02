@@ -31,10 +31,10 @@ from masterclock.domain.phase import PHASE_PERIOD
 T: Final = timedelta(minutes=10)
 """One epoch."""
 
-DAY: Final = datetime(2025, 9, 23, tzinfo=UTC)
+DEPLOYMENT_DAY: Final = datetime(2025, 9, 23, tzinfo=UTC)
 """The day the invented deployments start on."""
 
-CLOCKS: Final = (
+CLOCK_CONFIG_YAML: Final = (
     "rejects_before_restart: 4\n"
     "rms_limit: {default: 50}\n"
     "types:\n"
@@ -58,27 +58,31 @@ type Deployment = dict[str, object]
 
 
 @st.composite
-def deployments(draw: st.DrawFn) -> Deployment:
+def invented_deployments(draw: st.DrawFn) -> Deployment:
     """Draw a small invented deployment."""
-    refs = [f"mc{i}" for i in range(1, draw(st.integers(1, 3)) + 1)]
-    clocks = {
-        name: draw(st.sampled_from(refs))
-        for name in ("hm1", "cs1")[: draw(st.integers(0, 2))]
+    refs = [f"mc{ref_number}" for ref_number in range(1, draw(st.integers(1, 3)) + 1)]
+    local_reference_of = {
+        clock_name: draw(st.sampled_from(refs))
+        for clock_name in ("hm1", "cs1")[: draw(st.integers(0, 2))]
     }
-    start = DAY + timedelta(hours=23) + T * draw(st.integers(0, 5))
-    epochs = draw(st.integers(2, 9))
+    first_epoch_start = (
+        DEPLOYMENT_DAY + timedelta(hours=23) + T * draw(st.integers(0, 5))
+    )
+    epoch_count = draw(st.integers(2, 9))
     pairs = [(r, s) for r in refs for s in refs]
-    pairs += [(local, clock) for clock, local in clocks.items()]
-    phases = {pair: draw(st.integers(0, 10**6)) for pair in pairs}
-    rates = {pair: draw(st.integers(-40, 40)) for pair in pairs}
-    missing = draw(
-        st.sets(st.tuples(st.integers(1, epochs - 1), st.sampled_from(pairs)))
+    pairs += [(local, clock) for clock, local in local_reference_of.items()]
+    first_phases = {pair: draw(st.integers(0, 10**6)) for pair in pairs}
+    rates_ps_per_100_s = {pair: draw(st.integers(-40, 40)) for pair in pairs}
+    missing_readings = draw(
+        st.sets(st.tuples(st.integers(1, epoch_count - 1), st.sampled_from(pairs)))
     )
     steering = {
         mc: sorted(
             draw(
                 st.lists(
-                    st.tuples(st.integers(0, epochs * 600 - 1), st.integers(-5, 5)),
+                    st.tuples(
+                        st.integers(0, epoch_count * 600 - 1), st.integers(-5, 5)
+                    ),
                     max_size=2,
                 )
             )
@@ -86,115 +90,132 @@ def deployments(draw: st.DrawFn) -> Deployment:
         for mc in refs
     }
     return {
-        "start": start,
-        "epochs": epochs,
+        "first_epoch_start": first_epoch_start,
+        "epoch_count": epoch_count,
         "pairs": pairs,
-        "phases": phases,
-        "rates": rates,
-        "missing": missing,
+        "first_phases": first_phases,
+        "rates_ps_per_100_s": rates_ps_per_100_s,
+        "missing_readings": missing_readings,
         "steering": steering,
     }
 
 
-def written(directory: Path, deployment: Deployment) -> AppConfig:
-    """Write a deployment's input files in ``directory``, and give its settings."""
-    for name in ("das", "steering", "processed"):
-        (directory / name).mkdir(parents=True)
-    (directory / "clock_config.yaml").write_text(CLOCKS, encoding="utf-8")
-    start: datetime = deployment["start"]  # type: ignore[assignment]
-    epochs: int = deployment["epochs"]  # type: ignore[assignment]
+def write_deployment(deployment_directory: Path, deployment: Deployment) -> AppConfig:
+    """Write a deployment's input files in ``deployment_directory``; give its config."""
+    for directory_name in ("das", "steering", "processed"):
+        (deployment_directory / directory_name).mkdir(parents=True)
+    (deployment_directory / "clock_config.yaml").write_text(
+        CLOCK_CONFIG_YAML, encoding="utf-8"
+    )
+    first_epoch_start: datetime = deployment["first_epoch_start"]  # type: ignore[assignment]
+    epoch_count: int = deployment["epoch_count"]  # type: ignore[assignment]
     pairs: list[tuple[str, str]] = deployment["pairs"]  # type: ignore[assignment]
-    phases: dict[tuple[str, str], int] = deployment["phases"]  # type: ignore[assignment]
-    rates: dict[tuple[str, str], int] = deployment["rates"]  # type: ignore[assignment]
-    missing: set[tuple[int, tuple[str, str]]] = deployment["missing"]  # type: ignore[assignment]
-    days: dict[int, list[str]] = {}
-    for index in range(epochs):
-        mark = start + index * T
-        for slot, pair in enumerate(pairs):
-            if (index, pair) in missing:
+    first_phases: dict[tuple[str, str], int] = deployment["first_phases"]  # type: ignore[assignment]
+    rates_ps_per_100_s: dict[tuple[str, str], int] = deployment["rates_ps_per_100_s"]  # type: ignore[assignment]
+    missing_readings: set[tuple[int, tuple[str, str]]] = deployment["missing_readings"]  # type: ignore[assignment]
+    das_lines_by_day: dict[int, list[str]] = {}
+    for epoch_index in range(epoch_count):
+        epoch_start = first_epoch_start + epoch_index * T
+        for pair_index, pair in enumerate(pairs):
+            if (epoch_index, pair) in missing_readings:
                 continue
             reference, clock = pair
-            offset = 20 + 10 * slot
-            phase = phases[pair] + rates[pair] * (index * 600 + offset) // 100
-            raw = DASMeasurement(
+            seconds_into_epoch = 20 + 10 * pair_index
+            unwrapped_phase = (
+                first_phases[pair]
+                + rates_ps_per_100_s[pair]
+                * (epoch_index * 600 + seconds_into_epoch)
+                // 100
+            )
+            das_measurement = DASMeasurement(
                 measurement_mjd=round(
-                    datetime_to_mjd(mark + timedelta(seconds=offset)), 6
+                    datetime_to_mjd(
+                        epoch_start + timedelta(seconds=seconds_into_epoch)
+                    ),
+                    6,
                 ),
-                measured_phase=phase % PHASE_PERIOD,
+                measured_phase=unwrapped_phase % PHASE_PERIOD,
                 rms=3,
-                switch=f"{reference[-1]}A{slot:02d}",
+                switch=f"{reference[-1]}A{pair_index:02d}",
                 clock=clock,
             )
-            days.setdefault(int(datetime_to_mjd(mark)), []).append(f"{raw}\n")
-    for day, lines in days.items():
-        (directory / "das" / f"cd5m5m_{day}.dat").write_text(
-            "".join(lines), encoding="ascii"
+            das_lines_by_day.setdefault(int(datetime_to_mjd(epoch_start)), []).append(
+                f"{das_measurement}\n"
+            )
+    for data_day, das_lines in das_lines_by_day.items():
+        (deployment_directory / "das" / f"cd5m5m_{data_day}.dat").write_text(
+            "".join(das_lines), encoding="ascii"
         )
     steering: dict[str, list[tuple[int, int]]] = deployment["steering"]  # type: ignore[assignment]
-    for mc, events in steering.items():
-        text = "".join(
-            f"{datetime_to_mjd(start + timedelta(seconds=at)):.6f} {dx}.0 0.0\n"
-            for at, dx in events
-        )
-        (directory / "steering" / STEERING_FILE_TEMPLATE.format(mc=mc)).write_text(text)
+    for mc, steer_events in steering.items():
+        steering_lines = []
+        for seconds_after_start, dx in steer_events:
+            applied_at = first_epoch_start + timedelta(seconds=seconds_after_start)
+            steering_lines.append(f"{datetime_to_mjd(applied_at):.6f} {dx}.0 0.0\n")
+        steering_text = "".join(steering_lines)
+        (
+            deployment_directory / "steering" / STEERING_FILE_TEMPLATE.format(mc=mc)
+        ).write_text(steering_text)
     return AppConfig.model_validate(
         {
             "das": {
                 "rf": "a",
-                "cd5m5m_path": directory / "das",
-                "steering_path": directory / "steering",
+                "cd5m5m_path": deployment_directory / "das",
+                "steering_path": deployment_directory / "steering",
             },
             "processed": {
-                "processed_path": directory / "processed",
-                "start_from_mjd": datetime_to_mjd(start),
-                "clock_config_file": directory / "clock_config.yaml",
+                "processed_path": deployment_directory / "processed",
+                "start_from_mjd": datetime_to_mjd(first_epoch_start),
+                "clock_config_file": deployment_directory / "clock_config.yaml",
             },
             "logging": {"log_file": None, "log_level": None, "backup_count": None},
         }
     )
 
 
-def archive(config: AppConfig) -> dict[str, bytes]:
+def archived_files(config: AppConfig) -> dict[str, bytes]:
     """Give every data file's bytes, by its path under the processed directory."""
-    root = config.processed.processed_path
+    processed_root = config.processed.processed_path
     return {
-        str(path.relative_to(root)): path.read_bytes()
-        for path in sorted(root.rglob("das_a.*.dat"))
+        str(data_file.relative_to(processed_root)): data_file.read_bytes()
+        for data_file in sorted(processed_root.rglob("das_a.*.dat"))
     }
 
 
 def batch_and_stepped(
-    deployment: Deployment, root: Path
+    deployment: Deployment, scratch_directory: Path
 ) -> tuple[dict[str, bytes], dict[str, bytes]]:
     """Run a deployment in one batch and one epoch per run, and give both archives."""
-    batch = written(root / "batch", deployment)
+    batch_config = write_deployment(scratch_directory / "batch", deployment)
     run.run(
-        batch,
-        read_clock_config(batch.processed.clock_config_file),
+        batch_config,
+        read_clock_config(batch_config.processed.clock_config_file),
         None,
         ShutdownHandler(),
     )
-    stepped = written(root / "stepped", deployment)
-    clocks = read_clock_config(stepped.processed.clock_config_file)
-    epochs: int = deployment["epochs"]  # type: ignore[assignment]
-    for _ in range(epochs + 1):
-        run.run(stepped, clocks, 1, ShutdownHandler())
-    return archive(batch), archive(stepped)
+    stepped_config = write_deployment(scratch_directory / "stepped", deployment)
+    clock_config = read_clock_config(stepped_config.processed.clock_config_file)
+    epoch_count: int = deployment["epoch_count"]  # type: ignore[assignment]
+    for _ in range(epoch_count + 1):
+        run.run(stepped_config, clock_config, 1, ShutdownHandler())
+    return archived_files(batch_config), archived_files(stepped_config)
 
 
 @settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-@given(deployments())
+@given(invented_deployments())
 def test_a_batch_and_a_stepped_run_write_the_same_files(deployment: Deployment) -> None:
     """Give byte-identical data files run as a batch or one epoch at a time (I5)."""
-    with tempfile.TemporaryDirectory() as directory:
-        batch, stepped = batch_and_stepped(deployment, Path(directory))
-    assert batch
-    assert batch == stepped
+    with tempfile.TemporaryDirectory() as scratch_directory:
+        batch_files, stepped_files = batch_and_stepped(
+            deployment, Path(scratch_directory)
+        )
+    assert batch_files
+    assert batch_files == stepped_files
 
 
-FIXED: Final[Deployment] = {
-    "start": DAY + timedelta(hours=23, minutes=20),
-    "epochs": 6,
+FIXED_DEPLOYMENT: Final[Deployment] = {
+    "first_epoch_start": DEPLOYMENT_DAY + timedelta(hours=23, minutes=20),
+    "epoch_count": 6,
     "pairs": [
         ("mc1", "mc1"),
         ("mc1", "mc2"),
@@ -202,21 +223,21 @@ FIXED: Final[Deployment] = {
         ("mc2", "mc2"),
         ("mc1", "hm1"),
     ],
-    "phases": {
+    "first_phases": {
         ("mc1", "mc1"): 100,
         ("mc1", "mc2"): 5_000,
         ("mc2", "mc1"): 195_000,
         ("mc2", "mc2"): 200,
         ("mc1", "hm1"): 70_000,
     },
-    "rates": {
+    "rates_ps_per_100_s": {
         ("mc1", "mc1"): 0,
         ("mc1", "mc2"): 1,
         ("mc2", "mc1"): -1,
         ("mc2", "mc2"): 0,
         ("mc1", "hm1"): 25,
     },
-    "missing": {(3, ("mc1", "hm1"))},
+    "missing_readings": {(3, ("mc1", "hm1"))},
     "steering": {"mc1": [(700, 2)], "mc2": []},
 }
 """One invented deployment across midnight, with a gap and a steering event."""
@@ -224,47 +245,47 @@ FIXED: Final[Deployment] = {
 
 def test_two_runs_over_the_same_input_write_the_same_files(tmp_path: Path) -> None:
     """Give byte-identical data files from two runs over the same input (U22)."""
-    first = written(tmp_path / "first", FIXED)
-    second = written(tmp_path / "second", FIXED)
-    for config in (first, second):
+    first_config = write_deployment(tmp_path / "first", FIXED_DEPLOYMENT)
+    second_config = write_deployment(tmp_path / "second", FIXED_DEPLOYMENT)
+    for config in (first_config, second_config):
         run.run(
             config,
             read_clock_config(config.processed.clock_config_file),
             None,
             ShutdownHandler(),
         )
-    assert archive(first)
-    assert archive(first) == archive(second)
+    assert archived_files(first_config)
+    assert archived_files(first_config) == archived_files(second_config)
 
 
 def test_one_epoch_per_process_writes_the_same_files(tmp_path: Path) -> None:
     """Give the batch's files from one process per epoch, any hash seed (U22)."""
-    batch = written(tmp_path / "batch", FIXED)
+    batch_config = write_deployment(tmp_path / "batch", FIXED_DEPLOYMENT)
     run.run(
-        batch,
-        read_clock_config(batch.processed.clock_config_file),
+        batch_config,
+        read_clock_config(batch_config.processed.clock_config_file),
         None,
         ShutdownHandler(),
     )
-    stepped = written(tmp_path / "stepped", FIXED)
-    command = [
+    stepped_config = write_deployment(tmp_path / "stepped", FIXED_DEPLOYMENT)
+    stepped_command = [
         sys.executable,
         "-m",
         "masterclock.das_processor",
         "--rf", "a",
-        "--cd5m5m-path", str(stepped.das.cd5m5m_path),
-        "--steering-path", str(stepped.das.steering_path),
-        "--processed-path", str(stepped.processed.processed_path),
-        "--clock-config-file", str(stepped.processed.clock_config_file),
-        "--start-from-mjd", f"{stepped.processed.start_from_mjd:.6f}",
+        "--cd5m5m-path", str(stepped_config.das.cd5m5m_path),
+        "--steering-path", str(stepped_config.das.steering_path),
+        "--processed-path", str(stepped_config.processed.processed_path),
+        "--clock-config-file", str(stepped_config.processed.clock_config_file),
+        "--start-from-mjd", f"{stepped_config.processed.start_from_mjd:.6f}",
         "--log-file", "None",
         "--log-level", "None",
         "--backup-count", "None",
         "--steps", "1",
     ]  # fmt: skip
-    for seed in range(7):
-        environment = {**os.environ, "PYTHONHASHSEED": str(seed)}
+    for hash_seed in range(7):
+        seeded_env = {**os.environ, "PYTHONHASHSEED": str(hash_seed)}
         # The command is the program itself with settings made in this test.
-        done = subprocess.run(command, env=environment, check=False)  # noqa: S603  # nosec B603
-        assert done.returncode == 0
-    assert archive(batch) == archive(stepped)
+        stepped_run = subprocess.run(stepped_command, env=seeded_env, check=False)  # noqa: S603  # nosec B603
+        assert stepped_run.returncode == 0
+    assert archived_files(batch_config) == archived_files(stepped_config)

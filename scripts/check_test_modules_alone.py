@@ -27,34 +27,34 @@ PASSED: Final = 0
 FAILED: Final = 1
 
 
-def _directory(text: str) -> Path:
+def _directory(cli_argument: str) -> Path:
     """Convert a command-line argument to the path of an existing folder."""
-    path = Path(text)
-    if not path.is_dir():
-        message = f"not a directory: {text}"
-        raise argparse.ArgumentTypeError(message)
-    return path
+    folder = Path(cli_argument)
+    if not folder.is_dir():
+        refusal = f"not a directory: {cli_argument}"
+        raise argparse.ArgumentTypeError(refusal)
+    return folder
 
 
-def find_test_modules(directory: Path) -> list[Path]:
-    """Return every test module under ``directory``, sorted."""
-    return sorted(directory.rglob("test_*.py"))
+def find_test_modules(tests_folder: Path) -> list[Path]:
+    """Return every test module under ``tests_folder``, sorted."""
+    return sorted(tests_folder.rglob("test_*.py"))
 
 
-def run_alone(module: Path) -> int:
+def run_alone(test_module: Path) -> int:
     """Run pytest on one module by itself and return pytest's exit status."""
-    command = [
+    pytest_command = [
         sys.executable,
         "-m",
         "pytest",
-        str(module),
+        str(test_module),
         "--no-cov",
         "-q",
         "-p",
         "no:cacheprovider",
     ]
     # The command is a fixed list plus a path found under the tests folder.
-    completed = subprocess.run(command, check=False)  # noqa: S603  # nosec B603
+    completed = subprocess.run(pytest_command, check=False)  # noqa: S603  # nosec B603
     return completed.returncode
 
 
@@ -64,16 +64,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Run each test module on its own and report any that fail."
     )
     parser.add_argument("directory", type=_directory, help="the tests folder")
-    directory: Path = parser.parse_args(argv).directory
-    modules = find_test_modules(directory)
+    tests_folder: Path = parser.parse_args(argv).directory
+    test_modules = find_test_modules(tests_folder)
     failures = 0
-    for module in modules:
-        status = run_alone(module)
-        if status != PASSED:
+    for test_module in test_modules:
+        pytest_status = run_alone(test_module)
+        if pytest_status != PASSED:
             failures += 1
-            print(f"FAILED {module} (pytest exit status {status})")
-    print(f"check_test_modules_alone: modules run: {len(modules)}, failed: {failures}")
-    if not modules:
+            print(f"FAILED {test_module} (pytest exit status {pytest_status})")
+    print(
+        f"check_test_modules_alone: modules run: {len(test_modules)},"
+        f" failed: {failures}"
+    )
+    if not test_modules:
         print("check_test_modules_alone: no test modules found, so nothing was checked")
         return FAILED
     return FAILED if failures else PASSED

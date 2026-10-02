@@ -20,6 +20,11 @@ counts at INFO; steps, cold starts, dormancy, configuration changes and
 corrected slips at INFO; rejects, screening failures, a missing self pair,
 undecided slips and switch changes at WARNING; each series' outcome at
 DEBUG and its prediction and update at TRACE.
+
+The next epoch is one after the oldest epoch every file is good through,
+every file rolled back to it, or one before the epoch a write journal
+names, the journal then deleted; with no file, the epoch containing
+start_from_mjd.
 """
 
 import math
@@ -36,7 +41,7 @@ from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import datetime_to_mjd, mjd_to_datetime
 from masterclock.das_processor import files, registry, run
 from masterclock.das_processor.clock_config import ClockConfig, read_clock_config
-from masterclock.das_processor.config import AppConfig
+from masterclock.das_processor.config import JOURNAL_FILE_TEMPLATE, AppConfig
 from masterclock.das_processor.exceptions import DataFileError
 from masterclock.das_processor.read_cd5m5m import (
     DASData,
@@ -816,6 +821,31 @@ def test_a_damaged_line_found_at_the_start_redoes_every_file_from_its_epoch(
     for key in SERIES:
         one = registry.series_file(clean.processed.processed_path, "a", key)
         other = registry.series_file(damaged.processed.processed_path, "a", key)
+        assert one.read_bytes() == other.read_bytes(), key
+
+
+def test_a_journal_found_at_the_start_rolls_every_file_back_before_its_epoch(
+    tmp_path: Path,
+) -> None:
+    """Roll every file back to before a stopped write's first epoch, then redo (6.7)."""
+    clean, clocks = loop_deployment(tmp_path / "clean")
+    das_files(tmp_path / "clean", [LATE + i * T for i in range(6)])
+    run.run(clean, clocks, None, ShutdownHandler())
+    stopped, clocks = loop_deployment(tmp_path / "stopped")
+    das_files(tmp_path / "stopped", [LATE + i * T for i in range(6)])
+    run.run(stopped, clocks, None, ShutdownHandler())
+    journal = stopped.processed.processed_path / JOURNAL_FILE_TEMPLATE.format(rf="a")
+    journal.write_text(f"{(LATE + 3 * T).isoformat()}\n", encoding="ascii")
+    assert run.next_epoch(stopped) == LATE + 3 * T
+    assert not journal.exists()
+    series = run.data_series(stopped)
+    assert len(series) == len(SERIES)
+    for path, kind, key in series:
+        assert files.good_through(path, kind, key) == LATE + 2 * T, key
+    run.run(stopped, clocks, None, ShutdownHandler())
+    for key in SERIES:
+        one = registry.series_file(clean.processed.processed_path, "a", key)
+        other = registry.series_file(stopped.processed.processed_path, "a", key)
         assert one.read_bytes() == other.read_bytes(), key
 
 

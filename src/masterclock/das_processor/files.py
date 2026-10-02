@@ -18,6 +18,12 @@ A row read back (:func:`parse_meas_row`, :func:`parse_ddiff_row`) is
 formatted again and must give the same line, so a line is accepted only in
 the one form das_processor writes. The measurement file holds no
 innovation, so a measurement row reads back without one.
+
+Rows are buffered and written a day at a time (:func:`write_buffer`), every
+check made before the first byte, under a write journal that names the
+first epoch being written. A run that starts checks every file and rolls
+them all back to the oldest epoch they all hold, or to before the epoch a
+journal names (:func:`roll_back`, :func:`read_journal`).
 """
 
 import math
@@ -1276,17 +1282,25 @@ class DayBuffer:
         Each series' newest row, as a later run would read it back.
     switches : dict of (str, str) to str
         Each pair's switch at its newest measurement, for the log.
+    start : datetime or None
+        The earliest epoch of the rows since the last write; ``None`` when
+        there are none.
     """
 
-    def __init__(self, channel: RfChannel) -> None:
+    def __init__(self, channel: RfChannel, journal: Path | None = None) -> None:
         """Start an empty buffer.
 
         Parameters
         ----------
         channel : {'a', 'b'}
             The RF channel.
+        journal : Path or None, optional
+            The write journal :func:`write_buffer` keeps while it writes; no
+            journal is kept when ``None``.
         """
         self.channel: RfChannel = channel
+        self.journal = journal
+        self.start: datetime | None = None
         self.texts: dict[Path, str] = {}
         self.last: dict[SeriesKey, Row] = {}
         self.switches: dict[PairKey, str] = {}
@@ -1331,6 +1345,18 @@ class DayBuffer:
             back = parse_ddiff_row(line).row
         self.texts[path] = self.texts.get(path, "") + line + "\n"
         self.last[key] = back
+        self._started(back.interpolated_datetime)
+
+    def _started(self, mark: datetime | None) -> None:
+        """Note an epoch of a buffered row, keeping the earliest.
+
+        Parameters
+        ----------
+        mark : datetime or None
+            The epoch; ``None`` changes nothing.
+        """
+        if mark is not None and (self.start is None or mark < self.start):
+            self.start = mark
 
     def take(self, other: DayBuffer) -> None:
         """Move another buffer's rows into this one, all of them or none.
@@ -1355,6 +1381,7 @@ class DayBuffer:
             self.texts[path] = self.texts.get(path, "") + text
         self.last.update(other.last)
         self.switches.update(other.switches)
+        self._started(other.start)
 
     def series_of(self, path: Path) -> tuple[FileKind, SeriesKey]:
         """Give the kind of file and the series a buffered path is for.
@@ -1388,11 +1415,23 @@ def write_buffer(buffer: DayBuffer) -> None:
         existing file is not a regular file this process can write or its
         length is not its header plus whole rows, a new file's directory is
         not one this process can write into or a file of that name is
-        already there, or the free space does not cover every byte to be
-        written; nothing is changed then. While writing, if the device
-        fails; the next run rolls every file back to what they all hold.
+        already there, a write journal is already there, or the free space
+        does not cover every byte to be written; nothing is changed then.
+        While writing, if the device fails.
+
+    Notes
+    -----
+    When the buffer has a journal, the first epoch of its rows is written
+    to it and flushed before any data file is opened, and the journal is
+    deleted after the last flush. A run that finds the journal knows this
+    write stopped part way, whichever files it reached or created, and
+    rolls every file back to before that epoch (see :func:`read_journal`).
     """
     data = _prepared(buffer)
+    if not data:
+        return
+    if buffer.journal is not None and buffer.start is not None:
+        _write_journal(buffer.journal, buffer.start)
     order = sorted(data, key=lambda path: _write_order(buffer, path))
     new_directories: set[Path] = set()
     for path in order:
@@ -1408,7 +1447,10 @@ def write_buffer(buffer: DayBuffer) -> None:
             new_directories.add(path.parent)
     for directory in sorted(new_directories):
         _sync_directory(directory)
+    if buffer.journal is not None:
+        _delete(buffer.journal)
     buffer.texts.clear()
+    buffer.start = None
 
 
 def _write_order(buffer: DayBuffer, path: Path) -> tuple[int, SeriesKey]:
@@ -1462,6 +1504,10 @@ def _prepared(buffer: DayBuffer) -> dict[Path, bytes]:
             data[path] = (prefix + text).encode("ascii")
         except UnicodeEncodeError as exc:
             _fail(f"the rows for {path} are not ASCII", exc)
+    if buffer.journal is not None and data:
+        if os.path.lexists(buffer.journal):
+            _fail(f"write journal {buffer.journal} is there: a write is still open")
+        _check_new(buffer.journal)
     _check_space(data)
     return data
 
@@ -1507,7 +1553,7 @@ def _check_new(path: Path) -> None:
     """
     directory = path.parent
     if not directory.is_dir() or not os.access(directory, os.W_OK | os.X_OK):
-        _fail(f"data file {path} cannot be created in {directory}")
+        _fail(f"file {path} cannot be created in {directory}")
 
 
 def _check_space(data: dict[Path, bytes]) -> None:
@@ -1629,7 +1675,7 @@ def _keep_through(
 
 
 def _delete(path: Path) -> None:
-    """Delete a data file, and flush its directory so the deletion is kept.
+    """Delete a file, and flush its directory so the deletion is kept.
 
     Parameters
     ----------
@@ -1644,7 +1690,7 @@ def _delete(path: Path) -> None:
     try:
         path.unlink()
     except OSError as exc:
-        _fail(f"cannot delete data file {path}: {exc}", exc)
+        _fail(f"cannot delete {path}: {exc}", exc)
     _sync_directory(path.parent)
 
 
@@ -1777,3 +1823,84 @@ def ensure_archives(processed_path: Path) -> None:
         made = True
     if made:
         _sync_directory(processed_path)
+
+
+# ---------------------------------------------------------- the write journal
+
+
+def _write_journal(journal: Path, start: datetime) -> None:
+    """Write the journal of a write about to start, and flush it.
+
+    Parameters
+    ----------
+    journal : Path
+        The journal, which is not there yet.
+    start : datetime
+        The first epoch of the rows to write.
+
+    Raises
+    ------
+    DataFileError
+        If the journal cannot be written or the device fails.
+    """
+    try:
+        with journal.open("xb") as file:
+            file.write(f"{start.isoformat()}\n".encode("ascii"))
+            file.flush()
+            os.fsync(file.fileno())
+    except OSError as exc:
+        _fail(f"cannot write journal {journal}: {exc}", exc)
+    _sync_directory(journal.parent)
+
+
+def read_journal(journal: Path) -> datetime | None:
+    """Give the first epoch of a write that stopped part way (design 6.7).
+
+    Parameters
+    ----------
+    journal : Path
+        The channel's write journal.
+
+    Returns
+    -------
+    datetime or None
+        The first epoch the stopped write was writing; ``None`` when there
+        is no journal, or it is not whole, which means it was not flushed
+        and so no data file was opened.
+
+    Raises
+    ------
+    DataFileError
+        If the journal is there but cannot be read.
+    """
+    if not os.path.lexists(journal):
+        return None
+    try:
+        text = journal.read_bytes()
+    except OSError as exc:
+        _fail(f"cannot read journal {journal}: {exc}", exc)
+    try:
+        start = datetime.fromisoformat(text.decode("ascii").rstrip("\n"))
+    except (
+        UnicodeDecodeError,
+        ValueError,
+    ):
+        return None
+    return start if start.tzinfo is not None and text.endswith(b"\n") else None
+
+
+def clear_journal(journal: Path) -> None:
+    """Delete the write journal once its stopped write is undone.
+
+    Parameters
+    ----------
+    journal : Path
+        The channel's write journal; nothing is done when it is not there.
+
+    Raises
+    ------
+    DataFileError
+        If it cannot be deleted or the device fails.
+    """
+    if os.path.lexists(journal):
+        _delete(journal)

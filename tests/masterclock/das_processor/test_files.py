@@ -18,8 +18,10 @@ last row that parses, is sound and good through that row, its other rows
 not read; otherwise it is good
 through the row before its first line that does not parse, holds nothing
 good when it has no whole row, and is refused when its first row does not
-parse, unless a write stopped part way, when it holds nothing good; and
-the last row of a sound file is read back as its row (U26).
+parse, unless a write stopped part way, when it holds nothing good; a
+damaged file is explained once at ERROR, where and why; and the last row
+of a sound file is read back as its row (U26). A roll-back says what it did
+to each file and logs nothing; a redo is logged once at INFO.
 
 The write: every check is made before a file is opened, and a failed one
 changes nothing; files are written one at a time, measurement files first;
@@ -1094,14 +1096,11 @@ def epochs_in(path: Path) -> list[datetime]:
 def test_a_file_is_rolled_back_to_just_after_the_common_epoch(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Truncate just after the row for L, with a WARNING naming file and epoch (6.7)."""
+    """Truncate just after the row for L, and say it was cut, logging nothing (6.7)."""
     path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 5)
-    files.roll_back(path, "meas", E + 2 * STEP)
+    assert files.roll_back(path, "meas", E + 2 * STEP) == "cut"
     assert epochs_in(path) == [E, E + STEP, E + 2 * STEP]
-    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-    assert len(warnings) == 1
-    assert str(path) in warnings[0].getMessage()
-    assert str(E + 2 * STEP) in warnings[0].getMessage()
+    assert not caplog.records
 
 
 def test_a_torn_line_after_the_common_epoch_goes_too(tmp_path: Path) -> None:
@@ -1170,7 +1169,7 @@ def archive(tmp_path: Path) -> list[tuple[Path, files.FileKind]]:
 def test_a_redo_deletes_every_row_at_or_after_its_epoch(tmp_path: Path) -> None:
     """Truncate every file before its first row at or after the mark (6.5)."""
     series = archive(tmp_path)
-    files.redo_from(series, E + 2 * STEP)
+    files.redo_from(series, E + 2 * STEP, "a")
     assert [files.good_through(path, kind) for path, kind in series] == [
         E + STEP,
         E + STEP,
@@ -1180,14 +1179,14 @@ def test_a_redo_deletes_every_row_at_or_after_its_epoch(tmp_path: Path) -> None:
 def test_a_redo_deletes_a_file_with_no_earlier_row(tmp_path: Path) -> None:
     """Delete every file when the redo starts at or before its first row."""
     series = archive(tmp_path)
-    files.redo_from(series, E)
+    files.redo_from(series, E, "a")
     assert not any(path.exists() for path, _ in series)
 
 
 def test_a_redo_past_a_file_s_end_leaves_it(tmp_path: Path) -> None:
     """Keep a file whose rows all come before the redo."""
     series = archive(tmp_path)
-    files.redo_from(series, E + 4 * STEP)
+    files.redo_from(series, E + 4 * STEP, "a")
     assert [files.good_through(path, kind) for path, kind in series] == [
         E + 3 * STEP,
         E + 2 * STEP,
@@ -1214,9 +1213,9 @@ def test_an_interrupted_redo_finishes_when_run_again(
 
     monkeypatch.setattr(Path, "open", failing_second)
     with pytest.raises(DataFileError, match="Input/output error"):
-        files.redo_from(series, E + STEP)
+        files.redo_from(series, E + STEP, "a")
     monkeypatch.undo()
-    files.redo_from(series, E + STEP)
+    files.redo_from(series, E + STEP, "a")
     assert [files.good_through(path, kind) for path, kind in series] == [E, E]
 
 
@@ -1228,7 +1227,7 @@ def test_a_redo_and_a_roll_back_at_one_start_keep_the_archive_in_step(
     triple_path = series[1][0]
     with triple_path.open("ab") as file:
         file.write(b"2025-09-23 06:3")
-    files.redo_from(series, E + 4 * STEP)
+    files.redo_from(series, E + 4 * STEP, "a")
     good = [files.good_through(path, kind) for path, kind in series]
     assert good == [E + 3 * STEP, E + 2 * STEP]
     common = min(mark for mark in good if mark is not None)
@@ -1458,29 +1457,34 @@ def test_an_error_is_logged_with_its_message(
 def test_a_roll_back_says_what_it_did_to_each_file(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Say, at WARNING, which file was cut back to which epoch, or deleted."""
-    cut = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 5)
-    files.roll_back(cut, "meas", E + 2 * STEP)
-    files.roll_back(cut, "meas", None)
-    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
-        ("WARNING", f"data file {cut} rolled back to {E + 2 * STEP}"),
-        ("WARNING", f"data file {cut} deleted: no row at or before None"),
-    ]
+    """Give kept, cut or deleted for each file, the run logging it all once."""
+    path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 5)
+    assert files.roll_back(path, "meas", E + 4 * STEP) == "kept"
+    assert files.roll_back(path, "meas", E + 2 * STEP) == "cut"
+    assert files.roll_back(path, "meas", E - STEP) == "deleted"
+    assert not caplog.records
 
 
-def test_a_redo_says_what_it_did_to_each_file_it_changed(
+def test_a_redo_is_logged_once_with_what_it_did(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Say, at INFO, which files a redo cut or deleted, and nothing of the rest."""
-    (pair, _), (triple, _) = series = archive(tmp_path)
+    """Log a redo once, at INFO, with how many files it cut, deleted and left."""
+    series = archive(tmp_path)
     caplog.set_level(logging.INFO)
-    files.redo_from(series, E + 3 * STEP)
-    files.redo_from(series[1:], E + 3 * STEP)
-    files.redo_from(series[1:], E)
+    files.redo_from(series, E + 3 * STEP, "a")
+    files.redo_from(series, E, "a")
     mark = E + 3 * STEP
     assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
-        ("INFO", f"data file {pair} cut for a redo from {mark}"),
-        ("INFO", f"data file {triple} deleted for a redo from {E}"),
+        (
+            "INFO",
+            f"redo of channel a from {mark}: 1 files cut, 0 deleted,"
+            " 1 with no row at or after it",
+        ),
+        (
+            "INFO",
+            f"redo of channel a from {E}: 0 files cut, 2 deleted,"
+            " 0 with no row at or after it",
+        ),
     ]
 
 
@@ -1489,7 +1493,7 @@ def test_a_redo_deletes_a_file_holding_nothing_good(tmp_path: Path) -> None:
     path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 0)
     with path.open("ab") as file:
         file.write(b"2025-09-23 06:0")
-    files.redo_from([(path, "meas")], E + 3 * STEP)
+    files.redo_from([(path, "meas")], E + 3 * STEP, "a")
     assert not path.exists()
 
 
@@ -1699,17 +1703,6 @@ def test_a_field_never_empty_is_refused_in_those_words() -> None:
     )
 
 
-def test_a_deletion_by_roll_back_names_the_common_epoch(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Say which epoch a deleted file had no row at or before."""
-    path = written(tmp_path / "meas" / "das_a.mc2.nav23.dat", 3)
-    files.roll_back(path, "meas", E - STEP)
-    assert [r.getMessage() for r in caplog.records] == [
-        f"data file {path} deleted: no row at or before {E - STEP}"
-    ]
-
-
 def device_error(*_args: object, **_kwargs: object) -> None:
     """Fail as a device would."""
     raise OSError(5, "Input/output error")
@@ -1751,3 +1744,79 @@ def test_after_a_stopped_write_a_damaged_first_row_holds_nothing_good(
     with pytest.raises(DataFileError, match="damaged first row"):
         files.good_through(path, "meas")
     assert files.good_through(path, "meas", stopped_write=True) is None
+
+
+# ------------------------------------------------ one explanation per damaged file
+
+
+def errors_of(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Give the ERROR messages logged."""
+    return [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+
+
+def test_a_damaged_line_is_explained_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log one ERROR naming the file, the last good row and what is wrong.
+
+    The file's end is torn too: a sound file is not scanned (design 5.7).
+    """
+    lines = series_rows(4)
+    lines[2] = predicted_as_accepted(lines[2])
+    path = meas_file(tmp_path, "".join(lines) + "2025")
+    assert files.check_file(path, "meas") == files.FileCheck(E + STEP, damaged=True)
+    (error,) = errors_of(caplog)
+    assert error.startswith(f"data file {path} is damaged after its row of {E + STEP}:")
+    assert "a row has a measurement exactly when it is not P" in error
+
+
+@pytest.mark.parametrize(
+    ("tail", "where", "reason"),
+    [
+        ("2025", "after its row of {last}", "its last line is cut short"),
+        (None, "from its first row", "it holds no whole row"),
+    ],
+)
+def test_a_torn_file_is_explained_once(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    tail: str | None,
+    where: str,
+    reason: str,
+) -> None:
+    """Log a file cut short inside a row, or holding no whole row, once."""
+    text = "".join(series_rows(2)) + tail if tail is not None else "2025"
+    path = meas_file(tmp_path, text)
+    check = files.check_file(path, "meas")
+    assert check.damaged
+    where = where.format(last=E + STEP)
+    assert errors_of(caplog) == [f"data file {path} is damaged {where}: {reason}"]
+
+
+def test_a_damaged_first_row_is_explained_in_its_refusal(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Refuse it with the reason, logged once; after a stopped write, explain it."""
+    path = meas_file(tmp_path, "\0" * (files.MEAS_WIDTH + 1) * 2)
+    with pytest.raises(DataFileError) as raised:
+        files.check_file(path, "meas")
+    assert errors_of(caplog) == [str(raised.value)]
+    assert str(raised.value) == (
+        f"{path} has a damaged first row, so its rows cannot be placed in time:"
+        " the line is cut short, with no newline"
+    )
+    caplog.clear()
+    assert files.check_file(path, "meas", stopped_write=True).through is None
+    (error,) = errors_of(caplog)
+    assert error.startswith(f"data file {path} is damaged from its first row: ")
+
+
+def test_a_sound_file_is_not_damaged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Say a sound file is not damaged, and log nothing."""
+    path = meas_file(tmp_path, "".join(series_rows(3)))
+    assert files.check_file(path, "meas") == files.FileCheck(
+        E + 2 * STEP, damaged=False
+    )
+    assert not caplog.records

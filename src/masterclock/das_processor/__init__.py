@@ -8,9 +8,10 @@ appends one row per epoch to each series' file.
 
 :func:`main` is the entry point. Its exit status is 0 for a run that
 finished, 2 for a usage error such as a required setting given by neither
-the INI file nor the command line, and 1 for any other failure, which is
-logged where it happened (or, before logging starts, printed on standard
-error).
+the INI file nor the command line, and 1 for any other failure. Logging
+starts from the logging settings before anything else is checked, so a
+failure is logged; only one that keeps logging from starting, or any when
+the log level is None, is printed on standard error instead.
 """
 
 import logging
@@ -20,7 +21,7 @@ from typing import Final
 
 from masterclock.app.exceptions import MasterClockError, MissingSettingsError
 from masterclock.app.lock import RunLock
-from masterclock.app.log import configure_logging
+from masterclock.app.log import MasterClockLogger, configure_logging, get_logger
 from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.das_processor.cli import CliOptions, parse_args, usage_error
@@ -29,6 +30,7 @@ from masterclock.das_processor.config import (
     LOCK_FILE_TEMPLATE,
     AppConfig,
     build_config,
+    build_logging_config,
     check_paths,
 )
 from masterclock.das_processor.epochs import floor_to_ten_minutes
@@ -42,12 +44,15 @@ SUCCESS: Final[int] = 0
 FAILURE: Final[int] = 1
 """The exit status of a run that failed; the failure is already reported."""
 
+_log: Final[MasterClockLogger] = get_logger(__name__)
+"""Logger for this module."""
+
 _SILENT: Final[int] = logging.CRITICAL + 1
 """A logging level above every record's, for a run with logging set to None."""
 
 
 def _settings(argv: Sequence[str] | None) -> tuple[AppConfig, CliOptions] | None:
-    """Read and check the run's settings, before logging starts.
+    """Read the run's settings: the logging ones first, then the rest.
 
     Parameters
     ----------
@@ -60,23 +65,70 @@ def _settings(argv: Sequence[str] | None) -> tuple[AppConfig, CliOptions] | None
     tuple of (AppConfig, CliOptions) or None
         The settings, and the command line for what only it gives
         (``--steps`` and ``--redo-from-mjd``); ``None`` when a setting
-        cannot be used, after saying why on standard error.
+        cannot be used, after saying why.
 
     Raises
     ------
     SystemExit
         With status 2 and the full help for a usage error, above all a
         required setting given by neither source.
+
+    Notes
+    -----
+    Logging starts from the logging settings alone, so an error in any
+    other setting or path is logged at ERROR before the run stops. Only an
+    error that keeps logging from starting is printed on standard error
+    alone, and so is any error when the log level is None, since nothing is
+    then logged.
     """
     options = parse_args(argv)
+    silent = _start_logging(options)
+    if silent is None:
+        return None
     try:
         config = build_config(options)
         check_paths(config)
-        level = config.logging.log_level
+    except MissingSettingsError as exc:
+        _log.error("%s", exc)
+        usage_error(str(exc))
+    except (
+        MasterClockError,
+        OSError,
+    ) as exc:
+        _log.error("%s", exc)
+        if silent:
+            print(f"das_processor: error: {exc}", file=sys.stderr)
+        return None
+    return config, options
+
+
+def _start_logging(options: CliOptions) -> bool | None:
+    """Start logging from the logging settings alone.
+
+    Parameters
+    ----------
+    options : CliOptions
+        The command line.
+
+    Returns
+    -------
+    bool or None
+        Whether logging is silenced (log level None); ``None`` when it
+        cannot start, after saying why on standard error.
+
+    Raises
+    ------
+    SystemExit
+        With status 2 and the full help when a required logging setting is
+        given by neither source.
+    """
+    try:
+        settings = build_logging_config(options)
+        level = settings.log_level
         configure_logging(
             level=_SILENT if level is None else logging.getLevelNamesMapping()[level],
-            log_file=config.logging.log_file,
-            backup_count=config.logging.backup_count,
+            log_file=settings.log_file,
+            backup_count=settings.backup_count,
         )
     except MissingSettingsError as exc:
         usage_error(str(exc))
@@ -86,7 +138,7 @@ def _settings(argv: Sequence[str] | None) -> tuple[AppConfig, CliOptions] | None
     ) as exc:
         print(f"das_processor: error: {exc}", file=sys.stderr)
         return None
-    return config, options
+    return level is None
 
 
 def main(argv: Sequence[str] | None = None) -> int:

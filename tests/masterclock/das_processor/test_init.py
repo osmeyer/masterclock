@@ -2,8 +2,11 @@
 
 The rules covered: das_processor's main runs the channel from its settings
 and exits 0; a required setting given by neither source is a usage error,
-the full help and exit 2; a setting that cannot be used, found before
-logging starts, is reported on standard error with exit 1; any later
+the full help and exit 2, logged too when logging can start; logging
+starts from its own settings first, so a setting or path that cannot be
+used is logged at ERROR with exit 1, printed on standard error instead
+only when it keeps logging from starting or logging is set to None; any
+later
 MasterClockError exits 1, logged once where it was raised; a second run of
 the same channel is refused by the run lock; a redo deletes the rows from
 its epoch before the run, which computes them again; and logging set to
@@ -128,14 +131,53 @@ def test_a_missing_setting_is_a_usage_error(
     assert "--rf" in err
 
 
-def test_a_setting_that_cannot_be_used_exits_one_on_stderr(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_a_setting_that_cannot_be_used_is_logged_and_exits_one(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Report a bad path on standard error, before logging starts, with exit 1."""
+    """Log a bad path at ERROR, logging already started, and exit 1."""
     argv = deployment(tmp_path)
     argv[argv.index("--cd5m5m-path") + 1] = str(tmp_path / "missing")
     assert das_processor.main(argv) == 1
-    assert "das_processor: error:" in capsys.readouterr().err
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert errors[0].startswith("[DAS] cd5m5m_path: ")
+
+
+def test_with_logging_silenced_a_bad_setting_is_still_printed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Print the error on standard error when the log level None logs nothing."""
+    argv = deployment(tmp_path)
+    argv[argv.index("--cd5m5m-path") + 1] = str(tmp_path / "missing")
+    argv[argv.index("--log-level") + 1] = "None"
+    assert das_processor.main(argv) == 1
+    assert capsys.readouterr().err.startswith("das_processor: error: [DAS] cd5m5m_path")
+
+
+def test_a_logging_setting_that_cannot_be_used_is_printed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Print a log file that cannot be opened on standard error: nothing can log."""
+    argv = deployment(tmp_path)
+    (tmp_path / "a file").write_text("")
+    argv[argv.index("--log-file") + 1] = str(tmp_path / "a file" / "run.log")
+    assert das_processor.main(argv) == 1
+    assert capsys.readouterr().err.startswith("das_processor: error: ")
+
+
+def test_a_usage_error_is_logged_when_logging_can_start(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a setting neither source gives at ERROR, as well as print the help."""
+    argv = deployment(tmp_path)
+    index = argv.index("--rf")
+    with pytest.raises(SystemExit):
+        das_processor.main(argv[:index] + argv[index + 2 :])
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert errors == [
+        "these settings must be provided by the config file or the command line:"
+        " [DAS] rf (--rf)"
+    ]
 
 
 def test_an_error_during_the_run_exits_one_logged_once(
@@ -240,3 +282,18 @@ def test_a_redo_recomputes_its_rows_with_the_settings_now(tmp_path: Path) -> Non
     size = files.MEAS_WIDTH + 1
     kept = (files.MEAS_HEADER_LINES + 2) * size
     assert after[:kept] == before[:kept]
+
+
+def test_a_logging_setting_left_out_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Print the full help and exit 2 for a logging setting neither source gives."""
+    argv = deployment(tmp_path)
+    index = argv.index("--log-level")
+    with pytest.raises(SystemExit) as stopped:
+        das_processor.main(argv[:index] + argv[index + 2 :])
+    assert stopped.value.code == 2
+    assert capsys.readouterr().err.endswith(
+        "das_processor: error: these settings must be provided by the config file"
+        " or the command line: [LOGGING] log_level (--log-level)\n"
+    )

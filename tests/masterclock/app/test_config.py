@@ -11,6 +11,8 @@ unknown fields, relative paths, and number text the command line refuses.
 
 A refused relative path is named, and a value over several lines is judged
 as written, so the entry holding the lines is named.
+
+Some groups of settings can be merged alone, the whole file still checked.
 """
 
 import argparse
@@ -394,3 +396,20 @@ def test_the_entry_holding_the_lines_is_named_not_one_that_names_it(
     assert str(raised.value) == (
         f"config file {path} gives [input] label on more than one line"
     )
+
+
+def test_some_groups_can_be_merged_alone() -> None:
+    """Merge only the groups asked for, a required setting of another not missed."""
+    merged = config.merge(SETTINGS, options(log_level="INFO"), None, groups={"logging"})
+    assert merged == {
+        "logging": {"log_file": None, "log_level": "INFO", "backup_count": None}
+    }
+    with pytest.raises(MissingSettingsError, match="channel"):
+        config.merge(SETTINGS, options(log_level="INFO"), None)
+
+
+def test_merging_some_groups_still_checks_the_whole_file(tmp_path: Path) -> None:
+    """Refuse a file naming what the program does not read, whatever is merged."""
+    path = ini(tmp_path, "[input]\ncolour = red\n")
+    with pytest.raises(ConfigError, match="colour"):
+        config.merge(SETTINGS, options(log_level="INFO"), path, groups={"logging"})

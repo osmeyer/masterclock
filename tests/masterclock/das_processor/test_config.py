@@ -15,6 +15,7 @@ directory that is something else or cannot be written into.
 
 The processed-directory refusals are word for word, and a file naming a
 redo or a count of epochs, which only the command line gives, is refused.
+The logging settings are built alone, before the rest.
 """
 
 import os
@@ -550,3 +551,21 @@ def test_a_redo_or_a_count_of_epochs_in_the_file_is_refused(
     """Refuse a file naming either: they are given for one run, on its command line."""
     with pytest.raises(ConfigError, match=entry):
         built(tmp_path, **{f"PROCESSED__{entry}": "60010"})
+
+
+def test_the_logging_settings_are_built_alone(tmp_path: Path) -> None:
+    """Build the logging settings with other required settings missing."""
+    path = tmp_path / "das.ini"
+    path.write_text("[LOGGING]\nlog_file = None\nlog_level = INFO\n", encoding="utf-8")
+    options = cli.parse_args(["--config-file", str(path)])
+    built_ = config.build_logging_config(options)
+    assert (built_.log_file, built_.log_level, built_.backup_count) == (
+        None,
+        "INFO",
+        None,
+    )
+    path.write_text(
+        "[LOGGING]\nlog_file = run.log\nlog_level = INFO\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match=r"logging: .*path must be absolute"):
+        config.build_logging_config(options)

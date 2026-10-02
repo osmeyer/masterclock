@@ -3,14 +3,16 @@
 The rules covered: importing the module registers the TRACE level and the
 project's logger class; every record is written on one line, stamped with
 its UTC time and MJD, except for a traceback or a stack; trace and todo log
-at their levels and name their real caller; get_logger refuses a logger of
-the wrong class; configure_logging attaches a stream handler, and a file
-handler that rotates at midnight UTC, and replaces what its previous call
-attached.
+at their levels, with no stack unless one is asked for, and name their real
+caller, a check that does not run under mutmut, whose wrapper around each
+function adds a frame; get_logger refuses a logger of the wrong class;
+configure_logging attaches a stream handler, and a file handler that rotates
+at midnight UTC, and replaces what its previous call attached.
 """
 
 import io
 import logging
+import os
 import re
 import sys
 from collections.abc import Iterator
@@ -29,6 +31,13 @@ from masterclock.app.timeutil import unix_to_mjd
 # 2026-07-12 03:14:15.926 UTC, an invented instant.
 CREATED: Final = 1_783_826_055.926
 STAMP: Final = r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3} UTC, MJD \d{5}\.\d{6}"
+
+not_under_mutmut: Final = pytest.mark.skipif(
+    "MUTANT_UNDER_TEST" in os.environ,
+    reason="mutmut puts a function around each function it changes, which"
+    " adds a frame, so the caller a record names is not the test",
+)
+"""Skip a test of the caller a record names while mutmut runs."""
 
 
 @pytest.fixture(autouse=True)
@@ -179,29 +188,37 @@ def logger_with_kept(level: int) -> tuple[log.MasterClockLogger, Kept]:
     return logger, kept
 
 
-def test_trace_logs_at_trace_and_names_its_caller() -> None:
-    """Log at TRACE, interpolating arguments, as from the calling function."""
+def test_trace_logs_at_trace() -> None:
+    """Log at TRACE, interpolating arguments, with no stack unless asked."""
     logger, kept = logger_with_kept(log.TRACE)
     logger.trace("value %s", 7)
     (made,) = kept.records
     assert made.levelno == log.TRACE
     assert made.levelname == "TRACE"
     assert made.getMessage() == "value 7"
-    assert made.funcName == "test_trace_logs_at_trace_and_names_its_caller"
-    assert made.pathname == __file__
+    assert made.stack_info is None
 
 
-def test_todo_logs_at_debug_with_its_prefix_and_names_its_caller() -> None:
-    """Log at DEBUG with 'TODO: ' in front, as from the calling function."""
+def test_todo_logs_at_debug_with_its_prefix() -> None:
+    """Log at DEBUG with 'TODO: ' in front, and no stack unless asked."""
     logger, kept = logger_with_kept(logging.DEBUG)
     logger.todo("finish %s", "this")
     (made,) = kept.records
     assert made.levelno == logging.DEBUG
     assert made.getMessage() == "TODO: finish this"
-    assert (
-        made.funcName == "test_todo_logs_at_debug_with_its_prefix_and_names_its_caller"
-    )
-    assert made.pathname == __file__
+    assert made.stack_info is None
+
+
+@not_under_mutmut
+def test_trace_and_todo_name_their_caller() -> None:
+    """Name the function that called trace or todo, and its file."""
+    logger, kept = logger_with_kept(log.TRACE)
+    logger.trace("traced")
+    logger.todo("to do")
+    assert [(made.funcName, made.pathname) for made in kept.records] == [
+        ("test_trace_and_todo_name_their_caller", __file__),
+        ("test_trace_and_todo_name_their_caller", __file__),
+    ]
 
 
 @pytest.mark.parametrize("method", ["trace", "todo"])
@@ -229,6 +246,7 @@ def report(logger: log.MasterClockLogger) -> None:
     logger.todo("reported", stacklevel=2)
 
 
+@not_under_mutmut
 def test_trace_and_todo_take_a_stacklevel() -> None:
     """Name the caller the given number of frames up, as the standard methods do."""
     logger, kept = logger_with_kept(log.TRACE)

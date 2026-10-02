@@ -17,9 +17,10 @@ Each epoch gives every series one row. The row starts as a
 new segment (:func:`start_segment`), and is finished by what the epoch did:
 an accepted measurement updates the state (:func:`accept`); a rejected,
 excluded or missing one leaves the prediction standing (:func:`hold`); a
-series with no valid state is dormant (:func:`dormant`) until it starts
-again from a measurement alone (:func:`cold_start`). Only the finished row
-is checked, by :func:`finish`.
+series with no valid state is dormant (:func:`dormant`): it buffers its
+measurements (:func:`acquire`, decycled against :func:`anchor_of`) until
+three agree, and starts again from the third alone (:func:`cold_start`).
+Only the finished row is checked, by :func:`finish`.
 
 A measurement is accepted when it passes the gate (:func:`within_gate`,
 :func:`rms_ok`). One that fails is a counted reject (:func:`count_reject`),
@@ -32,6 +33,7 @@ import math
 from dataclasses import dataclass, fields
 from datetime import datetime
 from fractions import Fraction
+from itertools import pairwise
 from typing import TYPE_CHECKING, Final, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -848,3 +850,108 @@ def accept_step(
             draft, prediction, classified.a, classified.s, z, floor, params
         )
     return None
+
+
+# ---------------------------------------------------------------- acquisition
+
+_ACQUIRE_LIMIT: Final[float] = K_OUT * math.sqrt(6)
+"""The second-difference limit of acquisition, in initial innovation scales.
+
+The second difference of three measurements with independent noise sigma0
+has standard deviation sqrt(6) sigma0; the limit is :data:`K_OUT` of those.
+"""
+
+
+def _consecutive(rejects: tuple[Reject, ...]) -> bool:
+    """Tell whether buffered measurements come from consecutive epochs.
+
+    Parameters
+    ----------
+    rejects : tuple of (datetime, float)
+        The buffer, oldest first.
+
+    Returns
+    -------
+    bool
+        Whether each entry's epoch is one epoch after the one before.
+    """
+    return all(
+        seconds(later, earlier) == _T for (earlier, _), (later, _) in pairwise(rejects)
+    )
+
+
+def acquire(draft: RowDraft, z: int, params: SeriesParams) -> Row:
+    """Buffer a dormant series' measurement; cold-start when it is consistent.
+
+    Parameters
+    ----------
+    draft : RowDraft
+        The row as built so far, of a series with no prediction, its buffer
+        holding the measurements it has gathered, as (epoch, z).
+    z : int
+        The measurement at the epoch, ps, decycled against the last buffered
+        one (see :func:`anchor_of`).
+    params : SeriesParams
+        The settings in force, whose ``sigma0`` sets the test.
+
+    Returns
+    -------
+    Row
+        A cold start from ``z`` (see :func:`cold_start`) when the buffer,
+        with ``z`` added and the newest
+        :data:`~masterclock.domain.series.MAX_REJECTS` kept, holds three
+        measurements from consecutive epochs whose second difference
+        z3 - 2 z2 + z1 is at most 5 sqrt(6) sigma0 either way (design 13.3).
+        Otherwise a dormant R row keeping that buffer, with no counted
+        rejects.
+
+    Raises
+    ------
+    FilterError
+        If the finished row breaks a rule of :class:`Row`.
+    """
+    entry = (draft.interpolated_datetime, float(z))
+    rejects = (*draft.rejects, entry)[-MAX_REJECTS:]
+    buffered = dataclasses.replace(draft, rejects=rejects)
+    if len(rejects) == MAX_REJECTS and _consecutive(rejects):
+        z1, z2, z3 = (exact(value) for _, value in rejects)
+        if abs(z3 - 2 * z2 + z1) <= exact(_ACQUIRE_LIMIT * params.sigma0):
+            return cold_start(buffered, z, params)
+    return dormant(
+        dataclasses.replace(buffered, consecutive_rejects=0), "R", keep_buffer=True
+    )
+
+
+def anchor_of(last: Row | None) -> int | None:
+    """Give what a series with no prediction is decycled against (design 7.5).
+
+    Parameters
+    ----------
+    last : Row or None
+        The series' last row, or ``None`` for a new series.
+
+    Returns
+    -------
+    int or None
+        The newest measurement in a dormant row's buffer, ps; ``None`` for
+        no row, a row that is not dormant, or an empty buffer.
+
+    Examples
+    --------
+    >>> from datetime import UTC, datetime
+    >>> from masterclock.domain.series import Row
+    >>> row = Row(
+    ...     interpolated_datetime=datetime(2025, 9, 23, 6, 0, tzinfo=UTC),
+    ...     innovation=None, x_fs=None, y=None, d=None, innovation_scale=None,
+    ...     segment=0, step_offset=0, epochs_in_segment=0,
+    ...     epochs_since_accept=1, consecutive_rejects=0,
+    ...     rejects=((datetime(2025, 9, 23, 6, 0, tzinfo=UTC), 1234577.0),),
+    ...     filter_states=1, time_constant=None, scale_time_constant=50.0,
+    ...     flags="RD",
+    ... )
+    >>> anchor_of(row)
+    1234577
+    """
+    if last is None or "D" not in last.flags or not last.rejects:
+        return None
+    return round_even(exact(last.rejects[-1][1]))

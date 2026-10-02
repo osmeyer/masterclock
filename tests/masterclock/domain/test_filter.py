@@ -29,6 +29,12 @@ phase step, accepted in the same segment with the step added to the step
 offset; three that lie on a line within three scales are a frequency step,
 accepted in a new warm segment with the prediction moved onto the line; a
 1-state series takes only phase steps.
+
+Acquisition: a series with no valid state buffers its measurements and
+cold-starts from the third of three from consecutive epochs whose second
+difference is within 5 sqrt(6) sigma0; a missing epoch empties the buffer;
+counted rejects reaching N_break make a series dormant; and the last
+buffered measurement is what a dormant pair is decycled against.
 """
 
 import dataclasses
@@ -41,7 +47,15 @@ import pytest
 
 from masterclock.domain import filter as estimator
 from masterclock.domain.exceptions import FilterError
-from masterclock.domain.phase import EPOCH_SECONDS, exact, round_even, to_fs
+from masterclock.domain.phase import (
+    EPOCH_SECONDS,
+    PHASE_MAX,
+    PHASE_PERIOD,
+    decycle,
+    exact,
+    round_even,
+    to_fs,
+)
 from masterclock.domain.series import Row, SeriesParams, State
 
 MARK: Final = datetime(2025, 9, 23, 5, 50, tzinfo=UTC)
@@ -922,8 +936,9 @@ def test_a_counted_reject_enters_the_buffer() -> None:
 def run_epoch(last: Row, z: int, settings: SeriesParams, rms: int = 3) -> Row:
     """Process one epoch's measurement as the filter step does, gate to row."""
     prediction = estimator.predict(last, NO_INPUT)
-    assert prediction is not None
     draft = estimator.carry(last.interpolated_datetime + EPOCH, last, settings)
+    if prediction is None:
+        return estimator.acquire(draft, z, settings)
     innovation = z - prediction.x
     draft = dataclasses.replace(draft, innovation=float(innovation))
     assert draft.innovation_scale is not None
@@ -935,6 +950,8 @@ def run_epoch(last: Row, z: int, settings: SeriesParams, rms: int = 3) -> Row:
     stepped = estimator.accept_step(draft, prediction, z, rms, settings)
     if stepped is not None:
         return stepped
+    if draft.consecutive_rejects >= settings.n_break:
+        return estimator.acquire(dataclasses.replace(draft, rejects=()), z, settings)
     return estimator.hold(draft, prediction, "R", settings)
 
 
@@ -1073,3 +1090,148 @@ def test_a_step_needs_a_series_with_an_innovation_scale() -> None:
     prediction = State(x=Fraction(0), y=0.0)
     with pytest.raises(FilterError, match="no innovation scale"):
         estimator.accept_step(draft, prediction, 150, 3, params())
+
+
+# ---------------------------------------------------------------- acquisition
+
+
+def dormant_row(*values: float, **changes: object) -> Row:
+    """Build a dormant last row whose buffer holds ``values``, the newest at MARK."""
+    count = len(values)
+    entries = tuple(
+        (MARK - EPOCH * (count - 1 - i), value) for i, value in enumerate(values)
+    )
+    fields: dict[str, object] = {
+        "flags": "RD",
+        "rejects": entries,
+        "epochs_since_accept": 7,
+        **DORMANT,
+        **changes,
+    }
+    return last_row(**fields)
+
+
+def test_a_measurement_of_a_dormant_series_is_buffered() -> None:
+    """Add (E, z) to the buffer and write a dormant R row, rejects not counted."""
+    last = dormant_row(1_000.0, consecutive_rejects=5)
+    row = estimator.acquire(moved_on(last), 2_000, params())
+    assert row.flags == "RD"
+    assert row.rejects == ((MARK, 1_000.0), (NEXT, 2_000.0))
+    assert row.consecutive_rejects == 0
+    assert (row.x_fs, row.innovation_scale) == (None, None)
+
+
+@pytest.mark.parametrize("model", [3, 2, 1])
+def test_three_consistent_measurements_cold_start_the_series(
+    model: Literal[1, 2, 3],
+) -> None:
+    """Cold-start from the third when the second difference passes (13.3)."""
+    M = {3: 100.0, 2: 30.0, 1: None}[model]
+    settings = params(model=model, M=M, sigma0=5.0)
+    last = dormant_row(1_000.0, 51_000.0, filter_states=model, time_constant=M)
+    edge = round_even(Fraction(101_000) + Fraction(5) * Fraction(math.sqrt(6) * 5))
+    row = estimator.acquire(moved_on(last), edge, settings)
+    assert row.flags == ("AN" if model == 1 else "ANU")
+    assert (row.x_fs, row.segment, row.innovation_scale) == (edge * 1000, 5, 5.0)
+    assert (row.rejects, row.consecutive_rejects, row.epochs_since_accept) == ((), 0, 0)
+
+
+def test_a_second_difference_past_the_limit_stays_dormant() -> None:
+    """Keep buffering when |z3 - 2 z2 + z1| is over 5 sqrt(6) sigma0."""
+    limit = 5 * math.sqrt(6) * 5.0
+    last = dormant_row(1_000.0, 51_000.0)
+    within = estimator.acquire(moved_on(last), 101_000 + math.floor(limit), params())
+    outside = estimator.acquire(moved_on(last), 101_000 + math.ceil(limit), params())
+    assert (within.flags, outside.flags) == ("ANU", "RD")
+    assert [value for _, value in outside.rejects] == [
+        1_000.0,
+        51_000.0,
+        float(101_000 + math.ceil(limit)),
+    ]
+
+
+def test_three_measurements_from_epochs_apart_do_not_cold_start() -> None:
+    """Need three measurements from consecutive epochs, not just three."""
+    entries = ((MARK - 3 * EPOCH, 1_000.0), (MARK, 1_000.0))
+    last = last_row(flags="RD", rejects=entries, **DORMANT)
+    row = estimator.acquire(moved_on(last), 1_000, params())
+    assert row.flags == "RD"
+    assert len(row.rejects) == 3
+
+
+def test_the_buffer_keeps_the_newest_three_measurements() -> None:
+    """Drop the oldest buffered measurement when a fourth comes."""
+    last = dormant_row(1_000.0, -9_000.0, 40_000.0)
+    row = estimator.acquire(moved_on(last), 2_000, params())
+    assert row.flags == "RD"
+    assert [value for _, value in row.rejects] == [-9_000.0, 40_000.0, 2_000.0]
+
+
+def test_a_missing_epoch_empties_the_acquisition_buffer() -> None:
+    """Write D P with an empty buffer for a dormant series with no measurement."""
+    row = estimator.hold(moved_on(dormant_row(1_000.0, 2_000.0)), None, "P", params())
+    assert (row.flags, row.rejects) == ("PD", ())
+
+
+def test_inconsistent_outliers_make_a_series_dormant_at_n_break() -> None:
+    """Go dormant when the rejects reach N_break, then need three consistent (U11)."""
+    settings = params(n_break=5)
+    outliers = [1_234_567 + v for v in (900, -700, 1_300, -1_100, 600, -2_000, 800)]
+    rows = run(outliers, settings, last_row())
+    flags = [row.flags for row in rows]
+    assert flags == ["R", "R", "R", "R", "RD", "RD", "RD"]
+    assert [row.consecutive_rejects for row in rows[:4]] == [1, 2, 3, 4]
+    assert rows[4].rejects == ((rows[4].interpolated_datetime, float(outliers[4])),)
+    steady = [1_240_000, 1_240_010, 1_240_020]
+    after = run(steady, settings, rows[-1])
+    assert [row.flags for row in after] == ["RD", "RD", "ANU"]
+    assert after[-1].segment == rows[-1].segment + 1
+    assert after[-1].x_fs == 1_240_020_000
+
+
+def test_a_dormant_series_acquires_across_a_wrap() -> None:
+    """Stay dormant through scatter, empty on a gap, cold-start on steady (U25)."""
+    settings = params(sigma0=5.0)
+    last = dormant_row()
+    true = [PHASE_MAX - 40_000 + 60_000 * k for k in range(4)]
+    scattered = [5_000, 150_000, 60_000, 190_000]
+    rows: list[Row] = []
+
+    def measure(phi: int) -> None:
+        """Decycle ``phi`` against the anchor and buffer it, as a dormant pair does."""
+        nonlocal last
+        anchor = estimator.anchor_of(last)
+        z = decycle(phi, Fraction(0), Fraction(0), None, anchor).z
+        last = estimator.acquire(moved_on(last), z, settings)
+        rows.append(last)
+
+    for phi in scattered:
+        measure(phi)
+    assert [row.flags for row in rows] == ["RD"] * 4
+    last = estimator.hold(moved_on(last), None, "P", settings)
+    assert last.rejects == ()
+    rows.clear()
+    for value in true[:3]:
+        measure(value % PHASE_PERIOD)
+    assert [row.flags for row in rows] == ["RD", "RD", "ANU"]
+    assert rows[-1].x_fs == true[2] * 1000
+    assert true[1] > PHASE_MAX
+
+
+def test_the_anchor_is_the_last_buffered_measurement() -> None:
+    """Give the newest buffered measurement of a dormant series, as a whole ps."""
+    assert estimator.anchor_of(dormant_row(1_000.0, 2_500_000_017.0)) == 2_500_000_017
+
+
+@pytest.mark.parametrize(
+    "last",
+    [
+        None,
+        last_row(),
+        last_row(flags="PD", **DORMANT),
+        last_row(flags="R", rejects=((MARK, 40.0),), consecutive_rejects=1),
+    ],
+)
+def test_no_anchor_without_a_buffered_measurement(last: Row | None) -> None:
+    """Give None for no row, a tracked row, or a dormant row with an empty buffer."""
+    assert estimator.anchor_of(last) is None

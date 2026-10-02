@@ -12,10 +12,18 @@ formatted from and refuses a line that is not exactly what formatting gives
 (U20); and a record pairs its measurement with its row consistently: a
 measurement exactly when the row is not P, of the row's epoch, a pair's
 slip correction exactly when the row carries S, and S never on a triple.
+
+The file check: a file whose length is its header plus whole rows, with a
+last row that parses, is sound and good through that row, its other rows
+not read; otherwise it is good
+through the row before its first line that does not parse, holds nothing
+good when it has no whole row, and is refused when its first row does not
+parse; and the last row of a sound file is read back as its row (U26).
 """
 
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
+from pathlib import Path
 from typing import Final, Literal
 
 import pytest
@@ -553,3 +561,176 @@ def test_a_double_difference_row_parses_back_to_its_record(
     line = files.format_ddiff_row(record)
     assert len(line) == files.DDIFF_WIDTH
     assert files.parse_ddiff_row(line) == record
+
+
+# --------------------------------------------------- file check, last row
+
+KEY: Final = ("mc2", "nav23")
+"""The pair the files below are for."""
+
+
+def series_rows(count: int) -> list[str]:
+    """Give ``count`` rows of the pair, one per epoch from E, each with its newline."""
+    lines = []
+    for index in range(count):
+        record = files.MeasRecord(
+            measurement=None,
+            row=row(
+                interpolated_datetime=E + index * STEP,
+                epochs_in_segment=812 + index,
+                epochs_since_accept=index + 1,
+                flags="P",
+            ),
+        )
+        lines.append(files.format_meas_row(record) + "\n")
+    return lines
+
+
+def meas_file(tmp_path: Path, rows_text: str, *, head: str | None = None) -> Path:
+    """Write a measurement file of the pair: its header and ``rows_text``."""
+    path = tmp_path / "das_a.mc2.nav23.dat"
+    text = files.header("meas", "a", KEY) if head is None else head
+    path.write_bytes((text + rows_text).encode("ascii"))
+    return path
+
+
+def test_a_sound_file_is_good_through_its_last_row(tmp_path: Path) -> None:
+    """Give the last row's epoch for a file of whole rows (U26)."""
+    path = meas_file(tmp_path, "".join(series_rows(4)))
+    assert files.good_through(path, "meas", KEY) == E + 3 * STEP
+
+
+def test_a_file_cut_inside_its_last_row_is_good_through_the_row_before(
+    tmp_path: Path,
+) -> None:
+    """Give the epoch of the last whole row of a file with a torn line (U26)."""
+    text = "".join(series_rows(4))
+    path = meas_file(tmp_path, text[: -files.MEAS_WIDTH // 2])
+    assert files.good_through(path, "meas", KEY) == E + 2 * STEP
+
+
+@pytest.mark.parametrize(
+    "cut", [0, 1, files.MEAS_WIDTH + 1, 10 * (files.MEAS_WIDTH + 1) + 7]
+)
+def test_a_file_without_a_whole_row_holds_nothing_good(
+    tmp_path: Path, cut: int
+) -> None:
+    """Give None for a file cut inside its header, or holding only its header (U26)."""
+    whole = files.header("meas", "a", KEY)
+    path = meas_file(tmp_path, "", head=whole[:cut])
+    assert files.good_through(path, "meas", KEY) is None
+    assert files.good_through(meas_file(tmp_path, "", head=whole), "meas", KEY) is None
+
+
+def test_a_row_of_the_wrong_length_inside_a_file_ends_what_is_good(
+    tmp_path: Path,
+) -> None:
+    """Give the epoch before the first line that does not parse (U26)."""
+    lines = series_rows(5)
+    lines[2] = lines[2][:100] + lines[2][101:]
+    path = meas_file(tmp_path, "".join(lines))
+    assert files.good_through(path, "meas", KEY) == E + STEP
+
+
+def test_a_sound_file_is_not_scanned(tmp_path: Path) -> None:
+    """Take a file of whole rows whose last row parses as sound, unscanned."""
+    lines = series_rows(5)
+    lines[3] = lines[3].replace("        P", "        Q")
+    path = meas_file(tmp_path, "".join(lines))
+    assert files.good_through(path, "meas", KEY) == E + 4 * STEP
+
+
+def test_a_file_whose_last_row_does_not_parse_is_scanned(tmp_path: Path) -> None:
+    """Scan a file of whole rows when its last row does not parse."""
+    lines = series_rows(5)
+    lines[4] = lines[4].replace("        P", "        Q")
+    path = meas_file(tmp_path, "".join(lines))
+    assert files.good_through(path, "meas", KEY) == E + 3 * STEP
+
+
+def test_a_row_whose_newline_is_lost_is_not_good(tmp_path: Path) -> None:
+    """Refuse a slot that does not end in a newline, though its text parses."""
+    text = "".join(series_rows(3))
+    path = meas_file(tmp_path, text[:-1] + "x")
+    assert files.good_through(path, "meas", KEY) == E + STEP
+
+
+def test_the_scan_stops_at_the_first_damaged_line(tmp_path: Path) -> None:
+    """Stop at the first damaged line, however good the lines after it."""
+    lines = series_rows(5)
+    lines[1] = lines[1].replace("        P", "        Q")
+    path = meas_file(tmp_path, "".join(lines) + "2025")
+    assert files.good_through(path, "meas", KEY) == E
+
+
+def test_a_damaged_first_row_cannot_be_placed_in_time(tmp_path: Path) -> None:
+    """Raise DataFileError when no row of the file parses (U26)."""
+    lines = series_rows(3)
+    lines[0] = lines[0].replace("        P", "        Q")
+    path = meas_file(tmp_path, "".join(lines) + "2025")
+    with pytest.raises(DataFileError, match="damaged first row"):
+        files.good_through(path, "meas", KEY)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [b"#" + b" " * files.MEAS_WIDTH, b"x" * files.MEAS_WIDTH, "é".encode() * 300],
+)
+def test_a_line_that_is_not_a_row_has_no_epoch(line: bytes) -> None:
+    """Give no epoch for a header line, a line with no newline, or non-ASCII."""
+    assert files.row_epoch(line + b"\n", "meas", KEY) is None
+    assert files.row_epoch(series_rows(1)[0].encode()[:-1], "meas", KEY) is None
+
+
+def test_a_row_gives_its_epoch() -> None:
+    """Give a good row's epoch."""
+    assert files.row_epoch(series_rows(2)[1].encode(), "meas", KEY) == E + STEP
+
+
+def test_the_last_row_of_a_sound_file_is_read(tmp_path: Path) -> None:
+    """Read a sound file's last row back as its row."""
+    path = meas_file(tmp_path, "".join(series_rows(3)))
+    last = files.read_last_row(path, "meas", KEY)
+    assert last == row(
+        interpolated_datetime=E + 2 * STEP,
+        epochs_in_segment=814,
+        epochs_since_accept=3,
+        flags="P",
+    )
+
+
+def test_the_last_row_of_a_double_difference_file_is_read(tmp_path: Path) -> None:
+    """Read a double-difference file's last row."""
+    path = tmp_path / "das_a.mc1.mc2.nav23.dat"
+    key = ("mc1", "mc2", "nav23")
+    text = files.header("ddiff", "a", key) + DDIFF_EXAMPLE[0] + "\n"
+    path.write_bytes(text.encode("ascii"))
+    assert files.read_last_row(path, "ddiff", key).x_fs == 6_666_667_291
+    assert files.good_through(path, "ddiff", key) == E
+
+
+@pytest.mark.parametrize("cut", [1, 2 * (files.MEAS_WIDTH + 1)])
+def test_the_last_row_is_read_only_from_a_sound_file(tmp_path: Path, cut: int) -> None:
+    """Raise DataFileError for a file that is torn or holds no row."""
+    text = "".join(series_rows(2))
+    path = meas_file(tmp_path, text[:-cut])
+    with pytest.raises(DataFileError, match="not sound"):
+        files.read_last_row(path, "meas", KEY)
+
+
+def test_a_last_row_that_is_not_ascii_is_refused(tmp_path: Path) -> None:
+    """Raise DataFileError for a sound-sized file whose last row is not ASCII."""
+    path = meas_file(tmp_path, "".join(series_rows(2)))
+    data = bytearray(path.read_bytes())
+    data[-3] = 0xE9
+    path.write_bytes(bytes(data))
+    with pytest.raises(DataFileError, match="not ASCII"):
+        files.read_last_row(path, "meas", KEY)
+
+
+def test_a_file_that_cannot_be_opened_is_refused(tmp_path: Path) -> None:
+    """Raise DataFileError for a file that cannot be read."""
+    with pytest.raises(DataFileError, match="cannot read"):
+        files.good_through(tmp_path / "missing.dat", "meas", KEY)
+    with pytest.raises(DataFileError, match="cannot read"):
+        files.read_last_row(tmp_path / "missing.dat", "meas", KEY)

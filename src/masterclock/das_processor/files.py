@@ -20,10 +20,12 @@ the one form das_processor writes. The measurement file holds no
 innovation, so a measurement row reads back without one.
 """
 
+import os
 import re
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Final, Literal, NamedTuple, NoReturn, Self
+from pathlib import Path
+from typing import BinaryIO, Final, Literal, NamedTuple, NoReturn, Self
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -960,3 +962,176 @@ def parse_ddiff_row(line: str) -> DdiffRecord:
         return DdiffRecord(measurement=triple, row=row)
 
     return _parsed(line, build, format_ddiff_row)
+
+
+# ------------------------------------------------- file check and last row
+
+
+def _parse_line(text: str, kind: FileKind, key: SeriesKey) -> MeasRecord | DdiffRecord:
+    """Read a row of either kind of file.
+
+    Parameters
+    ----------
+    text : str
+        The line, without its newline.
+    kind : {'meas', 'ddiff'}
+        The kind of file.
+    key : (str, str) or (str, str, str)
+        The file's series.
+
+    Returns
+    -------
+    MeasRecord or DdiffRecord
+        The record.
+
+    Raises
+    ------
+    DataFileError
+        If the line is not a row of that file.
+    """
+    if kind == "meas":
+        return parse_meas_row(text, (key[0], key[1]))
+    return parse_ddiff_row(text)
+
+
+def row_epoch(line: bytes, kind: FileKind, key: SeriesKey) -> datetime | None:
+    """Give the epoch of a good row (design 5.7).
+
+    Parameters
+    ----------
+    line : bytes
+        One line slot of a file, with its newline if it has one.
+    kind : {'meas', 'ddiff'}
+        The kind of file.
+    key : (str, str) or (str, str, str)
+        The file's series.
+
+    Returns
+    -------
+    datetime or None
+        The row's epoch when the slot is a whole line, ending in its
+        newline, that is ASCII and parses as a row of the file; otherwise
+        ``None``. A header line never parses as a row.
+    """
+    if not line.endswith(b"\n"):
+        return None
+    try:
+        return _parse_line(
+            line[:-1].decode("ascii"), kind, key
+        ).row.interpolated_datetime
+    except (
+        UnicodeDecodeError,
+        DataFileError,
+    ):
+        return None
+
+
+def _slot(file: BinaryIO, index: int, size: int) -> bytes:
+    """Read one line slot of a file.
+
+    Parameters
+    ----------
+    file : BinaryIO
+        The open file.
+    index : int
+        The slot, from 0 at the first header line.
+    size : int
+        A line's size, newline included.
+
+    Returns
+    -------
+    bytes
+        The slot's bytes.
+    """
+    file.seek(index * size)
+    return file.read(size)
+
+
+def good_through(path: Path, kind: FileKind, key: SeriesKey) -> datetime | None:
+    """Give the epoch of a file's last good row (design 5.2, 5.7).
+
+    Parameters
+    ----------
+    path : Path
+        The file.
+    kind : {'meas', 'ddiff'}
+        The kind of file.
+    key : (str, str) or (str, str, str)
+        The file's series.
+
+    Returns
+    -------
+    datetime or None
+        For a sound file, its length its header plus whole rows and its
+        last row good, that row's epoch, from one short read. Otherwise the
+        epoch of the row before its first line that is not a good row.
+        ``None`` when it holds no whole row.
+
+    Raises
+    ------
+    DataFileError
+        If the file cannot be read, or its first row is not good, so its
+        rows cannot be placed in time.
+    """
+    size, header_lines = WIDTHS[kind] + 1, HEADER_LINES[kind]
+    try:
+        with path.open("rb") as file:
+            length = file.seek(0, os.SEEK_END)
+            rows = length // size - header_lines
+            if rows < 1:
+                return None
+            if length % size == 0:
+                last = row_epoch(_slot(file, header_lines + rows - 1, size), kind, key)
+                if last is not None:
+                    return last
+            good = None
+            for index in range(rows):
+                epoch = row_epoch(_slot(file, header_lines + index, size), kind, key)
+                if epoch is None:
+                    break
+                good = epoch
+    except OSError as exc:
+        _fail(f"cannot read data file {path}: {exc}", exc)
+    if good is None:
+        _fail(f"{path} has a damaged first row, so its rows cannot be placed in time")
+    return good
+
+
+def read_last_row(path: Path, kind: FileKind, key: SeriesKey) -> Row:
+    """Read the last row of a sound file (design 5.7).
+
+    Parameters
+    ----------
+    path : Path
+        The file.
+    kind : {'meas', 'ddiff'}
+        The kind of file.
+    key : (str, str) or (str, str, str)
+        The file's series.
+
+    Returns
+    -------
+    Row
+        Its last row.
+
+    Raises
+    ------
+    DataFileError
+        If the file cannot be read, is not sound, or its last row is not a
+        row of the file.
+    """
+    size, header_lines = WIDTHS[kind] + 1, HEADER_LINES[kind]
+    try:
+        with path.open("rb") as file:
+            length = file.seek(0, os.SEEK_END)
+            rows = length // size - header_lines
+            if rows < 1 or length % size != 0:
+                _fail(f"data file {path} is not sound: {length} bytes")
+            line = _slot(file, header_lines + rows - 1, size)
+    except OSError as exc:
+        _fail(f"cannot read data file {path}: {exc}", exc)
+    try:
+        text = line[:-1].decode("ascii")
+    except UnicodeDecodeError as exc:
+        _fail(f"data file {path} is not sound: its last row is not ASCII", exc)
+    return _parse_line(text, kind, key).row

@@ -24,6 +24,8 @@ from masterclock.das_processor.config import AppConfig
 from masterclock.das_processor.read_cd5m5m import DASData, DASMeasurement
 from masterclock.das_processor.read_steering import STEERING_FILE_TEMPLATE
 from masterclock.das_processor.registry import Existing
+from masterclock.domain.phase import PHASE_PERIOD
+from masterclock.domain.series import Row, SeriesKey
 
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """An invented epoch start."""
@@ -182,3 +184,277 @@ def test_an_epoch_s_block_is_of_its_epoch(tmp_path: Path) -> None:
     values = {**dict(epoch), "interpolated_datetime": E + T}
     with pytest.raises(ValidationError, match="block"):
         run.Epoch.model_validate(values)
+
+
+# ------------------------------------------------------------ pairs of an epoch
+
+PREVIOUS: Final = E - T
+"""The epoch before E."""
+
+
+def last_row(**changes: object) -> Row:
+    """Give a settled 1-state reference row at the epoch before E, ``changes`` made."""
+    values: dict[str, object] = {
+        "interpolated_datetime": PREVIOUS,
+        "innovation": None,
+        "x_fs": 0,
+        "y": 0.0,
+        "d": 0.0,
+        "innovation_scale": 2.0,
+        "segment": 1,
+        "step_offset": 0,
+        "epochs_in_segment": 900,
+        "epochs_since_accept": 0,
+        "consecutive_rejects": 0,
+        "rejects": (),
+        "filter_states": 1,
+        "time_constant": None,
+        "scale_time_constant": 30.0,
+        "flags": "A",
+    }
+    values.update(changes)
+    return Row.model_validate(values)
+
+
+WORKED_LAST: Final = last_row(
+    x_fs=1_234_567_000,
+    y=0.0123,
+    innovation_scale=3.0,
+    segment=4,
+    epochs_in_segment=811,
+    filter_states=3,
+    time_constant=100.0,
+    scale_time_constant=50.0,
+)
+"""Appendix A's last row of (mc2, nav23)."""
+
+
+def measured(reference: str, clock: str, phase: int, offset_us: int) -> DASMeasurement:
+    """Give a measurement of the pair ``offset_us`` microdays after E."""
+    return DASMeasurement(
+        measurement_mjd=round(datetime_to_mjd(E) + offset_us * 1e-6, 6),
+        measured_phase=phase,
+        rms=3,
+        switch=f"{reference[-1]}A01",
+        clock=clock,
+    )
+
+
+REFERENCE_LAST: Final[dict[SeriesKey, Row]] = {
+    ("mc1", "mc1"): last_row(x_fs=1_000_000),
+    ("mc2", "mc2"): last_row(x_fs=2_000_000),
+    ("mc1", "mc2"): last_row(x_fs=5_000_000),
+    ("mc2", "mc1"): last_row(x_fs=-5_000_000),
+}
+"""The references' last rows: their self and link pairs, 1-state, settled."""
+
+REFERENCE_MEASURED: Final = [
+    measured("mc1", "mc1", 1000, 10),
+    measured("mc2", "mc2", 2000, 20),
+    measured("mc1", "mc2", 5000, 30),
+    measured("mc2", "mc1", PHASE_PERIOD - 5000, 40),
+]
+"""Each self and link pair measured where its last row says it is."""
+
+
+def epoch_of(
+    measurements: list[DASMeasurement],
+    last: dict[SeriesKey, Row],
+    tmp_path: Path,
+    steering: dict[str, str] | None = None,
+) -> run.Epoch:
+    """Build E from ``measurements``, with ``last``'s series existing.
+
+    ``steering`` gives the text of each reference's steering file.
+    """
+    config, clocks = deployment(tmp_path)
+    for mc, text in (steering or {}).items():
+        path = tmp_path / "steering" / STEERING_FILE_TEMPLATE.format(mc=mc)
+        path.write_text(text, encoding="ascii")
+    data = DASData(interpolated_datetime=E, measurements=tuple(measurements))
+    existing = Existing(
+        pairs=frozenset(k for k in last if len(k) == 2),
+        triples=frozenset(),
+    )
+    return run.build_epoch(E, data, existing, config, clocks)
+
+
+def test_the_worked_epoch_s_pairs_are_processed_end_to_end(tmp_path: Path) -> None:
+    """Give Appendix A's row, and every reference pair accepted at its value (D3)."""
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
+    raw = DASMeasurement(
+        measurement_mjd=60941.251588,
+        measured_phase=34579,
+        rms=3,
+        switch="2B07",
+        clock="nav23",
+    )
+    epoch = epoch_of([*REFERENCE_MEASURED, raw], last, tmp_path)
+    done = run.process_pairs(epoch, last)
+    worked = done.results[("mc2", "nav23")].row
+    assert (worked.flags, worked.x_fs, worked.y, worked.d) == (
+        "A",
+        1_234_574_457,
+        0.01230129052352643,
+        7.169515400974333e-12,
+    )
+    assert done.measurements[("mc2", "nav23")].z == 1_234_577
+    for key, row in REFERENCE_LAST.items():
+        result = done.results[(key[0], key[1])].row
+        assert (result.flags, result.x_fs) == ("A", row.x_fs), key
+    assert done.screening.events == ()
+    assert done.slips.events == ()
+
+
+def test_a_slip_correction_is_made_before_filtering(tmp_path: Path) -> None:
+    """Correct the weak pair's cycle count first, so its row holds S and the truth."""
+    jump = PHASE_PERIOD // 2 + 2
+    last = {
+        **REFERENCE_LAST,
+        ("mc1", "nav23"): last_row(
+            x_fs=1_000_000_000,
+            filter_states=3,
+            time_constant=100.0,
+            scale_time_constant=50.0,
+            innovation_scale=3.0,
+            epochs_in_segment=10,
+            flags="AU",
+        ),
+        ("mc2", "nav23"): last_row(
+            x_fs=2_000_000_000,
+            filter_states=3,
+            time_constant=100.0,
+            scale_time_constant=50.0,
+            innovation_scale=3.0,
+        ),
+    }
+    truth = {("mc1", "nav23"): 1_000_000 + jump, ("mc2", "nav23"): 2_000_000 + jump - 4}
+    clocks = [
+        measured("mc1", "nav23", truth[("mc1", "nav23")] % PHASE_PERIOD, 50),
+        measured("mc2", "nav23", truth[("mc2", "nav23")] % PHASE_PERIOD, 60),
+    ]
+    epoch = epoch_of([*REFERENCE_MEASURED, *clocks], last, tmp_path)
+    done = run.process_pairs(epoch, last)
+    assert done.slips.corrections == {("mc1", "nav23"): 1}
+    assert done.measurements[("mc1", "nav23")].z == truth[("mc1", "nav23")]
+    assert done.measurements[("mc1", "nav23")].slip is True
+    corrected = done.results[("mc1", "nav23")].row
+    assert "S" in corrected.flags
+    assert corrected.innovation == float(jump)
+
+
+def test_a_reference_missing_from_the_block_leaves_its_pairs_predicted(
+    tmp_path: Path,
+) -> None:
+    """Give mc1's pairs predicted rows and screen without it (review focus 4)."""
+    last = dict(REFERENCE_LAST)
+    epoch = epoch_of([REFERENCE_MEASURED[1]], last, tmp_path)
+    assert epoch.refs == frozenset({"mc2"})
+    done = run.process_pairs(epoch, last)
+    for key in (("mc1", "mc1"), ("mc1", "mc2"), ("mc2", "mc1")):
+        assert done.results[key].row.flags == "P"
+    assert done.results[("mc2", "mc2")].row.flags == "A"
+    assert done.screening.events == ()
+
+
+def test_a_new_pair_starts_acquiring(tmp_path: Path) -> None:
+    """Give a pair with no last row a dormant row with its measurement buffered."""
+    epoch = epoch_of(REFERENCE_MEASURED, {}, tmp_path)
+    done = run.process_pairs(epoch, {})
+    for key in REFERENCE_LAST:
+        row = done.results[(key[0], key[1])].row
+        assert (row.flags, len(row.rejects), row.segment) == ("RD", 1, 0)
+    assert done.predictions[("mc1", "mc1")] is None
+
+
+def test_screening_excludes_and_the_filter_holds(tmp_path: Path) -> None:
+    """Hold as X a pair that shares a self pair's shift inside its gate (9.5, 10.1)."""
+    maser = last_row(
+        x_fs=2_000_000,
+        filter_states=3,
+        time_constant=100.0,
+        scale_time_constant=50.0,
+        innovation_scale=40.0,
+    )
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): maser}
+    shifted = [
+        measured("mc1", "mc1", 1000, 10),
+        measured("mc2", "mc2", 2100, 20),
+        measured("mc1", "mc2", 5000, 30),
+        measured("mc2", "mc1", PHASE_PERIOD - 5000, 40),
+        measured("mc2", "nav23", 2008, 50),
+    ]
+    epoch = epoch_of(shifted, last, tmp_path)
+    done = run.process_pairs(epoch, last)
+    assert [event.kind for event in done.screening.events] == ["self_fail"]
+    assert done.screening.excluded == frozenset({("mc2", "nav23")})
+    assert done.results[("mc2", "nav23")].row.flags == "X"
+    assert done.results[("mc2", "mc2")].row.flags == "R"
+
+
+def test_an_epoch_with_no_block_predicts_every_pair(tmp_path: Path) -> None:
+    """Give every existing pair a predicted row when the DAS measured nothing (6.2)."""
+    config, clocks = deployment(tmp_path)
+    existing = Existing(
+        pairs=frozenset(k for k in REFERENCE_LAST if len(k) == 2), triples=frozenset()
+    )
+    epoch = run.build_epoch(E, None, existing, config, clocks)
+    done = run.process_pairs(epoch, REFERENCE_LAST)
+    assert {result.row.flags for result in done.results.values()} == {"P"}
+    assert done.measurements == {}
+
+
+def test_an_undecided_slip_excludes_both_clock_pairs(tmp_path: Path) -> None:
+    """Hold as X the clock pairs of an undecided slip, inside their gates (11.2)."""
+    jump = PHASE_PERIOD // 2 + 2
+    wide = {
+        "filter_states": 3,
+        "time_constant": 100.0,
+        "scale_time_constant": 50.0,
+        "innovation_scale": 25_000.0,
+    }
+    last = {
+        **REFERENCE_LAST,
+        ("mc1", "nav23"): last_row(x_fs=1_000_000_000, **wide),
+        ("mc2", "nav23"): last_row(x_fs=2_000_000_000, **wide),
+    }
+    clocks = [
+        measured("mc1", "nav23", (1_000_000 + jump) % PHASE_PERIOD, 50),
+        measured("mc2", "nav23", (2_000_000 + jump - 4) % PHASE_PERIOD, 60),
+    ]
+    epoch = epoch_of([*REFERENCE_MEASURED, *clocks], last, tmp_path)
+    done = run.process_pairs(epoch, last)
+    assert [event.kind for event in done.slips.events] == ["slip_undecided"]
+    assert done.results[("mc1", "nav23")].row.flags == "X"
+    assert done.results[("mc2", "nav23")].row.flags == "X"
+
+
+def test_a_dormant_pair_is_decycled_against_its_anchor(tmp_path: Path) -> None:
+    """Decycle a pair with no prediction against its last buffered measurement (7.5)."""
+    dormant = last_row(
+        x_fs=None,
+        y=None,
+        d=None,
+        innovation_scale=None,
+        flags="RD",
+        rejects=((PREVIOUS, 201_000.0),),
+    )
+    last = {**REFERENCE_LAST, ("mc1", "mc1"): dormant}
+    epoch = epoch_of(REFERENCE_MEASURED, last, tmp_path)
+    done = run.process_pairs(epoch, last)
+    assert done.measurements[("mc1", "mc1")].z == 201_000
+
+
+def test_steering_inside_the_epoch_is_taken_off(tmp_path: Path) -> None:
+    """Refer a measurement to E with the steering since E taken off (7.1)."""
+    last = dict(REFERENCE_LAST)
+    event = f"{datetime_to_mjd(E) + 2e-6:.6f} 10.0 0.0\n"
+    moved = [
+        *REFERENCE_MEASURED[:2],
+        measured("mc1", "mc2", 5010, 30),
+        REFERENCE_MEASURED[3],
+    ]
+    epoch = epoch_of(moved, last, tmp_path, {"mc1": event})
+    done = run.process_pairs(epoch, last)
+    assert done.measurements[("mc1", "mc2")].z == 5000
+    assert done.results[("mc1", "mc2")].row.flags == "A"

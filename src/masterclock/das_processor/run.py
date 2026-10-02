@@ -20,15 +20,17 @@ from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import datetime_to_mjd, mjd_to_datetime
 from masterclock.das_processor.channels import RfChannel
 from masterclock.das_processor.clock_config import ClockConfig
-from masterclock.das_processor.config import AppConfig
+from masterclock.das_processor.config import JOURNAL_FILE_TEMPLATE, AppConfig
 from masterclock.das_processor.epochs import floor_to_ten_minutes
 from masterclock.das_processor.files import (
     DayBuffer,
     DdiffRecord,
     FileKind,
     MeasRecord,
+    clear_journal,
     ensure_archives,
     good_through,
+    read_journal,
     read_last_record,
     roll_back,
     write_buffer,
@@ -530,8 +532,9 @@ def next_epoch(config: AppConfig) -> datetime:
     Returns
     -------
     datetime
-        One epoch after L, the oldest epoch any file is good through; with
-        no file holding a whole row, the epoch containing
+        One epoch after L, the oldest epoch any file is good through, or
+        the epoch before a write that stopped part way, when its journal is
+        there; with no file holding a whole row, the epoch containing
         ``start_from_mjd``.
 
     Raises
@@ -540,11 +543,18 @@ def next_epoch(config: AppConfig) -> datetime:
         If a file cannot be read, changed or deleted, or its first row is
         damaged, so its rows cannot be placed in time.
     """
+    journal = config.processed.processed_path / JOURNAL_FILE_TEMPLATE.format(
+        rf=config.das.rf
+    )
     series = data_series(config)
     good = [good_through(path, kind, key) for path, kind, key in series]
+    begun = read_journal(journal)
+    if begun is not None:
+        good.append(begun - _EPOCH)
     common = min((mark for mark in good if mark is not None), default=None)
     for path, kind, key in series:
         roll_back(path, kind, key, common)
+    clear_journal(journal)
     if common is None:
         return floor_to_ten_minutes(mjd_to_datetime(config.processed.start_from_mjd))
     return common + _EPOCH
@@ -700,7 +710,8 @@ def run(
     processed, channel = config.processed.processed_path, config.das.rf
     if pending is not None and not existing_series(processed, channel).pairs:
         mark = max(mark, pending.interpolated_datetime)
-    buffer = DayBuffer(config.das.rf)
+    journal = processed / JOURNAL_FILE_TEMPLATE.format(rf=channel)
+    buffer = DayBuffer(channel, journal)
     done = 0
     while (
         pending is not None

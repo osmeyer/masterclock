@@ -19,6 +19,12 @@ not read; otherwise it is good
 through the row before its first line that does not parse, holds nothing
 good when it has no whole row, and is refused when its first row does not
 parse; and the last row of a sound file is read back as its row (U26).
+
+The write: every check is made before a file is opened, and a failed one
+changes nothing; files are written one at a time, measurement files first;
+with a journal, the earliest buffered epoch is flushed to it before any data
+file opens and it is deleted after the last flush, a journal already there
+is refused, and one not whole is read as no write stopped.
 """
 
 import os
@@ -1296,3 +1302,139 @@ def test_a_buffer_keeps_each_pair_s_switch(tmp_path: Path) -> None:
     epoch.add(meas / "das_a.mc2.cs7.dat", ("mc2", "cs7"), predicted(0))
     day.take(epoch)
     assert day.switches == {KEY: "2B07"}
+
+
+# ---------------------------------------------------------- the write journal
+
+
+def journaled(tmp_path: Path) -> tuple[files.DayBuffer, Path, Path]:
+    """Give a buffer with a journal and two epochs' rows, its journal and a file."""
+    plain, pair_path, _ = filled(tmp_path)
+    journal = tmp_path / "das_processor_a.writing"
+    buffer = files.DayBuffer("a", journal)
+    buffer.take(plain)
+    return buffer, journal, pair_path
+
+
+def test_a_buffer_knows_its_first_epoch(tmp_path: Path) -> None:
+    """Keep the earliest epoch buffered since the last write, and forget it after."""
+    buffer, _, pair_path = journaled(tmp_path)
+    assert buffer.start == E
+    later = files.DayBuffer("a")
+    later.add(pair_path, KEY, predicted(2))
+    buffer.take(later)
+    assert buffer.start == E
+    files.write_buffer(buffer)
+    assert [buffer.start] == [None]
+    buffer.add(pair_path, KEY, predicted(3))
+    assert buffer.start == E + 3 * STEP
+
+
+def test_the_journal_is_there_exactly_while_the_files_are_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flush the first epoch to the journal before any file opens; delete it after."""
+    buffer, journal, _ = journaled(tmp_path)
+    real_open = Path.open
+    seen: list[tuple[str, str | None]] = []
+
+    def watching(path: Path, *args: object, **kwargs: object) -> object:
+        """Record, at each data file's opening, what the journal holds."""
+        if path != journal:
+            seen.append((path.name, journal.read_text() if journal.exists() else None))
+        return real_open(path, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(Path, "open", watching)
+    files.write_buffer(buffer)
+    assert len(seen) == 2
+    assert all(text == f"{E.isoformat()}\n" for _, text in seen)
+    assert not journal.exists()
+
+
+def test_a_buffer_without_a_journal_keeps_none(tmp_path: Path) -> None:
+    """Write no journal for a buffer given none."""
+    buffer, _, _ = filled(tmp_path)
+    files.write_buffer(buffer)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["ddiff", "meas"]
+
+
+def test_a_journal_already_there_changes_no_file(tmp_path: Path) -> None:
+    """Refuse to write while a journal is there, before any file is opened."""
+    buffer, journal, pair_path = journaled(tmp_path)
+    journal.write_text(f"{E.isoformat()}\n")
+    with pytest.raises(DataFileError, match="still open"):
+        files.write_buffer(buffer)
+    assert not pair_path.exists()
+    assert journal.read_text() == f"{E.isoformat()}\n"
+
+
+def test_an_empty_buffer_writes_no_journal(tmp_path: Path) -> None:
+    """Write no journal when no rows are buffered."""
+    journal = tmp_path / "das_processor_a.writing"
+    files.write_buffer(files.DayBuffer("a", journal))
+    assert not journal.exists()
+
+
+def test_a_journal_that_cannot_be_written_is_a_data_file_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise DataFileError, opening no data file, when the journal cannot be flushed."""
+    buffer, _, pair_path = journaled(tmp_path)
+
+    def failing(_fd: int) -> None:
+        """Fail as a device would."""
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(os, "fsync", failing)
+    with pytest.raises(DataFileError, match="cannot write journal"):
+        files.write_buffer(buffer)
+    assert not pair_path.exists()
+
+
+def test_a_journal_gives_the_first_epoch_of_its_write(tmp_path: Path) -> None:
+    """Read back the epoch a stopped write started at."""
+    journal = tmp_path / "das_processor_a.writing"
+    journal.write_text(f"{E.isoformat()}\n")
+    assert files.read_journal(journal) == E
+
+
+def test_no_journal_means_no_write_was_stopped(tmp_path: Path) -> None:
+    """Give None when there is no journal."""
+    assert files.read_journal(tmp_path / "das_processor_a.writing") is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        b"",
+        b"2025-09-23T06:0",
+        E.isoformat().encode(),
+        b"2025-09-23T06:00:00\n",
+        b"\xff\n",
+    ],
+)
+def test_a_journal_not_whole_means_no_data_file_was_opened(
+    tmp_path: Path, text: bytes
+) -> None:
+    """Give None for a journal cut short, without its zone, or not ASCII."""
+    journal = tmp_path / "das_processor_a.writing"
+    journal.write_bytes(text)
+    assert files.read_journal(journal) is None
+
+
+def test_a_journal_that_cannot_be_read_is_refused(tmp_path: Path) -> None:
+    """Raise DataFileError when the journal is there but cannot be read."""
+    journal = tmp_path / "das_processor_a.writing"
+    journal.mkdir()
+    with pytest.raises(DataFileError, match="cannot read journal"):
+        files.read_journal(journal)
+
+
+def test_clearing_deletes_the_journal(tmp_path: Path) -> None:
+    """Delete the journal, and do nothing when it is not there."""
+    journal = tmp_path / "das_processor_a.writing"
+    journal.write_text(f"{E.isoformat()}\n")
+    files.clear_journal(journal)
+    assert not journal.exists()
+    files.clear_journal(journal)
+    assert not journal.exists()

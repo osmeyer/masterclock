@@ -158,6 +158,14 @@ their files never meet it. One per RF channel, because the channels write
 separate files and their runs may overlap.
 """
 
+JOURNAL_FILE_TEMPLATE: Final[str] = "das_processor_{rf}.writing"
+"""The name of an RF channel's write journal in ``processed_path``.
+
+It is there only while the day's rows are being written, and holds the
+first epoch being written, so a run that finds it knows a write stopped
+part way and rolls every file back to before that epoch.
+"""
+
 
 def _start_when_not_given(value: object) -> object:
     """Give :data:`~masterclock.das_processor.cli.START_FROM_MJD` for no value.

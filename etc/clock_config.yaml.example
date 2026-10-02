@@ -1,0 +1,35 @@
+# Clock configuration of a deployment: each clock's estimator settings and
+# each pair's RMS limit. Every name and number here is invented; a real file
+# carries the values the offline characterization chose for its clocks.
+
+# Counted rejects that make a series dormant (N_break); at most every
+# clock's gap_limit.
+rejects_before_restart: 36
+
+# RMS limit of the pairs' gate, ps: the pair's own, else its reference's,
+# else the default. A pair is written reference.clock.
+rms_limit:
+  default: 50
+  references: {mc2: 40}
+  pairs: {mc2.hm7: 80}
+
+# The default entry of each clock type. time_constant is given exactly for
+# a 2- or 3-state estimator.
+types:
+  maser:    {filter_states: 3, time_constant: 100.0, scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432}
+  cesium:   {filter_states: 2, time_constant: 30.0,  scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432}
+  fountain: {filter_states: 2, time_constant: 30.0,  scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432}
+  mc:       {filter_states: 1, scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432}
+  aog:      {filter_states: 1, scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432}
+
+# Each clock's entries. The first gives its type; a later one overrides
+# values other than filter_states, from effective_mjd on.
+clocks:
+  mc1:  [{type: mc}]
+  mc2:  [{type: mc}]
+  aog4: [{type: aog}]
+  cs3:  [{type: cesium}]
+  rb5:  [{type: fountain}]
+  hm7:
+    - {type: maser}
+    - {effective_mjd: 60980.0, time_constant: 150.0}

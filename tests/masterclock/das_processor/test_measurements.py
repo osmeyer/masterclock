@@ -121,10 +121,18 @@ def test_a_triple_names_only_the_components_it_can_use(used: str) -> None:
         )
 
 
-@pytest.mark.parametrize("sigma", [0.0, -1.0, float("nan"), float("inf")])
-def test_a_triple_sigma_is_positive_and_finite(sigma: float) -> None:
-    """Refuse a double-difference sigma that is not a positive finite number."""
+@pytest.mark.parametrize("sigma", [-1.0, -1e-300, float("nan"), float("inf")])
+def test_a_triple_sigma_is_finite_and_not_negative(sigma: float) -> None:
+    """Refuse a double-difference sigma below zero or not finite."""
     with pytest.raises(ValidationError):
         TripleMeasurement(
             z=1, double_difference_sigma=sigma, components_used="111", cold=False
         )
+
+
+def test_a_triple_sigma_may_be_zero() -> None:
+    """Take a sigma of 0, as a pair's rms of 0 is taken, as the scale's floor."""
+    triple = TripleMeasurement(
+        z=1, double_difference_sigma=0.0, components_used="111", cold=False
+    )
+    assert triple.measured().floor == 0.0

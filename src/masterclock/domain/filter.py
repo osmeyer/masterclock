@@ -974,8 +974,8 @@ class Measured(BaseModel):
         For a pair, the rms the DAS gave, ps, at least 0; ``None`` for a
         triple.
     sigma_dd : float or None, optional
-        For a triple, the double difference's sigma, ps, above zero;
-        ``None`` for a pair.
+        For a triple, the double difference's sigma, ps, zero or more, as
+        a pair's rms may be; ``None`` for a pair.
     slip : bool, optional
         Whether the slip check corrected a pair's cycle count. Never set
         for a triple.
@@ -1002,7 +1002,7 @@ class Measured(BaseModel):
 
     z: int
     rms: Annotated[int, Field(ge=0)] | None = None
-    sigma_dd: Annotated[float, Field(gt=0, allow_inf_nan=False)] | None = None
+    sigma_dd: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
     slip: bool = False
     cold: bool = False
 

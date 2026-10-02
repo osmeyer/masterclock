@@ -1447,3 +1447,22 @@ def test_a_gap_at_the_start_of_a_run_is_predicted_not_skipped(tmp_path: Path) ->
     rows = rows_of(config, ("mc1", "mc1"))
     assert [row.interpolated_datetime for row in rows] == [LATE, LATE + T]
     assert "P" in rows[1].flags
+
+
+def test_a_clock_measured_with_an_rms_of_zero_gives_its_triple_a_row(
+    tmp_path: Path,
+) -> None:
+    """Measure a local triple whose clock pair's rms is 0, with a sigma of 0."""
+    last = {**REFERENCE_LAST, ("mc2", "nav23"): WORKED_LAST}
+    still = DASMeasurement.model_validate(
+        {
+            "measurement_mjd": WORKED_RAW.measurement_mjd,
+            "measured_phase": WORKED_RAW.measured_phase,
+            "rms": 0,
+            "switch": WORKED_RAW.switch,
+            "clock": WORKED_RAW.clock,
+        }
+    )
+    epoch = epoch_of([*REFERENCE_MEASURED, still], last, tmp_path)
+    done = run.process_triples(epoch, last, run.process_pairs(epoch, last))
+    assert done.measurements[("mc2", "mc2", "nav23")].double_difference_sigma == 0.0

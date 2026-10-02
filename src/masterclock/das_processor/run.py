@@ -685,16 +685,21 @@ def run(
     Notes
     -----
     The run starts one epoch after the epoch every file holds (see
-    :func:`next_epoch`). An epoch with no block before the data resume is
-    processed with no measurements; the run stops when no block remains,
-    after ``steps`` epochs, or on a shutdown request, always between
-    epochs. Rows are written after each day's 23:50 UTC epoch and when the
-    run stops.
+    :func:`next_epoch`); while no series exists yet, at the first block,
+    since an epoch before it holds no series and writes nothing, and a run
+    of one epoch would otherwise never get past it. An epoch with no block
+    before the data resume is processed with no measurements. The run stops
+    when no block remains, after ``steps`` epochs, or on a shutdown
+    request, always between epochs. Rows are written after each day's
+    23:50 UTC epoch and when the run stops.
     """
     ensure_archives(config.processed.processed_path)
     mark = next_epoch(config)
     blocks = read_all_blocks(config.das.cd5m5m_path, datetime_to_mjd(mark))
     pending = _next_block(blocks, mark)
+    processed, channel = config.processed.processed_path, config.das.rf
+    if pending is not None and not existing_series(processed, channel).pairs:
+        mark = max(mark, pending.interpolated_datetime)
     buffer = DayBuffer(config.das.rf)
     done = 0
     while (

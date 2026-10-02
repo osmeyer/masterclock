@@ -1179,3 +1179,15 @@ def test_a_closure_failure_is_logged(
         "closure of link mc2-mc3 failed: excluded das_a.mc2.mc3, das_a.mc3.mc2"
         in warnings
     )
+
+
+def test_a_first_run_starts_at_the_first_data(tmp_path: Path) -> None:
+    """Start at the first block when no series exists yet, so each step progresses."""
+    config, clocks = loop_deployment(tmp_path, LATE - 3 * T)
+    das_files(tmp_path, [LATE, LATE + T])
+    run.run(config, clocks, 1, ShutdownHandler())
+    assert [row.interpolated_datetime for row in rows_of(config, ("mc1", "mc1"))] == [
+        LATE
+    ]
+    run.run(config, clocks, 1, ShutdownHandler())
+    assert len(rows_of(config, ("mc1", "mc1"))) == 2

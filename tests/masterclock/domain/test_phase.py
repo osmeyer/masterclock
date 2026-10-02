@@ -5,7 +5,8 @@ picoseconds, and the largest phase a reading gives is one short of it; a
 time offset between two datetimes is an exact fraction of seconds, and
 naive datetimes are refused; a float becomes an exact fraction, and a value
 that is not finite is refused; rounding is to the nearest whole number,
-a tie going to the even one, exactly at any size; an epoch lasts 600 s; and
+a tie going to the even one, exactly at any size; the estimator's phase is
+held in whole femtoseconds, rounded the same way; an epoch lasts 600 s; and
 a measurement is decycled against the prediction at its own time, or
 against the last buffered measurement, or with no cycles added, and
 referred back to its epoch start with one exact rounding.
@@ -157,6 +158,34 @@ def test_a_large_phase_plus_a_float_rounds_as_integers_do(
 def test_a_large_phase_plus_a_half_is_a_tie_to_even(whole: int) -> None:
     """Treat a phase beyond 2**53 plus exactly 0.5 as a tie, not a float near it."""
     assert phase.round_even(whole + phase.exact(0.5)) == whole + whole % 2
+
+
+# ------------------------------------------------------------ femtoseconds
+
+
+@pytest.mark.parametrize(
+    ("value", "femtoseconds"),
+    [
+        (Fraction(12_345_744_574, 10_000), 1_234_574_457),
+        (Fraction(1, 2000), 0),
+        (Fraction(3, 2000), 2),
+        (Fraction(-1, 2000), 0),
+        (Fraction(-3, 2000), -2),
+        (7, 7_000),
+    ],
+)
+def test_a_phase_rounds_to_whole_femtoseconds(
+    value: Fraction, femtoseconds: int
+) -> None:
+    """Round to the nearest femtosecond, a tie to the even one."""
+    assert phase.to_fs(value) == femtoseconds
+
+
+@given(st.integers(min_value=-(2**70), max_value=2**70))
+def test_femtoseconds_come_back_exactly(femtoseconds: int) -> None:
+    """Give back the same whole femtoseconds after a turn through picoseconds."""
+    assert phase.to_fs(phase.from_fs(femtoseconds)) == femtoseconds
+    assert phase.from_fs(femtoseconds) == Fraction(femtoseconds, 1000)
 
 
 # -------------------------------------------------------------- decycling

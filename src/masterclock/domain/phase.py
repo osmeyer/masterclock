@@ -5,6 +5,9 @@ signal, so a reading can only say where in the period it fell. Decycling
 puts back the whole periods a reading lost (:func:`decycle`), by comparing
 it with where the estimator expected the phase to be.
 
+The one phase held more finely is the estimator's, in whole femtoseconds
+(see :data:`FS_PER_PS`).
+
 Where a phase is combined with a float - a rate times a time, say - the sum
 is formed exactly, as a :class:`~fractions.Fraction`, and rounded once,
 ties to even. A float holds every whole number only up to 2**53, and a sum
@@ -35,6 +38,17 @@ PHASE_MAX: Final[int] = PHASE_PERIOD - 1
 """The largest phase a reading can give, in picoseconds.
 
 A whole period would be indistinguishable from zero.
+"""
+
+FS_PER_PS: Final[int] = 1000
+"""Femtoseconds in one picosecond.
+
+The estimator's phase is held as a whole number of femtoseconds, not
+picoseconds. A series' rate moves its phase by a fraction of a picosecond
+each epoch, and the next prediction starts from the stored phase, so a
+phase rounded to whole picoseconds would bring its rounding back every
+epoch; a 3-state estimator takes that into its rate and drift. A whole
+femtosecond is fine enough that it does not.
 """
 
 EPOCH_SECONDS: Final[int] = 600
@@ -145,6 +159,50 @@ def round_even(value: Fraction | int) -> int:
     1234577
     """
     return round(value)
+
+
+def to_fs(value: Fraction | int) -> int:
+    """Round a phase in picoseconds to whole femtoseconds, a tie to even.
+
+    Parameters
+    ----------
+    value : Fraction or int
+        An exact phase, ps.
+
+    Returns
+    -------
+    int
+        The phase in whole femtoseconds.
+
+    Examples
+    --------
+    >>> to_fs(Fraction(12_345_744_574, 10_000))
+    1234574457
+    >>> to_fs(Fraction(1, 2000))
+    0
+    """
+    return round_even(value * FS_PER_PS)
+
+
+def from_fs(value: int) -> Fraction:
+    """Give a phase held in whole femtoseconds in picoseconds, exactly.
+
+    Parameters
+    ----------
+    value : int
+        The phase, fs.
+
+    Returns
+    -------
+    Fraction
+        The same phase, ps.
+
+    Examples
+    --------
+    >>> from_fs(1_234_574_457)
+    Fraction(1234574457, 1000)
+    """
+    return Fraction(value, FS_PER_PS)
 
 
 class Decycled(BaseModel):

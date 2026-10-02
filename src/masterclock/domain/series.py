@@ -233,8 +233,9 @@ class Row(BaseModel):
     innovation : float or None
         The measurement less the prediction, ps; ``None`` without a
         measurement or without a prediction.
-    x : int or None
-        Estimated phase at E, ps; ``None`` when dormant.
+    x_fs : int or None
+        Estimated phase at E, in whole femtoseconds (see
+        :data:`~masterclock.domain.phase.FS_PER_PS`); ``None`` when dormant.
     y : float or None
         Estimated rate, ps/s; ``None`` when dormant, 0.0 for a 1-state
         series.
@@ -280,7 +281,7 @@ class Row(BaseModel):
 
     interpolated_datetime: AwareDatetime
     innovation: float | None
-    x: int | None
+    x_fs: int | None
     y: float | None
     d: float | None
     innovation_scale: float | None
@@ -295,7 +296,7 @@ class Row(BaseModel):
     scale_time_constant: float
     flags: str
 
-    _STATE: ClassVar[tuple[str, ...]] = ("x", "y", "d", "innovation_scale")
+    _STATE: ClassVar[tuple[str, ...]] = ("x_fs", "y", "d", "innovation_scale")
     """The fields a dormant row leaves empty and every other row fills."""
 
     @field_validator(
@@ -414,7 +415,7 @@ class Row(BaseModel):
         empty = [name for name in self._STATE if getattr(self, name) is None]
         if empty != (list(self._STATE) if dormant else []):
             message = (
-                "a dormant row has no x, y, d or innovation_scale and every other"
+                "a dormant row has no x_fs, y, d or innovation_scale and every other"
                 f" row has all four; flags {self.flags!r}, empty {empty}"
             )
             raise ValueError(message)
@@ -426,6 +427,25 @@ class Row(BaseModel):
             raise ValueError(message)
         self._check_model()
         return self
+
+    def known_state(self) -> tuple[int, float, float]:
+        """Give the row's phase, rate and drift.
+
+        Returns
+        -------
+        tuple of (int, float, float)
+            The phase in whole femtoseconds, the rate and the drift.
+
+        Raises
+        ------
+        FilterError
+            If the row is dormant, and so holds no state.
+        """
+        if self.x_fs is None or self.y is None or self.d is None:
+            message = f"a dormant row of {self.interpolated_datetime} holds no state"
+            _log.error(message)
+            raise FilterError(message)
+        return self.x_fs, self.y, self.d
 
     def _check_model(self) -> None:
         """Refuse a rate, drift or settling the row's model does not have.

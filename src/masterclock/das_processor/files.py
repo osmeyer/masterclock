@@ -45,7 +45,7 @@ from masterclock.das_processor.config import DDIFF_SUBDIRECTORY, MEAS_SUBDIRECTO
 from masterclock.das_processor.epochs import floor_to_ten_minutes, format_epoch
 from masterclock.das_processor.exceptions import DataFileError
 from masterclock.das_processor.measurements import PairMeasurement, TripleMeasurement
-from masterclock.das_processor.read_cd5m5m import DASMeasurement
+from masterclock.das_processor.read_cd5m5m import RMS_WIDTH, DASMeasurement
 from masterclock.domain.exceptions import FilterError, PhaseError
 from masterclock.domain.phase import EPOCH_SECONDS, FS_PER_PS
 from masterclock.domain.references import REFERENCE_PATTERN
@@ -117,7 +117,7 @@ MEAS_COLUMNS: Final[tuple[Column, ...]] = (
     Column("measurement_datetime", 32, "measurement time, UTC"),
     Column("measurement_mjd", 13, "measurement time, MJD"),
     Column("measured_phase", 6, "raw phase from the DAS, ps"),
-    Column("rms", 6, "RMS from the DAS, ps"),
+    Column("rms", RMS_WIDTH, "RMS from the DAS, ps"),
     Column("switch", 4, "switch position from the DAS"),
     Column("cycle_count", 12, "whole periods added in decycling"),
     Column("z", 16, "decycled phase interpolated to E, ps"),

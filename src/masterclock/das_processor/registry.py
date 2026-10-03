@@ -1,11 +1,13 @@
 """The series registry: which pairs and triples exist at an epoch, and their files.
 
-A pair (a, b) exists from the first epoch reference a measured b, and a
-triple (r, s, c) from the first epoch at which clock c is measured against
-s and the link between r and s is measured both ways; for r = s the self
-pair (r, r) stands for both ways, so every clock local to r has its local
-triple (r, r, c). A series is never removed: when its measurements stop, it
-goes on with predicted and then dormant rows.
+A pair (a, b) exists from the first epoch reference a measured b, and is
+never removed: when its measurements stop, it goes on with predicted and
+then dormant rows. A triple (r, s, c) is in an epoch when clock c is
+measured against s, the link between r and s is measured both ways, and s
+and c are in the same building at that epoch; for r = s the self pair
+(r, r) stands for both ways, so every clock local to r has its local
+triple (r, r, c). A triple whose s and c are not in one building, or whose
+clock has no location, is left out of the epoch, and writes no row.
 
 Each series has one file, named for the RF channel and the series' key, a
 pair's in the measurement archive and a triple's in the double-difference
@@ -15,6 +17,7 @@ the channel's files.
 
 import functools
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, NoReturn
@@ -108,9 +111,12 @@ def refs_of(das_block: DASData | None) -> frozenset[str]:
 
 
 def build_registry(
-    das_block: DASData | None, refs: frozenset[str], earlier_series: ExistingSeries
+    das_block: DASData | None,
+    refs: frozenset[str],
+    earlier_series: ExistingSeries,
+    locations: Mapping[str, int | None],
 ) -> tuple[tuple[PairKey, ...], tuple[TripleKey, ...]]:
-    """Give every pair and triple that exists at an epoch (design 3.4).
+    """Give every pair and triple an epoch holds (design 3.4).
 
     Parameters
     ----------
@@ -120,14 +126,19 @@ def build_registry(
         The epoch's references.
     earlier_series : ExistingSeries
         The series that existed before the epoch.
+    locations : Mapping of str to int or None
+        Each clock's location at the epoch; a clock missing here, or with
+        ``None``, has none.
 
     Returns
     -------
     tuple of (tuple of (str, str), tuple of (str, str, str))
-        The pairs and the triples, each sorted: every existing one, every
-        (reference, clock) the block measured, and every (r, s, c) for a
-        pair (s, c), its clock c a reference or not, and a reference r
-        whose link with s is a pair both ways.
+        The pairs and the triples, each sorted. The pairs are every
+        existing one and every (reference, clock) the block measured. The
+        triples are those of the following whose s and c are in one
+        building: every existing triple, and every (r, s, c) for a pair
+        (s, c), its clock c a reference or not, and a reference r whose
+        link with s is a pair both ways.
     """
     pairs = set(earlier_series.pairs)
     if das_block is not None:
@@ -140,7 +151,30 @@ def build_registry(
         for r in refs:
             if (r, s) in pairs and (s, r) in pairs:
                 triples.add((r, s, c))
-    return tuple(sorted(pairs)), tuple(sorted(triples))
+    return tuple(sorted(pairs)), tuple(
+        sorted((r, s, c) for r, s, c in triples if _in_one_building(s, c, locations))
+    )
+
+
+def _in_one_building(s: str, c: str, locations: Mapping[str, int | None]) -> bool:
+    """Tell whether a local reference and a clock are in the same building.
+
+    Parameters
+    ----------
+    s : str
+        The local reference.
+    c : str
+        The clock.
+    locations : Mapping of str to int or None
+        Each clock's location.
+
+    Returns
+    -------
+    bool
+        Whether both have a location, and it is the same.
+    """
+    s_location = locations.get(s)
+    return s_location is not None and s_location == locations.get(c)
 
 
 @functools.cache

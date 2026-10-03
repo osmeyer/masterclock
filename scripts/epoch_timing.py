@@ -131,7 +131,8 @@ def build_deployment(
     (folder / "clock_config.yaml").write_text(
         CLOCK_TYPES
         + "".join(
-            f"  {clock}: [{{type: {'mc' if clock.startswith('mc') else 'maser'}}}]\n"
+            f"  {clock}: [{{type: {'mc' if clock.startswith('mc') else 'maser'},"
+            " location: 1}]\n"
             for clock in clock_names
         ),
         encoding="utf-8",

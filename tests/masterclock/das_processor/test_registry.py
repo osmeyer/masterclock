@@ -3,10 +3,12 @@
 The rules covered: the references of an epoch are the clocks of its block
 named as references, the prefix and one digit; a pair exists for every
 reference and clock measured together, and is never removed once it
-exists; a triple (r, s, c) exists for every pair (s, c), its c a reference
-or not, and every reference r whose link with s is measured both ways, the
-self pair standing for both ways when r = s, so every clock local to r gets
-(r, r, c); the
+exists; a triple (r, s, c) is in an epoch for every pair (s, c), its c a
+reference or not, and every reference r whose link with s is measured both
+ways, the self pair standing for both ways when r = s, so every clock local
+to r gets (r, r, c), but only while s and c are in the same building, an
+existing triple left out when they are not, and none when the clock, the
+reference or both have no location; the
 keys come out sorted; a series' file is named for its channel and key, in
 the measurement or double-difference directory, built once and then given
 again, and a name that cannot name a file is refused every time; and the
@@ -55,6 +57,11 @@ def das_block_measuring(measured_pairs: list[tuple[str, str]]) -> DASData:
 REFS: Final = ("mc1", "mc2", "mc3")
 """Three invented references."""
 
+ONE_BUILDING: Final[dict[str, int | None]] = dict.fromkeys(
+    [*REFS, *(f"hm{i}" for i in range(20))], 1
+)
+"""Every clock of these tests in building 1."""
+
 
 def design_example() -> DASData:
     """Give design 3.3's example: three references, twenty clocks, each local."""
@@ -79,7 +86,7 @@ def test_the_design_example_gives_29_pairs_and_87_triples() -> None:
     """Give 3 self + 6 link + 20 clock pairs and 3 triples per pair (3.3)."""
     das_block = design_example()
     pairs, triples = registry.build_registry(
-        das_block, registry.refs_of(das_block), NO_SERIES
+        das_block, registry.refs_of(das_block), NO_SERIES, ONE_BUILDING
     )
     assert len(pairs) == 29
     assert len(triples) == 3 * 29
@@ -91,7 +98,7 @@ def test_every_clock_local_to_a_reference_gets_its_local_triple() -> None:
     """Give (r, r, c) for every clock c measured against r (3.3)."""
     das_block = design_example()
     _, triples = registry.build_registry(
-        das_block, registry.refs_of(das_block), NO_SERIES
+        das_block, registry.refs_of(das_block), NO_SERIES, ONE_BUILDING
     )
     for i in range(20):
         local_ref = REFS[i % 3]
@@ -105,7 +112,7 @@ def test_a_link_needs_both_directions() -> None:
         [("mc1", "mc1"), ("mc2", "mc2"), ("mc1", "mc2"), ("mc2", "hm7")]
     )
     _, triples = registry.build_registry(
-        das_block, registry.refs_of(das_block), NO_SERIES
+        das_block, registry.refs_of(das_block), NO_SERIES, ONE_BUILDING
     )
     assert triples == (
         ("mc1", "mc1", "mc1"),
@@ -121,7 +128,7 @@ def test_a_link_or_self_pair_seeds_triples_too() -> None:
         [(r, s) for r, s in permutations(REFS, 2)] + [(r, r) for r in REFS]
     )
     triples = registry.build_registry(
-        das_block, registry.refs_of(das_block), NO_SERIES
+        das_block, registry.refs_of(das_block), NO_SERIES, ONE_BUILDING
     )[1]
     assert len(triples) == 3 * 9
     assert {("mc1", "mc1", "mc1"), ("mc1", "mc1", "mc2"), ("mc1", "mc2", "mc1")} <= set(
@@ -132,16 +139,23 @@ def test_a_link_or_self_pair_seeds_triples_too() -> None:
 def test_a_local_triple_needs_the_self_pair() -> None:
     """Give (r, r, c) only when r is measured against itself."""
     das_block = das_block_measuring([("mc2", "hm7")])
-    assert registry.build_registry(das_block, frozenset({"mc2"}), NO_SERIES)[1] == ()
+    assert (
+        registry.build_registry(das_block, frozenset({"mc2"}), NO_SERIES, ONE_BUILDING)[
+            1
+        ]
+        == ()
+    )
 
 
-def test_a_series_is_never_removed() -> None:
-    """Keep every existing pair and triple, measured this epoch or not (3.4)."""
+def test_a_pair_is_never_removed_and_a_triple_kept_in_its_building() -> None:
+    """Keep every existing pair, and every triple in one building, measured or not."""
     earlier_series = registry.ExistingSeries(
         pairs=frozenset({("mc1", "hm9"), ("mc1", "mc1")}),
         triples=frozenset({("mc3", "mc1", "hm9")}),
     )
-    pairs, triples = registry.build_registry(None, frozenset(), earlier_series)
+    pairs, triples = registry.build_registry(
+        None, frozenset(), earlier_series, ONE_BUILDING
+    )
     assert pairs == (("mc1", "hm9"), ("mc1", "mc1"))
     assert triples == (("mc3", "mc1", "hm9"),)
 
@@ -153,7 +167,7 @@ def test_new_series_join_the_existing_ones() -> None:
     )
     das_block = das_block_measuring([("mc1", "mc1"), ("mc1", "hm7")])
     pairs, triples = registry.build_registry(
-        das_block, registry.refs_of(das_block), earlier_series
+        das_block, registry.refs_of(das_block), earlier_series, ONE_BUILDING
     )
     assert pairs == (("mc1", "hm7"), ("mc1", "hm9"), ("mc1", "mc1"))
     assert triples == (
@@ -161,6 +175,84 @@ def test_new_series_join_the_existing_ones() -> None:
         ("mc1", "mc1", "hm9"),
         ("mc1", "mc1", "mc1"),
     )
+
+
+# ----------------------------------------------------------------- buildings
+
+BUILDINGS: Final[dict[str, int | None]] = {
+    "mc1": 14,
+    "mc2": 14,
+    "mc3": 21,
+    "mc4": 33,
+    "mc5": 33,
+    "px2": 33,
+}
+"""Five references in three buildings, and px2 with mc4 and mc5 in 33."""
+
+ALL_REFS: Final = ("mc1", "mc2", "mc3", "mc4", "mc5")
+"""The five references."""
+
+
+def linked_block(clock_pairs: list[tuple[str, str]]) -> DASData:
+    """Give a block measuring every reference against every one, and ``clock_pairs``."""
+    reference_pairs = [(r, s) for r in ALL_REFS for s in ALL_REFS]
+    return das_block_measuring(reference_pairs + clock_pairs)
+
+
+def test_a_triple_needs_its_local_reference_in_its_clock_s_building() -> None:
+    """Give (r, s, px2) for every r only for s in building 33, as px2 is."""
+    das_block = linked_block([("mc4", "px2"), ("mc5", "px2"), ("mc1", "px2")])
+    _, triples = registry.build_registry(
+        das_block, registry.refs_of(das_block), NO_SERIES, BUILDINGS
+    )
+    px2_triples = {triple for triple in triples if triple[2] == "px2"}
+    assert px2_triples == {(r, s, "px2") for r in ALL_REFS for s in ("mc4", "mc5")}
+
+
+def test_a_reference_as_the_clock_follows_the_same_rule() -> None:
+    """Give (r, mc4, mc5) for every r, and no (r, mc1, mc5): mc1 is in 14."""
+    das_block = linked_block([])
+    _, triples = registry.build_registry(
+        das_block, registry.refs_of(das_block), NO_SERIES, BUILDINGS
+    )
+    assert {(r, "mc4", "mc5") for r in ALL_REFS} <= set(triples)
+    assert not {triple for triple in triples if triple[1:] == ("mc1", "mc5")}
+    assert {(r, "mc3", "mc3") for r in ALL_REFS} <= set(triples)
+
+
+def test_an_existing_triple_out_of_its_building_is_left_out() -> None:
+    """Leave out a triple whose clock is no longer in its local reference's building."""
+    earlier_series = registry.ExistingSeries(
+        pairs=frozenset({("mc1", "px2"), ("mc4", "px2")}),
+        triples=frozenset({("mc2", "mc1", "px2"), ("mc2", "mc4", "px2")}),
+    )
+    pairs, triples = registry.build_registry(
+        None, frozenset(), earlier_series, BUILDINGS
+    )
+    assert pairs == (("mc1", "px2"), ("mc4", "px2"))
+    assert triples == (("mc2", "mc4", "px2"),)
+
+
+@pytest.mark.parametrize("unplaced", [("px2",), ("mc4",), ("mc4", "px2")])
+def test_a_clock_or_reference_with_no_location_has_no_triple(
+    unplaced: tuple[str, ...],
+) -> None:
+    """Give no triple when the clock, its local reference or both have no location."""
+    das_block = linked_block([("mc4", "px2")])
+    locations = {**BUILDINGS, **dict.fromkeys(unplaced)}
+    _, triples = registry.build_registry(
+        das_block, registry.refs_of(das_block), NO_SERIES, locations
+    )
+    assert not {triple for triple in triples if triple[2] == "px2"}
+    without_entry = {
+        clock: location
+        for clock, location in BUILDINGS.items()
+        if clock not in unplaced
+    }
+    _, triples = registry.build_registry(
+        das_block, registry.refs_of(das_block), NO_SERIES, without_entry
+    )
+    assert not {triple for triple in triples if triple[2] == "px2"}
 
 
 # ---------------------------------------------------------------- file names

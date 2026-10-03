@@ -14,8 +14,9 @@ side, a pair the RMS limit too; whether any clock's settings change
 between two marks is told by the entries that take effect after the first,
 up to the second; a clock's location comes from its entries like any
 other setting, never from its type, a later entry moving it from its date,
-and is a positive whole number or not given at all; and the committed
-example file loads.
+and is a positive whole number or not given at all; every clock's
+location at a mark is the last its entries in force give, none before its
+first; and the committed example file loads.
 
 Every refusal names the file, then the problem, a merge or repeated key with
 its line and column, and is logged as raised; undated entries come first
@@ -508,6 +509,35 @@ def test_a_location_given_from_a_date_is_none_before_it(tmp_path: Path) -> None:
     loaded_config = read_config_text(tmp_path, yaml_text)
     assert loaded_config.entry_for("cs7", MARK_BEFORE_MJD_60980).location is None
     assert loaded_config.entry_for("cs7", MJD_60980_START).location == 33
+
+
+def test_every_clock_s_location_at_a_mark(tmp_path: Path) -> None:
+    """Give each clock's location at a mark: none, its first, or after a move."""
+    yaml_text = LOCATED_YAML.replace(
+        "  mc2: [{type: mc}]",
+        "  mc2: [{effective_mjd: 60990.0, type: mc, location: 14}]",
+    )
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    before_move = MJD_60990_START - timedelta(minutes=10)
+    assert loaded_config.locations_at(before_move) == {
+        "mc1": None,
+        "mc2": None,
+        "cs7": None,
+        "ox23": 14,
+    }
+    assert loaded_config.locations_at(MJD_60990_START) == {
+        "mc1": None,
+        "mc2": 14,
+        "cs7": None,
+        "ox23": 21,
+    }
+
+
+def test_locations_need_a_mark_with_a_timezone(tmp_path: Path) -> None:
+    """Refuse a mark that names no one instant."""
+    loaded_config = read_config_text(tmp_path, LOCATED_YAML)
+    with pytest.raises(ConfigError, match="no timezone"):
+        loaded_config.locations_at(MJD_60990_START.replace(tzinfo=None))
 
 
 def test_a_clock_with_its_own_settings_may_give_its_location(tmp_path: Path) -> None:

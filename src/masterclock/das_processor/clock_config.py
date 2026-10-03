@@ -655,6 +655,40 @@ class ClockConfig(BaseModel):
             if clock_entry.effective_mjd is not None
         )
 
+    def locations_at(self, epoch_start: datetime) -> dict[str, int | None]:
+        """Give every clock's location at a mark.
+
+        Parameters
+        ----------
+        epoch_start : datetime
+            The epoch start; must carry a timezone.
+
+        Returns
+        -------
+        dict of str to int or None
+            For each clock the file names, the location of the last of its
+            entries in force at ``epoch_start`` to give one, in the order
+            :meth:`entry_for` applies them; ``None`` when none does.
+
+        Raises
+        ------
+        ConfigError
+            If ``epoch_start`` has no timezone.
+        """
+        epoch_start = _aware(epoch_start)
+        locations: dict[str, int | None] = {}
+        for clock, clock_entries in self.clocks.items():
+            location = None
+            for clock_entry in _in_order(clock_entries):
+                if clock_entry.effective_mjd is not None and (
+                    mjd_to_datetime(clock_entry.effective_mjd) > epoch_start
+                ):
+                    break
+                if clock_entry.location is not None:
+                    location = clock_entry.location
+            locations[clock] = location
+        return locations
+
     def rms_limit(self, pair: PairKey) -> int:
         """Give a pair's RMS limit (design 9.1).
 

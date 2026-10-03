@@ -1,12 +1,14 @@
 """Tests for src/masterclock/das_processor/run.py.
 
 The rules covered: building an epoch resolves everything it needs: its
-references from its block; every pair and triple, the existing ones kept;
+references from its block; every pair, the existing ones kept, and every
+triple, existing or new, whose s and c are in one building at the epoch;
 the steering of every reference that steers a series, read over
 (E - T, E + T]; and each series' settings, a pair taking its second
 clock's entry and RMS limit and a triple its clock c's entry, kept from
 the last epoch of the run while its series and every clock's settings are
-unchanged; the steering files are read once in a run, each line parsed
+unchanged, and every clock's location, kept while no clock's entry
+changes; the steering files are read once in a run, each line parsed
 once; an epoch with no block has no references and the existing series
 only; and the epoch is checked to hold settings for exactly its
 series.
@@ -33,7 +35,8 @@ again; with no file, the epoch containing start_from_mjd. A roll-back is
 logged once at WARNING, with its reason, what it did and the newest row
 left, and nothing is logged when nothing was cut. A series whose newest row
 is not of the epoch before starts cold, in the segment after its newest
-row's.
+row's, as a triple does when its clock comes back to its building, run in
+one go or epoch by epoch.
 
 Each series takes the settings in force at its epoch; a link not accepted
 does not make its triple cold; the TRACE lines and steps with a settings
@@ -90,10 +93,10 @@ CLOCK_CONFIG_YAML: Final = (
     "  mc: {filter_states: 1, scale_time_constant: 30.0,"
     " initial_innovation_scale: 2.0, gap_limit: 40}\n"
     "clocks:\n"
-    "  mc1: [{type: mc}]\n"
-    "  mc2: [{type: mc}]\n"
-    "  mc3: [{type: mc}]\n"
-    "  ox23: [{type: maser}]\n"
+    "  mc1: [{type: mc, location: 1}]\n"
+    "  mc2: [{type: mc, location: 1}]\n"
+    "  mc3: [{type: mc, location: 1}]\n"
+    "  ox23: [{type: maser, location: 1}]\n"
 )
 """An invented clock configuration: three references and a maser."""
 
@@ -170,11 +173,7 @@ def test_an_epoch_holds_its_references_and_series(tmp_path: Path) -> None:
     assert epoch.refs == frozenset({"mc1", "mc2"})
     assert epoch.pairs == tuple(sorted(MEASURED_PAIRS))
     assert epoch.triples == tuple(
-        sorted(
-            (log_record, s, c)
-            for log_record in ("mc1", "mc2")
-            for s, c in MEASURED_PAIRS
-        )
+        sorted((r, s, c) for r in ("mc1", "mc2") for s, c in MEASURED_PAIRS)
     )
 
 
@@ -1499,8 +1498,8 @@ def test_each_series_takes_the_settings_in_force_at_its_epoch(tmp_path: Path) ->
     """Give the clock entry that took effect at or before E, not a later one (8.1)."""
     config, _ = make_deployment(tmp_path)
     dated_clock_config = CLOCK_CONFIG_YAML.replace(
-        "  ox23: [{type: maser}]\n",
-        "  ox23: [{type: maser},"
+        "  ox23: [{type: maser, location: 1}]\n",
+        "  ox23: [{type: maser, location: 1},"
         f" {{effective_mjd: {datetime_to_mjd(E)}, time_constant: 150.0}},"
         f" {{effective_mjd: {datetime_to_mjd(E + T)}, time_constant: 200.0}}]\n",
     )
@@ -1892,8 +1891,8 @@ def test_a_pair_the_epoch_does_not_hold_takes_part_unaccepted(tmp_path: Path) ->
 
 
 DATED_CLOCK_CONFIG_YAML: Final = CLOCK_CONFIG_YAML.replace(
-    "  ox23: [{type: maser}]\n",
-    "  ox23: [{type: maser},"
+    "  ox23: [{type: maser, location: 1}]\n",
+    "  ox23: [{type: maser, location: 1},"
     f" {{effective_mjd: {datetime_to_mjd(E + T)}, time_constant: 150.0}}]\n",
 )
 """The clock configuration, with ox23's time constant changing at E + T."""
@@ -2024,8 +2023,8 @@ def test_a_run_keeps_each_epoch_s_settings_for_the_next(
     dated_file = tmp_path / "dated.yaml"
     dated_file.write_text(
         CLOCK_CONFIG_YAML.replace(
-            "  ox23: [{type: maser}]\n",
-            f"  ox23: [{{type: maser}}, {{effective_mjd: {change_mjd},"
+            "  ox23: [{type: maser, location: 1}]\n",
+            f"  ox23: [{{type: maser, location: 1}}, {{effective_mjd: {change_mjd},"
             " time_constant: 150.0}]\n",
         ),
         encoding="utf-8",
@@ -2100,3 +2099,126 @@ def test_a_pair_and_a_triple_starting_again_start_in_their_next_segments(
     assert (pair_row.flags, pair_row.segment) == ("RD", 6)
     assert (triple_row.flags, triple_row.segment) == ("PD", 4)
     assert pair_step.step_results[("mc1", "mc1")].row.segment == 0
+
+
+# ------------------------------------------------------------------ buildings
+
+
+def test_a_triple_is_left_out_while_its_clock_is_in_another_building(
+    tmp_path: Path,
+) -> None:
+    """Hold no triple whose clock c is not in the building of its s (3.4)."""
+    config, _ = make_deployment(tmp_path)
+    moved_file = tmp_path / "moved.yaml"
+    moved_file.write_text(
+        CLOCK_CONFIG_YAML.replace(
+            "  ox23: [{type: maser, location: 1}]",
+            "  ox23: [{type: maser, location: 2}]",
+        ),
+        encoding="utf-8",
+    )
+    epoch = run.build_epoch(
+        E,
+        das_block_of(MEASURED_PAIRS),
+        NO_SERIES,
+        config,
+        read_clock_config(moved_file),
+    )
+    assert epoch.locations == {"mc1": 1, "mc2": 1, "mc3": 1, "ox23": 2}
+    assert epoch.pairs == tuple(sorted(MEASURED_PAIRS))
+    assert epoch.triples == tuple(
+        sorted(
+            (r, s, c) for r in ("mc1", "mc2") for s, c in MEASURED_PAIRS if c != "ox23"
+        )
+    )
+
+
+MOVING_CLOCK_CONFIG_YAML: Final = CLOCK_CONFIG_YAML.replace(
+    "  ox23: [{type: maser, location: 1}]\n",
+    "  ox23:\n"
+    "    - {type: maser, location: 1}\n"
+    f"    - {{effective_mjd: {datetime_to_mjd(LATE_START + 5 * T)}, location: 2}}\n"
+    f"    - {{effective_mjd: {datetime_to_mjd(LATE_START + 7 * T)}, location: 1}}\n",
+)
+"""The clock configuration, with ox23 in building 2 for two epochs from the sixth."""
+
+
+def moving_deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
+    """Give a loop deployment of ten epochs whose ox23 moves out and back."""
+    config, _ = make_loop_deployment(tmp_path)
+    moving_file = tmp_path / "moving.yaml"
+    moving_file.write_text(MOVING_CLOCK_CONFIG_YAML, encoding="utf-8")
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(10)])
+    return config, read_clock_config(moving_file)
+
+
+def test_locations_are_kept_until_a_clock_moves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Work locations out at the first epoch and at each move, and keep them else."""
+    config, clock_config = moving_deployment(tmp_path)
+    worked_out: list[datetime] = []
+    real_locations_at = ClockConfig.locations_at
+
+    def count_locations_at(
+        self: ClockConfig, epoch_start: datetime
+    ) -> dict[str, int | None]:
+        """Note the mark, then work the locations out."""
+        worked_out.append(epoch_start)
+        return real_locations_at(self, epoch_start)
+
+    monkeypatch.setattr(ClockConfig, "locations_at", count_locations_at)
+    loop_series = ExistingSeries(
+        pairs=frozenset({("mc1", "mc1"), ("mc1", "ox23")}),
+        triples=frozenset({("mc1", "mc1", "mc1"), ("mc1", "mc1", "ox23")}),
+    )
+    epochs: list[run.Epoch] = []
+    last_epoch = None
+    for epoch_index in range(9):
+        last_epoch = run.build_epoch(
+            LATE_START + epoch_index * T,
+            None,
+            loop_series,
+            config,
+            clock_config,
+            last_epoch,
+        )
+        epochs.append(last_epoch)
+    ox23_locations = [1] * 5 + [2] * 2 + [1] * 2
+    assert [epoch.locations["ox23"] for epoch in epochs] == ox23_locations
+    assert [("mc1", "mc1", "ox23") in epoch.triples for epoch in epochs] == [
+        ox23_location == 1 for ox23_location in ox23_locations
+    ]
+    assert worked_out == [LATE_START, LATE_START + 5 * T, LATE_START + 7 * T]
+    assert epochs[1].locations is not epochs[0].locations
+
+
+def test_a_triple_stops_while_its_clock_is_away_and_starts_cold_on_its_return(
+    tmp_path: Path,
+) -> None:
+    """Write no triple rows while ox23 is away, then start it cold, stepped or not."""
+    batch_config, clock_config = moving_deployment(tmp_path / "batch")
+    run.run(batch_config, clock_config, None, ShutdownHandler())
+    triple_rows = rows_of(batch_config, ("mc1", "mc1", "ox23"))
+    assert [row.interpolated_datetime for row in triple_rows] == [
+        LATE_START + epoch_index * T for epoch_index in (0, 1, 2, 3, 4, 7, 8, 9)
+    ]
+    assert len(rows_of(batch_config, ("mc1", "ox23"))) == 10
+    assert [(row.flags, row.segment) for row in triple_rows[3:]] == [
+        ("RD", 0),
+        ("ANU", 1),
+        ("RD", 2),
+        ("RD", 2),
+        ("ANU", 3),
+    ]
+    stepped_config, clock_config = moving_deployment(tmp_path / "stepped")
+    for _ in range(10):
+        run.run(stepped_config, clock_config, 1, ShutdownHandler())
+    for series_key in LOOP_SERIES:
+        batch_file = registry.series_file(
+            batch_config.processed.processed_path, "a", series_key
+        )
+        stepped_file = registry.series_file(
+            stepped_config.processed.processed_path, "a", series_key
+        )
+        assert batch_file.read_bytes() == stepped_file.read_bytes(), series_key

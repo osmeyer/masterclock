@@ -45,8 +45,8 @@ CLOCK_CONFIG_YAML: Final = (
     "  mc: {filter_states: 1, scale_time_constant: 30.0,"
     " initial_innovation_scale: 2.0, gap_limit: 40}\n"
     "clocks:\n"
-    "  mc1: [{type: mc}]\n"
-    "  ox23: [{type: maser}]\n"
+    "  mc1: [{type: mc, location: 1}]\n"
+    "  ox23: [{type: maser, location: 1}]\n"
 )
 """An invented clock configuration."""
 

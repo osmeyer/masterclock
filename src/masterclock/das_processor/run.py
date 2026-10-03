@@ -108,6 +108,8 @@ class Epoch:
         Every triple, sorted.
     series_params : dict of series key to SeriesParams
         Every series' settings at E.
+    locations : dict of str to int or None
+        Every clock's location at E, as the clock configuration gives it.
 
     Raises
     ------
@@ -123,6 +125,7 @@ class Epoch:
     pairs: tuple[PairKey, ...]
     triples: tuple[TripleKey, ...]
     series_params: dict[SeriesKey, SeriesParams]
+    locations: dict[str, int | None]
 
     def __post_init__(self) -> None:
         """Refuse a block of another epoch, or settings for other series.
@@ -197,7 +200,13 @@ def build_epoch(
         If a steering file cannot be read.
     """
     refs = refs_of(das_block)
-    pairs, triples = build_registry(das_block, refs, earlier_series)
+    kept_epoch = _configuration_kept(last_epoch, epoch_start, clock_config)
+    locations = (
+        clock_config.locations_at(epoch_start)
+        if kept_epoch is None
+        else dict(kept_epoch.locations)
+    )
+    pairs, triples = build_registry(das_block, refs, earlier_series, locations)
     series_keys: list[SeriesKey] = [*pairs, *triples]
     steering_refs = sorted(
         {mc for series_key in series_keys for mc in signs(series_key)}
@@ -208,15 +217,11 @@ def build_epoch(
         mc: steering_files.events(mc, epoch_start - _EPOCH, epoch_start + _EPOCH)
         for mc in steering_refs
     }
-    if (
-        last_epoch is not None
-        and last_epoch.interpolated_datetime < epoch_start
-        and (last_epoch.pairs, last_epoch.triples) == (pairs, triples)
-        and not clock_config.changes_between(
-            last_epoch.interpolated_datetime, epoch_start
-        )
+    if kept_epoch is not None and (kept_epoch.pairs, kept_epoch.triples) == (
+        pairs,
+        triples,
     ):
-        series_params = dict(last_epoch.series_params)
+        series_params = dict(kept_epoch.series_params)
     else:
         series_params = clock_config.params_for_series(series_keys, epoch_start)
     return Epoch(
@@ -227,7 +232,40 @@ def build_epoch(
         pairs=pairs,
         triples=triples,
         series_params=series_params,
+        locations=locations,
     )
+
+
+def _configuration_kept(
+    last_epoch: Epoch | None, epoch_start: datetime, clock_config: ClockConfig
+) -> Epoch | None:
+    """Give the last epoch when what the clock configuration gave it still holds.
+
+    Parameters
+    ----------
+    last_epoch : Epoch or None
+        The epoch processed before this one in the run, or ``None``.
+    epoch_start : datetime
+        The epoch start E.
+    clock_config : ClockConfig
+        The clock configuration.
+
+    Returns
+    -------
+    Epoch or None
+        ``last_epoch`` when it is earlier than E and no clock's entry takes
+        effect after it, up to E (see
+        :meth:`~masterclock.das_processor.clock_config.ClockConfig.changes_between`),
+        so every clock's settings and location are as they were; otherwise
+        ``None``.
+    """
+    if (
+        last_epoch is None
+        or last_epoch.interpolated_datetime >= epoch_start
+        or clock_config.changes_between(last_epoch.interpolated_datetime, epoch_start)
+    ):
+        return None
+    return last_epoch
 
 
 @dataclass(frozen=True, slots=True)

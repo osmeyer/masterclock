@@ -390,8 +390,8 @@ CHARACTERIZATION_CONFIG: Final = (
     "  clock: {filter_states: 1, scale_time_constant: 50.0,"
     " initial_innovation_scale: 2000.0, gap_limit: 432}\n"
     "clocks:\n"
-    + "".join(f"  {name}: [{{type: mc}}]\n" for name in REFERENCES)
-    + "".join(f"  {name}: [{{type: clock}}]\n" for name in CLOCKS)
+    + "".join(f"  {name}: [{{type: mc, location: 1}}]\n" for name in REFERENCES)
+    + "".join(f"  {name}: [{{type: clock, location: 1}}]\n" for name in CLOCKS)
 )
 """Every clock with one state, as design 15.3's run has them."""
 

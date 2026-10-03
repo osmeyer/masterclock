@@ -608,6 +608,37 @@ class ClockConfig(BaseModel):
         type_default = self._type_default(clock, clock_entries)
         return _settled(type_default, in_force, f"clock {clock}")
 
+    def changes_between(self, earlier: datetime, later: datetime) -> bool:
+        """Tell whether any clock's settings change after one mark, up to another.
+
+        Parameters
+        ----------
+        earlier : datetime
+            The earlier mark; must carry a timezone.
+        later : datetime
+            The later mark; must carry a timezone.
+
+        Returns
+        -------
+        bool
+            Whether an entry of any clock takes effect in (``earlier``,
+            ``later``]: the first mark at or after its ``effective_mjd``
+            lies there. Without one, every clock's settings at ``later``
+            are those at ``earlier`` (see :meth:`entry_for`).
+
+        Raises
+        ------
+        ConfigError
+            If either mark has no timezone.
+        """
+        earlier, later = _aware(earlier), _aware(later)
+        return any(
+            earlier < mjd_to_datetime(clock_entry.effective_mjd) <= later
+            for clock_entries in self.clocks.values()
+            for clock_entry in clock_entries
+            if clock_entry.effective_mjd is not None
+        )
+
     def rms_limit(self, pair: PairKey) -> int:
         """Give a pair's RMS limit (design 9.1).
 

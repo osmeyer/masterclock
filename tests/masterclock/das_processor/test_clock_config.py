@@ -10,7 +10,9 @@ and one
 between two marks from the next mark; every check of design 15.2 refuses
 the file with ConfigError; the RMS limit of a pair is its own, else its
 reference's, else the default; a series takes the settings of its clock
-side, a pair the RMS limit too; and the committed example file loads.
+side, a pair the RMS limit too; whether any clock's settings change
+between two marks is told by the entries that take effect after the first,
+up to the second; and the committed example file loads.
 
 Every refusal names the file, then the problem, a merge or repeated key with
 its line and column, and is logged as raised; undated entries come first
@@ -402,6 +404,59 @@ def test_every_series_gets_its_settings_with_each_clock_looked_up_once(
     monkeypatch.setattr(clock_config.ClockConfig, "entry_for", counting_entry_for)
     assert loaded_config.params_for_series(series_keys, MJD_60980_START) == expected
     assert sorted(looked_up) == ["mc1", "mc2", "ox23"]
+
+
+@pytest.mark.parametrize(
+    ("earlier", "later", "changed"),
+    [
+        (MARK_BEFORE_MJD_60980, MJD_60980_START, True),
+        (MARK_BEFORE_MJD_60980 - timedelta(days=3), MJD_60980_START, True),
+        (MARK_BEFORE_MJD_60980 - timedelta(days=3), MARK_BEFORE_MJD_60980, False),
+        (MJD_60980_START, MJD_60980_START + timedelta(days=3), False),
+        (MJD_60980_START, MJD_60980_START, False),
+    ],
+)
+def test_a_change_counts_between_two_marks_when_it_takes_effect_there(
+    tmp_path: Path, earlier: datetime, later: datetime, changed: bool
+) -> None:
+    """Count an entry taking effect after the earlier mark, up to the later."""
+    assert read_config_text(tmp_path).changes_between(earlier, later) is changed
+
+
+def test_a_change_between_two_marks_takes_effect_at_the_next_mark(
+    tmp_path: Path,
+) -> None:
+    """Count an entry dated between two marks as a change at the second."""
+    yaml_text = BASE_YAML.replace("effective_mjd: 60980.0", "effective_mjd: 60980.003")
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    next_mark = MJD_60980_START + timedelta(minutes=10)
+    assert not loaded_config.changes_between(MARK_BEFORE_MJD_60980, MJD_60980_START)
+    assert loaded_config.changes_between(MJD_60980_START, next_mark)
+
+
+def test_with_no_dated_entry_nothing_changes(tmp_path: Path) -> None:
+    """Give no change between any marks when no entry has a date."""
+    yaml_text = BASE_YAML.replace(
+        "    - {effective_mjd: 60980.0, time_constant: 150.0}\n", ""
+    )
+    assert not read_config_text(tmp_path, yaml_text).changes_between(
+        MARK_BEFORE_MJD_60980 - timedelta(days=3), MJD_60980_START
+    )
+
+
+@pytest.mark.parametrize("naive_mark", ["earlier", "later"])
+def test_a_change_between_marks_needs_marks_with_timezones(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, naive_mark: str
+) -> None:
+    """Raise and log ConfigError for a mark that names no one instant."""
+    marks = {"earlier": MARK_BEFORE_MJD_60980, "later": MJD_60980_START}
+    marks[naive_mark] = marks[naive_mark].replace(tzinfo=None)
+    loaded_config = read_config_text(tmp_path)
+    with pytest.raises(ConfigError, match="no timezone") as raised:
+        loaded_config.changes_between(marks["earlier"], marks["later"])
+    assert [log_record.getMessage() for log_record in caplog.records] == [
+        str(raised.value)
+    ]
 
 
 # ------------------------------------------------------------------ example

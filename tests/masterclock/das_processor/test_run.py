@@ -64,6 +64,7 @@ from masterclock.das_processor.registry import ExistingSeries
 from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.phase import PHASE_PERIOD
 from masterclock.domain.series import Row, SeriesKey, TripleKey, check_row
+from masterclock.domain.steering import steer_u
 
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """An invented epoch start."""
@@ -1814,3 +1815,89 @@ def test_files_ending_apart_are_rolled_back_with_that_reason(
             " 1 already there",
         )
     ]
+
+
+# ------------------------------------------------- work an epoch need not do
+
+
+def worked_epoch_done(
+    tmp_path: Path,
+) -> tuple[run.EpochDone, dict[SeriesKey, Row]]:
+    """Process the worked epoch, and give what it did and its last rows."""
+    last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): WORKED_LAST_ROW}
+    epoch = epoch_of(
+        [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
+    )
+    pair_step = run.process_pairs(epoch, last_rows)
+    triple_step = run.process_triples(epoch, last_rows, pair_step)
+    epoch_done = run.EpochDone(
+        epoch=epoch, pair_step=pair_step, triple_step=triple_step
+    )
+    return epoch_done, last_rows
+
+
+def test_nothing_is_worked_out_for_a_level_not_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Look at no series without WARNING, and make no TRACE line without TRACE."""
+    epoch_done, last_rows = worked_epoch_done(tmp_path)
+    looked_at: list[str] = []
+    monkeypatch.setattr(
+        run, "_log_series", lambda series_label, *_: looked_at.append(series_label)
+    )
+    monkeypatch.setattr(run, "_log_trace", lambda *_: looked_at.append("TRACE"))
+    with caplog.at_level(logging.ERROR, logger=RUN_LOGGER):
+        run.log_epoch(epoch_done, last_rows, "a")
+    assert (looked_at, caplog.records) == ([], [])
+    with caplog.at_level(logging.DEBUG, logger=RUN_LOGGER):
+        run.log_epoch(epoch_done, last_rows, "a")
+    assert len(looked_at) == 5 + 10
+    assert "TRACE" not in looked_at
+
+
+def test_no_steering_is_worked_out_when_no_event_falls_near(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Give each series the zero steer_u gives, without asking it, with no events."""
+    epoch_done, last_rows = worked_epoch_done(tmp_path)
+    epoch = epoch_done.epoch
+    assert not run._steered(epoch)
+    series_keys: list[SeriesKey] = [*epoch.pairs, *epoch.triples]
+    for series_key in series_keys:
+        assert run._steering_input(series_key, epoch, steered=False) == steer_u(
+            series_key, E, epoch.steering
+        )
+
+    asked: list[str] = []
+    monkeypatch.setattr(run, "steer_u", lambda *_: asked.append("steer_u"))
+    monkeypatch.setattr(run, "steer_w", lambda *_: asked.append("steer_w"))
+    pair_step = run.process_pairs(epoch, last_rows)
+    triple_step = run.process_triples(epoch, last_rows, pair_step)
+    assert asked == []
+    assert pair_step == epoch_done.pair_step
+    assert triple_step == epoch_done.triple_step
+
+
+def test_each_pair_s_part_in_the_triples_is_worked_out_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Work out each pair's part once an epoch, however many triples it is in."""
+    epoch_done, last_rows = worked_epoch_done(tmp_path)
+    real_component = run._component
+    worked_out: list[tuple[str, str]] = []
+
+    def count_component(pair_step: run.PairStep, pair: tuple[str, str]) -> Component:
+        """Note the pair, and work out its part as the run does."""
+        worked_out.append(pair)
+        return real_component(pair_step, pair)
+
+    monkeypatch.setattr(run, "_component", count_component)
+    triple_step = run.process_triples(epoch_done.epoch, last_rows, epoch_done.pair_step)
+    assert sorted(worked_out) == sorted(epoch_done.epoch.pairs)
+    assert triple_step == epoch_done.triple_step
+
+
+def test_a_pair_the_epoch_does_not_hold_takes_part_unaccepted(tmp_path: Path) -> None:
+    """Give a pair missing from the epoch the part _component would give it."""
+    epoch_done, _ = worked_epoch_done(tmp_path)
+    assert run._component(epoch_done.pair_step, ("mc9", "nav99")) == (run._NO_COMPONENT)

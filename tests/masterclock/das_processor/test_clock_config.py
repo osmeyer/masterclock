@@ -12,7 +12,10 @@ the file with ConfigError; the RMS limit of a pair is its own, else its
 reference's, else the default; a series takes the settings of its clock
 side, a pair the RMS limit too; whether any clock's settings change
 between two marks is told by the entries that take effect after the first,
-up to the second; and the committed example file loads.
+up to the second; a clock's location comes from its entries like any
+other setting, never from its type, a later entry moving it from its date,
+and is a positive whole number or not given at all; and the committed
+example file loads.
 
 Every refusal names the file, then the problem, a merge or repeated key with
 its line and column, and is logged as raised; undated entries come first
@@ -457,6 +460,80 @@ def test_a_change_between_marks_needs_marks_with_timezones(
     assert [log_record.getMessage() for log_record in caplog.records] == [
         str(raised.value)
     ]
+
+
+# ----------------------------------------------------------------- locations
+
+LOCATED_YAML: Final = BASE_YAML.replace(
+    "  ox23:\n    - {type: maser}\n",
+    "  ox23:\n    - {type: maser, location: 14}\n",
+).replace(
+    "    - {effective_mjd: 60980.0, time_constant: 150.0}\n",
+    "    - {effective_mjd: 60980.0, time_constant: 150.0}\n"
+    "    - {effective_mjd: 60990.0, location: 21}\n",
+)
+"""BASE_YAML with ox23 in building 14, moving to building 21 at MJD 60990."""
+
+MJD_60990_START: Final = datetime(2025, 11, 11, 0, 0, tzinfo=UTC)
+"""The mark at which MJD 60990 begins."""
+
+
+def test_a_clock_is_where_its_entries_put_it(tmp_path: Path) -> None:
+    """Give the location of the first entry, and none for a clock without one."""
+    loaded_config = read_config_text(tmp_path, LOCATED_YAML)
+    assert loaded_config.entry_for("ox23", MARK_BEFORE_MJD_60980).location == 14
+    assert loaded_config.entry_for("cs7", MARK_BEFORE_MJD_60980).location is None
+
+
+def test_a_clock_moves_at_the_mjd_of_its_move(tmp_path: Path) -> None:
+    """Move a clock from the mark its entry falls on, keeping its other settings."""
+    loaded_config = read_config_text(tmp_path, LOCATED_YAML)
+    before_move = loaded_config.entry_for(
+        "ox23", MJD_60990_START - timedelta(minutes=10)
+    )
+    after_move = loaded_config.entry_for("ox23", MJD_60990_START)
+    assert (before_move.location, after_move.location) == (14, 21)
+    assert before_move.model_copy(update={"location": 21}) == after_move
+    assert loaded_config.changes_between(
+        MJD_60990_START - timedelta(minutes=10), MJD_60990_START
+    )
+
+
+def test_a_location_given_from_a_date_is_none_before_it(tmp_path: Path) -> None:
+    """Give no location before a clock's first dated location, and it after."""
+    yaml_text = BASE_YAML.replace(
+        "  cs7: [{type: cesium}]",
+        "  cs7: [{type: cesium}, {effective_mjd: 60980.0, location: 33}]",
+    )
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    assert loaded_config.entry_for("cs7", MARK_BEFORE_MJD_60980).location is None
+    assert loaded_config.entry_for("cs7", MJD_60980_START).location == 33
+
+
+def test_a_clock_with_its_own_settings_may_give_its_location(tmp_path: Path) -> None:
+    """Take a location in a first entry that gives every setting itself."""
+    own_entry = OWN_SETTINGS_ENTRY.replace("}", ", location: 21}")
+    yaml_text = BASE_YAML.replace("  cs7: [{type: cesium}]", f"  rb9: [{own_entry}]")
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    assert loaded_config.entry_for("rb9", MARK_BEFORE_MJD_60980).location == 21
+
+
+def test_a_type_gives_no_location(tmp_path: Path) -> None:
+    """Refuse a location in a type's default: a building belongs to a clock."""
+    yaml_text = BASE_YAML.replace(
+        "  cesium: {filter_states: 2,", "  cesium: {location: 33, filter_states: 2,"
+    )
+    assert_refused(tmp_path, yaml_text, "types.cesium.location")
+
+
+@pytest.mark.parametrize("wrong_location", ["0", "-5", "5.0", "'33'", "true"])
+def test_a_location_is_a_positive_whole_number(
+    tmp_path: Path, wrong_location: str
+) -> None:
+    """Refuse a location of zero or less, a decimal, a string or a bool."""
+    located_entry = f"  cs7: [{{type: cesium, location: {wrong_location}}}]"
+    yaml_text = BASE_YAML.replace("  cs7: [{type: cesium}]", located_entry)
+    assert_refused(tmp_path, yaml_text, "location")
 
 
 # ------------------------------------------------------------------ example

@@ -4,8 +4,11 @@ One YAML file per deployment says what is known about its clocks. A clock
 has a type, whose default entry gives its estimator: how many states, its
 time constants, its initial innovation scale and its gap limit. A clock can
 then override any of those except its number of states, from the start or
-from a given MJD. The file also gives how many counted rejects make a series
-dormant, and the RMS limit of the pairs' gate.
+from a given MJD. A clock's entries may also give its location, the number
+of the building it is in, which a type never gives: a clock that moves gets
+an entry with the new building from the MJD of the move. The file also gives
+how many counted rejects make a series dormant, and the RMS limit of the
+pairs' gate.
 
 The file is read once, at the start of a run, with a safe YAML loader that
 refuses a key repeated in any mapping, and validated into frozen models
@@ -88,6 +91,9 @@ type _TimeConstant = Annotated[float, Field(ge=1, allow_inf_nan=False)]
 
 type _Scale = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 """An innovation scale, ps: above zero."""
+
+type _Location = Annotated[int, Field(gt=0)]
+"""A clock's location: the number of the building it is in, above zero."""
 
 
 class _Loader(yaml.SafeLoader):
@@ -204,6 +210,9 @@ class Entry(BaseModel):
         As in :class:`TypeDefault`; ``None`` to keep the value.
     initial_innovation_scale, gap_limit : optional
         As in :class:`TypeDefault`; ``None`` to keep the value.
+    location : int or None, optional
+        The building the clock is in from the entry's date, a positive
+        whole number; ``None`` to keep the location.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
@@ -215,6 +224,7 @@ class Entry(BaseModel):
     scale_time_constant: _TimeConstant | None = None
     initial_innovation_scale: _Scale | None = None
     gap_limit: PositiveInt | None = None
+    location: _Location | None = None
 
     def overrides(self) -> dict[str, object]:
         """Give the estimator values the entry sets.
@@ -228,7 +238,7 @@ class Entry(BaseModel):
 
 
 class ClockEntry(BaseModel):
-    """A clock's estimator settings at one mark, every value settled.
+    """A clock's estimator settings and location at one mark, every value settled.
 
     Parameters
     ----------
@@ -242,6 +252,9 @@ class ClockEntry(BaseModel):
         sigma0, ps.
     gap_limit : int
         G_max.
+    location : int or None, optional
+        The building the clock is in; ``None`` when no entry in force gives
+        one.
 
     Raises
     ------
@@ -257,6 +270,7 @@ class ClockEntry(BaseModel):
     scale_time_constant: _TimeConstant
     initial_innovation_scale: _Scale
     gap_limit: PositiveInt
+    location: _Location | None = None
 
     @model_validator(mode="after")
     def _check_time_constant(self) -> Self:
@@ -547,7 +561,9 @@ class ClockConfig(BaseModel):
                 f" setting; it leaves out {', '.join(missing_settings)}"
             )
             raise ValueError(message)
-        return TypeDefault.model_validate(first_entry.overrides())
+        own_settings = first_entry.overrides()
+        own_settings.pop("location", None)
+        return TypeDefault.model_validate(own_settings)
 
     def _check_gap(self, settled_entry: ClockEntry, settings_owner: str) -> None:
         """Refuse a gap limit below N_break.

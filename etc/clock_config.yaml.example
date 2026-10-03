@@ -24,14 +24,17 @@ types:
 
 # Each clock's entries. The first gives its type, or, for a clock no type
 # fits, every setting itself, holding from the start; a later one overrides
-# values other than filter_states, from effective_mjd on.
+# values other than filter_states, from effective_mjd on. An entry may give
+# the clock's location, the number of the building it is in; a clock that
+# moves gets an entry with its new building from the MJD of the move.
 clocks:
-  mc1:  [{type: mc}]
-  mc2:  [{type: mc}]
-  aog4: [{type: aog}]
-  cs3:  [{type: cesium}]
+  mc1:  [{type: mc, location: 3}]
+  mc2:  [{type: mc, location: 7}]
+  aog4: [{type: aog, location: 3}]
+  cs3:  [{type: cesium}, {effective_mjd: 60950.0, location: 7}]
   rb5:  [{type: fountain}]
-  ox6:  [{filter_states: 2, time_constant: 60.0, scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432}]
+  ox6:  [{filter_states: 2, time_constant: 60.0, scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432, location: 9}]
   hm7:
-    - {type: maser}
+    - {type: maser, location: 7}
     - {effective_mjd: 60980.0, time_constant: 150.0}
+    - {effective_mjd: 61000.0, location: 3}

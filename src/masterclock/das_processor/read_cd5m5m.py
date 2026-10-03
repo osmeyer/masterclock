@@ -27,8 +27,10 @@ its file is named for, one taken within :data:`EPOCH_EDGE` of the end of its
 own epoch, one whose time runs backwards, and one repeating a
 reference-clock pair already measured in the same epoch. The log names a
 skipped line by the reason it was refused for, so a line that parsed is
-never described as malformed. A skipped line never ends a read. A last line
-with no newline does: it makes the whole file malformed.
+never described as malformed. A line measured against one of
+:data:`SKIPPED_REFERENCES` is skipped too, with nothing logged. A skipped
+line never ends a read. A last line with no newline does: it makes the whole
+file malformed.
 
 A directory holds the daily files: :func:`read_all_blocks` scans it, keeps
 only regular files (or links to them) whose names match
@@ -139,6 +141,13 @@ A separator of its own rather than padding folded into the width of the
 column before it. The RMS is not bounded above, so a value wider than its
 column would otherwise run into the phase beside it and the line would stop
 being five fields.
+"""
+
+SKIPPED_REFERENCES: Final[frozenset[str]] = frozenset({"mc9"})
+"""References the DAS measures against that das_processor does not use.
+
+A line whose switch names one of them is skipped as soon as it parses, with
+nothing logged, before any other check, and is not remembered.
 """
 
 _log: Final[MasterClockLogger] = get_logger(__name__)
@@ -747,8 +756,10 @@ def read_measurements(data_file: Path) -> Iterator[DASMeasurement]:
     :data:`EPOCH_EDGE` of the end of their epoch, run backwards in time, or
     repeat a reference-clock pair already measured in the same epoch. Each is
     named in the log by the reason it was refused for, so only a line that
-    would not parse is called malformed. A skipped line is not remembered: it
-    sets neither the preceding time nor the pairs seen in the epoch.
+    would not parse is called malformed. A line that parses and was measured
+    against one of :data:`SKIPPED_REFERENCES` is skipped with nothing logged,
+    before the other checks. A skipped line is not remembered: it sets
+    neither the preceding time nor the pairs seen in the epoch.
 
     Parameters
     ----------
@@ -779,6 +790,8 @@ def read_measurements(data_file: Path) -> Iterator[DASMeasurement]:
                 _check_terminated(line, line_number, data_file)
                 try:
                     measurement = parse_line(line)
+                    if measurement.reference in SKIPPED_REFERENCES:
+                        continue
                     _check_day(measurement, file_mjd)
                     _check_early(measurement)
                     _check_forward(measurement, previous_mjd)

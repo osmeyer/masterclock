@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from masterclock.app.timeutil import datetime_to_mjd
-from masterclock.das_processor.read_cd5m5m import DASMeasurement
+from masterclock.das_processor.read_cd5m5m import SKIPPED_REFERENCES, DASMeasurement
 from masterclock.domain.phase import PHASE_PERIOD
 
 if TYPE_CHECKING:
@@ -52,8 +52,15 @@ They start one second after the epoch begins and end well before the last
 ten seconds, where the DAS reader refuses a measurement.
 """
 
-MAX_REFERENCES: Final = 10
-"""How many references a switch position can name: one digit."""
+REFERENCE_NAMES: Final = tuple(
+    reference_name
+    for reference_name in (f"mc{digit}" for digit in range(10))
+    if reference_name not in SKIPPED_REFERENCES
+)
+"""The references a switch position can name, one digit, that das_processor reads."""
+
+MAX_REFERENCES: Final = len(REFERENCE_NAMES)
+"""How many references a deployment can have."""
 
 DAS_PROCESSOR_COMMAND: Final = (sys.executable, "-m", "masterclock.das_processor")
 """The program timed."""
@@ -87,7 +94,7 @@ def measured_pairs_for(references: int, clocks: int) -> list[tuple[str, str]]:
         Each (reference, clock): ``mc<i>`` against every reference, then
         ``hm<n>`` against reference ``n mod references``.
     """
-    reference_names = [f"mc{i}" for i in range(references)]
+    reference_names = list(REFERENCE_NAMES[:references])
     measured_pairs = [(r, s) for r in reference_names for s in reference_names]
     measured_pairs += [
         (reference_names[clock_index % references], f"hm{clock_index:04d}")

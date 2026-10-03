@@ -5,7 +5,8 @@ lambda = exp(-1/M), a triple pole for three states and a double pole for
 two, and a 1-state series passes its measurement through; the prediction
 moves the last row's state on by one epoch and adds the steering input,
 with the phase exact; a dormant or missing last row gives no prediction;
-the update adds the gains times the innovation, the phase exact; and a
+the update adds the gains times the innovation, the phase exact, each
+model's gains worked out once and refused each time they do not exist; and a
 noise-free ramp or parabola is followed to within 1 ps, whether the phase
 is kept exact or each row stores it in whole femtoseconds.
 
@@ -214,6 +215,34 @@ def test_gains_refuse_a_model_and_time_constant_that_do_not_belong(
     """Refuse a time constant on 1 state, none on 2 or 3, or another model."""
     with pytest.raises(FilterError):
         estimator.gains(filter_states, M)
+
+
+@pytest.mark.parametrize(("filter_states", "M"), [(3, 100.0), (2, 30.0), (1, None)])
+def test_exact_gains_are_the_gains_with_the_phase_gain_exact(
+    filter_states: int, M: float | None
+) -> None:
+    """Give g as the fraction it holds, and h/T and 2k/T**2 as gains gives them."""
+    g, h_over_t, two_k_over_t2 = estimator.gains(filter_states, M)
+    phase_gain, *other_gains = estimator.exact_gains(filter_states, M)
+    assert isinstance(phase_gain, Fraction)
+    assert (phase_gain, *other_gains) == (exact(g), h_over_t, two_k_over_t2)
+
+
+def test_each_model_s_gains_are_worked_out_once() -> None:
+    """Give the very gains worked out the first time, and others for another model."""
+    first_gains = estimator.exact_gains(3, 100.0)
+    assert estimator.exact_gains(3, 100.0) is first_gains
+    assert estimator.exact_gains(3, 150.0) != first_gains
+
+
+def test_gains_that_do_not_exist_are_refused_every_time(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Refuse and log a model with no gains each time it is asked for."""
+    for _ in range(2):
+        with pytest.raises(FilterError, match="no gains"):
+            estimator.exact_gains(2, 0.5)
+    assert len(caplog.records) == 2
 
 
 # ---------------------------------------------------------------- predict

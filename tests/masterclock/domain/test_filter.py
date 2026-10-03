@@ -55,6 +55,8 @@ from fractions import Fraction
 from typing import Final, Literal
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from masterclock.domain import filter as estimator
 from masterclock.domain.exceptions import FilterError
@@ -618,6 +620,19 @@ def test_an_accept_takes_the_innovation_before_the_update() -> None:
     assert row.innovation_scale == math.sqrt(0.98 * 16 + 0.02 * 10.5**2)
 
 
+def test_an_innovation_given_as_a_float_gives_the_same_row() -> None:
+    """Build the same row and state whether nu is passed in or worked out."""
+    prediction = estimator.predict(last_row(), NO_STEERING_INPUT)
+    assert prediction is not None
+    innovation = 1_234_577 - prediction.x
+    assert estimator.accept(
+        moved_on(last_row()), prediction, innovation, 3, nu=float(innovation)
+    ) == estimator.accept(moved_on(last_row()), prediction, innovation, 3)
+    assert estimator.update(
+        prediction, innovation, 3, 100.0, nu=float(innovation)
+    ) == estimator.update(prediction, innovation, 3, 100.0)
+
+
 def test_an_accept_needs_a_series_with_an_innovation_scale() -> None:
     """Raise FilterError for an accept on a draft that has no scale."""
     draft = moved_on(last_row(), innovation_scale=None)
@@ -991,6 +1006,33 @@ def test_the_gate_is_five_innovation_scales_wide(
 ) -> None:
     """Pass an innovation of at most 5 sigma either way, compared exactly (U8)."""
     assert estimator.within_gate(innovation, innovation_scale) is in_gate
+
+
+@given(
+    innovation=st.fractions(max_denominator=10**12),
+    innovation_scale=st.floats(min_value=0.0, max_value=1e12),
+)
+def test_the_gate_compares_as_exact_fractions_do(
+    innovation: Fraction, innovation_scale: float
+) -> None:
+    """Pass exactly what a comparison of exact fractions passes (U8)."""
+    assert estimator.within_gate(innovation, innovation_scale) is (
+        abs(innovation) <= Fraction(estimator.K_OUT * innovation_scale)
+    )
+
+
+def test_the_gate_holds_exactly_at_its_edge() -> None:
+    """Pass an innovation exactly five scales out, refuse one a hair past it."""
+    edge = Fraction(estimator.K_OUT * 0.1)
+    assert estimator.within_gate(edge, 0.1)
+    assert estimator.within_gate(-edge, 0.1)
+    assert not estimator.within_gate(edge + Fraction(1, 2**80), 0.1)
+
+
+def test_the_gate_refuses_a_scale_that_is_not_finite() -> None:
+    """Raise FilterError when five scales are not a finite number."""
+    with pytest.raises(FilterError, match="not finite"):
+        estimator.within_gate(Fraction(1), float("inf"))
 
 
 @pytest.mark.parametrize(

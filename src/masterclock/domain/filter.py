@@ -45,6 +45,7 @@ from masterclock.domain.exceptions import FilterError
 from masterclock.domain.phase import (
     EPOCH_SECONDS,
     exact,
+    exact_ratio,
     from_fs,
     round_even,
     seconds,
@@ -151,7 +152,12 @@ def predict(last_row: Row | None, u: tuple[Fraction, float]) -> State | None:
 
 
 def update(
-    prediction: State, innovation: Fraction, filter_states: int, M: float | None
+    prediction: State,
+    innovation: Fraction,
+    filter_states: int,
+    M: float | None,
+    *,
+    nu: float | None = None,
 ) -> State:
     """Correct a prediction by the gains times the innovation.
 
@@ -165,6 +171,9 @@ def update(
         How many states the estimator has.
     M : float or None
         The time constant; ``None`` for one state.
+    nu : float or None, optional
+        ``float(innovation)``, when the caller has it already; worked out
+        here when ``None``.
 
     Returns
     -------
@@ -178,7 +187,8 @@ def update(
         If ``filter_states`` and ``M`` do not belong together (see :func:`gains`).
     """
     g, h_over_t, two_k_over_t2 = gains(filter_states, M)
-    nu = float(innovation)
+    if nu is None:
+        nu = float(innovation)
     return State(
         x=prediction.x + exact(g) * innovation,
         y=prediction.y + h_over_t * nu,
@@ -482,7 +492,12 @@ def hold(
 
 
 def accept(
-    draft: RowDraft, prediction: State, innovation: Fraction, scale_floor: float
+    draft: RowDraft,
+    prediction: State,
+    innovation: Fraction,
+    scale_floor: float,
+    *,
+    nu: float | None = None,
 ) -> Row:
     """Finish a draft as an accepted row: the prediction updated.
 
@@ -497,6 +512,9 @@ def accept(
     scale_floor : float
         The lowest the innovation scale may go, ps: the measurement's own
         rms for a pair, sigma_dd for a triple.
+    nu : float or None, optional
+        ``float(innovation)``, when the caller has it already; worked out
+        here when ``None``, once for the row.
 
     Returns
     -------
@@ -517,10 +535,11 @@ def accept(
         message = f"an accept at {draft.interpolated_datetime} has no innovation scale"
         _log.error(message)
         raise FilterError(message)
+    if nu is None:
+        nu = float(innovation)
     updated_state = update(
-        prediction, innovation, draft.filter_states, draft.time_constant
+        prediction, innovation, draft.filter_states, draft.time_constant, nu=nu
     )
-    nu = float(innovation)
     w = 1.0 / draft.scale_time_constant
     new_scale = math.sqrt(
         max((1 - w) * draft.innovation_scale**2 + w * nu**2, scale_floor**2)
@@ -673,14 +692,24 @@ def within_gate(innovation: Fraction, innovation_scale: float) -> bool:
     -------
     bool
         Whether the innovation is at most :data:`K_OUT` scales either way,
-        compared exactly.
+        compared exactly: the float K_OUT times the scale is taken at the
+        value it holds, and both sides are compared as whole numbers.
+
+    Raises
+    ------
+    FilterError
+        If K_OUT times the scale is not finite.
 
     Examples
     --------
     >>> within_gate(Fraction(15), 3.0), within_gate(Fraction(-31, 2), 3.0)
     (True, False)
     """
-    return abs(innovation) <= exact(K_OUT * innovation_scale)
+    gate_numerator, gate_denominator = exact_ratio(K_OUT * innovation_scale)
+    return (
+        abs(innovation.numerator) * gate_denominator
+        <= gate_numerator * innovation.denominator
+    )
 
 
 def rms_ok(rms: int, rms_max: int | None) -> bool:
@@ -1197,7 +1226,8 @@ def _gate(
         If a row breaks a rule of :class:`Row`.
     """
     innovation = measurement.z - prediction.x
-    draft.innovation = float(innovation)
+    nu = float(innovation)
+    draft.innovation = nu
     if draft.innovation_scale is None:
         message = f"a measurement at {draft.interpolated_datetime} has no scale"
         _log.error(message)
@@ -1207,7 +1237,7 @@ def _gate(
         measurement.rms, series_params.rms_max
     )
     if in_gate and rms_passes and not excluded:
-        return accept(draft, prediction, innovation, measurement.scale_floor)
+        return accept(draft, prediction, innovation, measurement.scale_floor, nu=nu)
     if in_gate and excluded:
         return hold(draft, prediction, "X", series_params)
     count_reject(draft, innovation)

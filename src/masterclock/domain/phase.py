@@ -142,6 +142,39 @@ def exact(number: float) -> Fraction:
     return Fraction(number)
 
 
+def exact_ratio(number: float) -> tuple[int, int]:
+    """Give the exact value a float holds as a whole numerator and denominator.
+
+    The same value :func:`exact` gives, as two whole numbers, for an exact
+    comparison made without building a fraction.
+
+    Parameters
+    ----------
+    number : float
+        A finite float.
+
+    Returns
+    -------
+    tuple of (int, int)
+        The numerator and the denominator, above zero, in lowest terms.
+
+    Raises
+    ------
+    FilterError
+        If ``number`` is nan or infinite.
+
+    Examples
+    --------
+    >>> exact_ratio(2.5), exact_ratio(-0.75)
+    ((5, 2), (-3, 4))
+    """
+    if not math.isfinite(number):
+        message = f"value {number} is not finite"
+        _log.error(message)
+        raise FilterError(message)
+    return number.as_integer_ratio()
+
+
 def round_even(exact_sum: Fraction | int) -> int:
     """Round an exact value to the nearest whole number, a tie to the even one.
 

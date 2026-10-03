@@ -33,6 +33,7 @@ takes the series' measurement as plain values (:class:`FilterInput`) and
 gives its row and whether it cold-started (:class:`StepResult`).
 """
 
+import functools
 import math
 from dataclasses import dataclass
 from datetime import datetime
@@ -117,6 +118,40 @@ def gains(filter_states: int, M: float | None) -> tuple[float, float, float]:
     return (1 - lam**2, (1 - lam) ** 2 / _T, 0.0)
 
 
+@functools.cache
+def exact_gains(filter_states: int, M: float | None) -> tuple[Fraction, float, float]:
+    """Give the gains of :func:`gains`, the phase gain as the fraction it holds.
+
+    Each model's gains are worked out once in a run and the same values
+    given after, since every accepted row of a series uses them.
+
+    Parameters
+    ----------
+    filter_states : int
+        How many states the estimator has: 1, 2 or 3.
+    M : float or None
+        The time constant, epochs; ``None`` for one state.
+
+    Returns
+    -------
+    tuple of (Fraction, float, float)
+        g exactly, as :func:`~masterclock.domain.phase.exact` gives it, then
+        h/T and 2k/T**2.
+
+    Raises
+    ------
+    FilterError
+        As :func:`gains`, each time it is asked.
+
+    Examples
+    --------
+    >>> exact_gains(1, None)
+    (Fraction(1, 1), 0.0, 0.0)
+    """
+    g, h_over_t, two_k_over_t2 = gains(filter_states, M)
+    return exact(g), h_over_t, two_k_over_t2
+
+
 def predict(last_row: Row | None, u: tuple[Fraction, float]) -> State | None:
     """Predict a series' state at the next epoch from its last row.
 
@@ -186,11 +221,11 @@ def update(
     FilterError
         If ``filter_states`` and ``M`` do not belong together (see :func:`gains`).
     """
-    g, h_over_t, two_k_over_t2 = gains(filter_states, M)
+    g, h_over_t, two_k_over_t2 = exact_gains(filter_states, M)
     if nu is None:
         nu = float(innovation)
     return State(
-        x=prediction.x + exact(g) * innovation,
+        x=prediction.x + g * innovation,
         y=prediction.y + h_over_t * nu,
         d=prediction.d + two_k_over_t2 * nu if filter_states == 3 else 0.0,
     )

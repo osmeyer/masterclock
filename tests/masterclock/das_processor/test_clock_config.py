@@ -540,6 +540,21 @@ def test_a_reference_has_the_reference_type_not_its_own_settings(
     assert_refused(tmp_path, yaml_text, "mc1 is a reference, so of type mc")
 
 
+def test_a_clock_named_like_a_reference_but_not_one_takes_any_type(
+    tmp_path: Path,
+) -> None:
+    """Accept a type other than mc for a name of mc and more than one digit."""
+    yaml_text = BASE_YAML.replace(
+        "  cs7: [{type: cesium}]", "  cs7: [{type: cesium}]\n  mcq: [{type: cesium}]"
+    )
+    assert (
+        read_config_text(tmp_path, yaml_text)
+        .entry_for("mcq", MJD_60980_START)
+        .filter_states
+        == 2
+    )
+
+
 def test_a_clock_with_its_own_settings_keeps_its_number_of_states(
     tmp_path: Path,
 ) -> None:

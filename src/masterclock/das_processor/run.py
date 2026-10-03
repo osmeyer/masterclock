@@ -12,9 +12,10 @@ import logging
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from fractions import Fraction
 from pathlib import Path
 from typing import Final
+
+from gmpy2 import mpq
 
 from masterclock.app.log import TRACE, MasterClockLogger, get_logger
 from masterclock.app.shutdown import ShutdownHandler
@@ -79,7 +80,7 @@ _TRIPLE: Final[int] = 3
 _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
-_NO_STEERING_INPUT: Final[tuple[Fraction, float]] = (Fraction(0), 0.0)
+_NO_STEERING_INPUT: Final[tuple[mpq, float]] = (mpq(0), 0.0)
 """The steering input of a series no event moves: u_x and u_y both zero."""
 
 _NO_COMPONENT: Final[Component] = Component(accepted=False)
@@ -274,7 +275,7 @@ def _steered(epoch: Epoch) -> bool:
 
 def _steering_input(
     series_key: SeriesKey, epoch: Epoch, *, steered: bool
-) -> tuple[Fraction, float]:
+) -> tuple[mpq, float]:
     """Give a series' steering input over the epoch before E.
 
     Parameters
@@ -289,7 +290,7 @@ def _steering_input(
 
     Returns
     -------
-    tuple of (Fraction, float)
+    tuple of (mpq, float)
         What :func:`~masterclock.domain.steering.steer_u` gives; zero, as it
         would give, when no event falls in the window.
     """
@@ -351,7 +352,7 @@ def _innovations(
     measurements: Mapping[PairKey, PairMeasurement],
     predictions: Mapping[PairKey, State | None],
     last_rows: Mapping[SeriesKey, Row],
-) -> tuple[dict[PairKey, Fraction], dict[PairKey, float]]:
+) -> tuple[dict[PairKey, mpq], dict[PairKey, float]]:
     """Give the pairs' innovations and scales for screening and the slip check.
 
     Parameters
@@ -378,7 +379,7 @@ def _innovations(
             and last_row.innovation_scale is not None
         ):
             scales[pair] = last_row.innovation_scale
-    innovations: dict[PairKey, Fraction] = {}
+    innovations: dict[PairKey, mpq] = {}
     for pair, measurement in measurements.items():
         prediction = predictions[pair]
         if prediction is not None:

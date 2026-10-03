@@ -16,10 +16,10 @@ nothing.
 
 import dataclasses
 from datetime import UTC, datetime, timedelta
-from fractions import Fraction
 from typing import Final
 
 import pytest
+from gmpy2 import mpq
 
 from masterclock.domain import series
 from masterclock.domain.exceptions import FilterError
@@ -83,9 +83,9 @@ ONE_STATE_FIELDS: Final[dict[str, object]] = {
 
 
 def test_a_state_holds_its_phase_exactly() -> None:
-    """Keep x as the Fraction given, and d as 0.0 when it is not given."""
-    built_state = series.State(x=Fraction(1, 3), y=0.5)
-    assert built_state.x == Fraction(1, 3)
+    """Keep x as the mpq given, and d as 0.0 when it is not given."""
+    built_state = series.State(x=mpq(1, 3), y=0.5)
+    assert built_state.x == mpq(1, 3)
     assert built_state.d == 0.0
 
 
@@ -300,7 +300,7 @@ def test_no_counter_of_a_row_is_below_zero(counter_field: str) -> None:
 def test_every_type_is_frozen() -> None:
     """Refuse any change to a built state, settings or row."""
     with pytest.raises(dataclasses.FrozenInstanceError):
-        series.State(x=Fraction(0), y=0.0).y = 1.0  # type: ignore[misc]
+        series.State(x=mpq(0), y=0.0).y = 1.0  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):
         make_series_params().M = 1.0  # type: ignore[misc]
     with pytest.raises(dataclasses.FrozenInstanceError):

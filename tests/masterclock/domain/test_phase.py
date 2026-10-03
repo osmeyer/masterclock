@@ -18,10 +18,10 @@ each error is logged as raised.
 import dataclasses
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from fractions import Fraction
 from typing import Final
 
 import pytest
+from gmpy2 import mpq
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -35,7 +35,7 @@ EPOCH_START: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 
 def test_the_period_is_one_cycle_of_5_mhz_in_picoseconds() -> None:
     """Make the period exactly 1 / 5 MHz, written in picoseconds."""
-    assert Fraction(phase.PHASE_PERIOD, 10**12) == Fraction(1, 5_000_000)
+    assert mpq(phase.PHASE_PERIOD, 10**12) == mpq(1, 5_000_000)
 
 
 def test_the_largest_phase_is_one_short_of_a_period() -> None:
@@ -49,14 +49,14 @@ def test_the_largest_phase_is_one_short_of_a_period() -> None:
 def test_an_offset_is_exact_to_the_microsecond() -> None:
     """Give 137.2032 s as exactly 1 372 032 / 10 000, not a float near it."""
     later_instant = EPOCH_START + timedelta(seconds=137, microseconds=203_200)
-    assert phase.seconds(later_instant, EPOCH_START) == Fraction(1_372_032, 10_000)
+    assert phase.seconds(later_instant, EPOCH_START) == mpq(1_372_032, 10_000)
 
 
 def test_an_offset_can_be_negative() -> None:
     """Give an earlier first datetime as a negative offset."""
-    assert phase.seconds(
-        EPOCH_START, EPOCH_START + timedelta(microseconds=1)
-    ) == Fraction(-1, 10**6)
+    assert phase.seconds(EPOCH_START, EPOCH_START + timedelta(microseconds=1)) == mpq(
+        -1, 10**6
+    )
 
 
 @pytest.mark.parametrize(
@@ -79,7 +79,7 @@ def test_a_naive_datetime_is_refused(
 def test_an_offset_is_its_microseconds_over_a_million(microseconds: int) -> None:
     """Give any offset as its whole number of microseconds over 10**6."""
     later_instant = EPOCH_START + timedelta(microseconds=microseconds)
-    assert phase.seconds(later_instant, EPOCH_START) == Fraction(microseconds, 10**6)
+    assert phase.seconds(later_instant, EPOCH_START) == mpq(microseconds, 10**6)
 
 
 # ------------------------------------------------------------------- exact
@@ -87,8 +87,8 @@ def test_an_offset_is_its_microseconds_over_a_million(microseconds: int) -> None
 
 def test_a_float_becomes_the_fraction_it_holds() -> None:
     """Give 0.1 as the binary value the float holds, not as one tenth."""
-    assert phase.exact(0.1) == Fraction(3_602_879_701_896_397, 2**55)
-    assert phase.exact(0.1) != Fraction(1, 10)
+    assert phase.exact(0.1) == mpq(3_602_879_701_896_397, 2**55)
+    assert phase.exact(0.1) != mpq(1, 10)
 
 
 @pytest.mark.parametrize("bad_number", [float("nan"), float("inf"), float("-inf")])
@@ -101,17 +101,17 @@ def test_a_value_that_is_not_finite_is_refused(bad_number: float) -> None:
 @given(st.floats(allow_nan=False, allow_infinity=False))
 def test_every_finite_float_is_held_exactly(number: float) -> None:
     """Give a fraction equal to the float, numerator and denominator alike."""
-    assert phase.exact(number) == Fraction(*number.as_integer_ratio())
+    assert phase.exact(number) == mpq(*number.as_integer_ratio())
 
 
 @given(st.floats(allow_nan=False, allow_infinity=False))
 def test_a_float_s_ratio_is_the_fraction_it_holds(number: float) -> None:
     """Give the numerator and denominator of the value exact gives, in lowest terms."""
     numerator, denominator = phase.exact_ratio(number)
-    assert Fraction(numerator, denominator) == phase.exact(number)
+    assert mpq(numerator, denominator) == phase.exact(number)
     assert (numerator, denominator) == (
-        phase.exact(number).numerator,
-        phase.exact(number).denominator,
+        int(phase.exact(number).numerator),
+        int(phase.exact(number).denominator),
     )
 
 
@@ -133,17 +133,17 @@ def test_a_ratio_of_a_value_that_is_not_finite_is_refused(
 @pytest.mark.parametrize(
     ("exact_sum", "expected_round"),
     [
-        (Fraction(5, 2), 2),
-        (Fraction(7, 2), 4),
-        (Fraction(-5, 2), -2),
-        (Fraction(-7, 2), -4),
-        (Fraction(12_345_773_124, 10_000), 1_234_577),
-        (Fraction(2**63 * 2 + 1, 2), 2**63),
+        (mpq(5, 2), 2),
+        (mpq(7, 2), 4),
+        (mpq(-5, 2), -2),
+        (mpq(-7, 2), -4),
+        (mpq(12_345_773_124, 10_000), 1_234_577),
+        (mpq(2**63 * 2 + 1, 2), 2**63),
         (17, 17),
     ],
 )
 def test_rounding_is_to_nearest_with_ties_to_even(
-    exact_sum: Fraction, expected_round: int
+    exact_sum: mpq, expected_round: int
 ) -> None:
     """Round 2.5 to 2, 3.5 to 4 and -2.5 to -2, exactly at any size."""
     rounded_result = phase.round_even(exact_sum)
@@ -154,7 +154,7 @@ def test_rounding_is_to_nearest_with_ties_to_even(
 @given(st.integers(min_value=-(2**70), max_value=2**70))
 def test_every_half_rounds_to_even(whole_number: int) -> None:
     """Round every n + 1/2 to whichever of n and n + 1 is even."""
-    rounded_result = phase.round_even(Fraction(2 * whole_number + 1, 2))
+    rounded_result = phase.round_even(mpq(2 * whole_number + 1, 2))
     assert rounded_result in {whole_number, whole_number + 1}
     assert rounded_result % 2 == 0
 
@@ -200,17 +200,15 @@ def test_a_large_phase_plus_a_half_is_a_tie_to_even(whole_phase: int) -> None:
 @pytest.mark.parametrize(
     ("phase_ps", "expected_fs"),
     [
-        (Fraction(12_345_744_574, 10_000), 1_234_574_457),
-        (Fraction(1, 2000), 0),
-        (Fraction(3, 2000), 2),
-        (Fraction(-1, 2000), 0),
-        (Fraction(-3, 2000), -2),
+        (mpq(12_345_744_574, 10_000), 1_234_574_457),
+        (mpq(1, 2000), 0),
+        (mpq(3, 2000), 2),
+        (mpq(-1, 2000), 0),
+        (mpq(-3, 2000), -2),
         (7, 7_000),
     ],
 )
-def test_a_phase_rounds_to_whole_femtoseconds(
-    phase_ps: Fraction, expected_fs: int
-) -> None:
+def test_a_phase_rounds_to_whole_femtoseconds(phase_ps: mpq, expected_fs: int) -> None:
     """Round to the nearest femtosecond, a tie to the even one."""
     assert phase.to_fs(phase_ps) == expected_fs
 
@@ -219,7 +217,7 @@ def test_a_phase_rounds_to_whole_femtoseconds(
 def test_femtoseconds_come_back_exactly(phase_fs: int) -> None:
     """Give back the same whole femtoseconds after a turn through picoseconds."""
     assert phase.to_fs(phase.from_fs(phase_fs)) == phase_fs
-    assert phase.from_fs(phase_fs) == Fraction(phase_fs, 1000)
+    assert phase.from_fs(phase_fs) == mpq(phase_fs, 1000)
 
 
 # -------------------------------------------------------------- decycling
@@ -236,15 +234,15 @@ def test_an_epoch_lasts_600_seconds() -> None:
 def test_the_worked_epoch_decycles_to_six_cycles() -> None:
     """Reproduce Appendix A: n = 6 and z_E = 1 234 577."""
     prediction = State(x=1_234_567 + phase.exact(0.0123) * 600, y=0.0123, d=0.0)
-    delta = Fraction(1_372_032, 10_000)
-    decycled = phase.decycle(34_579, delta, Fraction(0), prediction, None)
+    delta = mpq(1_372_032, 10_000)
+    decycled = phase.decycle(34_579, delta, mpq(0), prediction, None)
     assert decycled == phase.Decycled(cycle_count=6, z=1_234_577)
 
 
-def predicted_motion(prediction: State, delta: Fraction) -> Fraction:
+def predicted_motion(prediction: State, delta: mpq) -> mpq:
     """Work out y delta + d delta**2 / 2 exactly, as the reference does."""
-    y = Fraction(*prediction.y.as_integer_ratio())
-    d = Fraction(*prediction.d.as_integer_ratio())
+    y = mpq(*prediction.y.as_integer_ratio())
+    d = mpq(*prediction.d.as_integer_ratio())
     return y * delta + d * delta * delta / 2
 
 
@@ -262,7 +260,7 @@ def test_a_measurement_decycles_to_the_truth(
     drift: float,
     microseconds: int,
     prediction_error: int,
-    w: Fraction,
+    w: mpq,
 ) -> None:
     """Recover the whole phase with a prediction up to 0.45 P wrong (U3).
 
@@ -271,9 +269,9 @@ def test_a_measurement_decycles_to_the_truth(
     large enough that its motion over the measurement offset reaches 0.45 P
     too, so a decycling that left the motion out would miss whole periods.
     """
-    delta = Fraction(microseconds, 10**6)
+    delta = mpq(microseconds, 10**6)
     reading = true_phase % P
-    motion_ps = predicted_motion(State(x=Fraction(0), y=rate, d=drift), delta)
+    motion_ps = predicted_motion(State(x=mpq(0), y=rate, d=drift), delta)
     prediction = State(x=true_phase - motion_ps - w + prediction_error, y=rate, d=drift)
     decycled = phase.decycle(reading, delta, w, prediction, None)
     assert decycled.cycle_count == (true_phase - reading) // P
@@ -289,27 +287,27 @@ def test_a_ramp_decycles_across_every_wrap(rate: float, start_phase: int) -> Non
     by enough to put the prediction 0.45 P off, so every wrap is crossed with
     the decycling bound nearly used up.
     """
-    epoch_seconds = Fraction(phase.EPOCH_SECONDS)
+    epoch_seconds = mpq(phase.EPOCH_SECONDS)
     wrong_rate = rate + 0.45 * P / phase.EPOCH_SECONDS
     previous_z = start_phase
     for epoch_number in range(1, 40):
-        true_phase = start_phase + round(
-            Fraction(*Fraction(rate).as_integer_ratio()) * epoch_seconds * epoch_number
+        true_phase = start_phase + phase.round_even(
+            mpq(*rate.as_integer_ratio()) * epoch_seconds * epoch_number
         )
         reading = true_phase % P
         prediction = State(
             x=previous_z + phase.exact(wrong_rate) * epoch_seconds, y=wrong_rate, d=0.0
         )
-        decycled = phase.decycle(reading, Fraction(0), Fraction(0), prediction, None)
+        decycled = phase.decycle(reading, mpq(0), mpq(0), prediction, None)
         assert decycled.z == true_phase, epoch_number
         previous_z = decycled.z
 
 
 def test_a_value_on_an_exact_half_rounds_to_even() -> None:
     """Round a z_E that falls on n + 1/2 to the even neighbour, once."""
-    prediction = State(x=Fraction(100), y=0.5, d=0.0)
+    prediction = State(x=mpq(100), y=0.5, d=0.0)
     for reading, expected_z in ((101, 100), (103, 102)):
-        decycled = phase.decycle(reading, Fraction(1), Fraction(0), prediction, None)
+        decycled = phase.decycle(reading, mpq(1), mpq(0), prediction, None)
         assert decycled.z == expected_z
 
 
@@ -321,34 +319,34 @@ def test_a_value_on_an_exact_half_rounds_to_even() -> None:
 def test_large_phases_decycle_exactly(
     whole_phase: int, rate: float, microseconds: int
 ) -> None:
-    """Match a Fraction reference for phases beyond 2**53 (U27, decycling)."""
-    delta = Fraction(microseconds, 10**6)
-    motion_ps = predicted_motion(State(x=Fraction(0), y=rate), delta)
-    prediction = State(x=Fraction(whole_phase), y=rate)
-    reading = round(whole_phase + motion_ps) % P
-    decycled = phase.decycle(reading, delta, Fraction(0), prediction, None)
-    n = round((whole_phase + motion_ps - reading) / P)
+    """Match an mpq reference for phases beyond 2**53 (U27, decycling)."""
+    delta = mpq(microseconds, 10**6)
+    motion_ps = predicted_motion(State(x=mpq(0), y=rate), delta)
+    prediction = State(x=mpq(whole_phase), y=rate)
+    reading = phase.round_even(whole_phase + motion_ps) % P
+    decycled = phase.decycle(reading, delta, mpq(0), prediction, None)
+    n = phase.round_even((whole_phase + motion_ps - reading) / P)
     assert decycled.cycle_count == n
-    assert decycled.z == round(reading + n * P - motion_ps)
+    assert decycled.z == phase.round_even(reading + n * P - motion_ps)
 
 
 @pytest.mark.parametrize(
     ("anchor", "reading", "w", "cycles"),
     [
-        (None, 123, Fraction(0), 0),
-        (None, 123, Fraction(50), 0),
-        (P + 123, 123, Fraction(0), 1),
-        (-P + 100, 100, Fraction(0), -1),
-        (5 * P + 10, P - 10, Fraction(0), 4),
-        (10, P - 10, Fraction(0), -1),
-        (P + 123, 123, Fraction(P), 2),
+        (None, 123, mpq(0), 0),
+        (None, 123, mpq(50), 0),
+        (P + 123, 123, mpq(0), 1),
+        (-P + 100, 100, mpq(0), -1),
+        (5 * P + 10, P - 10, mpq(0), 4),
+        (10, P - 10, mpq(0), -1),
+        (P + 123, 123, mpq(P), 2),
     ],
 )
 def test_without_a_prediction_the_anchor_decycles(
-    anchor: int | None, reading: int, w: Fraction, cycles: int
+    anchor: int | None, reading: int, w: mpq, cycles: int
 ) -> None:
     """Decycle against the last buffered value, or with no cycles at all."""
-    decycled = phase.decycle(reading, Fraction(77), w, None, anchor)
+    decycled = phase.decycle(reading, mpq(77), w, None, anchor)
     assert decycled.cycle_count == cycles
     assert decycled.z == round(reading + cycles * P - w)
 
@@ -357,14 +355,14 @@ def test_without_a_prediction_the_anchor_decycles(
 def test_a_reading_outside_one_period_is_refused(reading: int) -> None:
     """Refuse a reading that is not a phase within one period."""
     with pytest.raises(PhaseError, match="not within one period"):
-        phase.decycle(reading, Fraction(0), Fraction(0), None, None)
+        phase.decycle(reading, mpq(0), mpq(0), None, None)
 
 
-@pytest.mark.parametrize("delta", [Fraction(-1, 10**6), Fraction(600)])
-def test_a_measurement_outside_its_epoch_is_refused(delta: Fraction) -> None:
+@pytest.mark.parametrize("delta", [mpq(-1, 10**6), mpq(600)])
+def test_a_measurement_outside_its_epoch_is_refused(delta: mpq) -> None:
     """Refuse a measurement time before its epoch start or a whole epoch on."""
     with pytest.raises(PhaseError, match="not within its epoch"):
-        phase.decycle(0, delta, Fraction(0), None, None)
+        phase.decycle(0, delta, mpq(0), None, None)
 
 
 def test_a_decycled_measurement_is_frozen() -> None:
@@ -376,8 +374,8 @@ def test_a_decycled_measurement_is_frozen() -> None:
 
 def test_with_a_prediction_the_anchor_is_not_used() -> None:
     """Decycle against the prediction even when an anchor is given."""
-    prediction = State(x=Fraction(3 * P + 10), y=0.0)
-    decycled = phase.decycle(10, Fraction(0), Fraction(0), prediction, -7 * P)
+    prediction = State(x=mpq(3 * P + 10), y=0.0)
+    decycled = phase.decycle(10, mpq(0), mpq(0), prediction, -7 * P)
     assert decycled == phase.Decycled(cycle_count=3, z=3 * P + 10)
 
 
@@ -389,10 +387,8 @@ def test_a_fast_rate_is_decycled_with_its_motion() -> None:
     the reading a period away.
     """
     true_phase = 7 * P + 12_345
-    prediction = State(x=Fraction(true_phase - 75_000 - 40_000), y=150.0)
-    decycled = phase.decycle(
-        true_phase % P, Fraction(500), Fraction(0), prediction, None
-    )
+    prediction = State(x=mpq(true_phase - 75_000 - 40_000), y=150.0)
+    decycled = phase.decycle(true_phase % P, mpq(500), mpq(0), prediction, None)
     assert decycled == phase.Decycled(cycle_count=7, z=true_phase - 75_000)
 
 
@@ -401,9 +397,9 @@ def test_a_fast_rate_is_decycled_with_its_motion() -> None:
 
 def test_decycling_takes_the_drift_half_delta_squared() -> None:
     """Refer the phase back to E with d delta**2 / 2, the drift's own term."""
-    prediction = State(x=Fraction(500_000), y=0.0, d=100 / 360_000)
-    delta = Fraction(600 - 1, 1)
-    decycled = phase.decycle(1_000, delta, Fraction(0), prediction, None)
+    prediction = State(x=mpq(500_000), y=0.0, d=100 / 360_000)
+    delta = mpq(600 - 1, 1)
+    decycled = phase.decycle(1_000, delta, mpq(0), prediction, None)
     expected_z = phase.round_even(
         1_000
         + decycled.cycle_count * phase.PHASE_PERIOD
@@ -415,10 +411,10 @@ def test_decycling_takes_the_drift_half_delta_squared() -> None:
 
 def test_steering_inside_the_epoch_moves_the_prediction_its_way() -> None:
     """Add w to the prediction at t, so a large w still finds the right cycle."""
-    w = Fraction(60_000)
-    prediction = State(x=Fraction(1_000_000), y=0.0, d=0.0)
+    w = mpq(60_000)
+    prediction = State(x=mpq(1_000_000), y=0.0, d=0.0)
     reading = int(1_000_000 + w) % phase.PHASE_PERIOD
-    decycled = phase.decycle(reading, Fraction(0), w, prediction, None)
+    decycled = phase.decycle(reading, mpq(0), w, prediction, None)
     assert decycled.z == 1_000_000
 
 
@@ -426,12 +422,10 @@ def test_every_phase_error_is_logged_as_raised(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Log each PhaseError at ERROR in the words it is raised with."""
-    zero_state = State(x=Fraction(0), y=0.0, d=0.0)
+    zero_state = State(x=mpq(0), y=0.0, d=0.0)
     failing_calls: list[Callable[[], object]] = [
-        lambda: phase.decycle(
-            phase.PHASE_PERIOD, Fraction(0), Fraction(0), zero_state, None
-        ),
-        lambda: phase.decycle(0, Fraction(600), Fraction(0), zero_state, None),
+        lambda: phase.decycle(phase.PHASE_PERIOD, mpq(0), mpq(0), zero_state, None),
+        lambda: phase.decycle(0, mpq(600), mpq(0), zero_state, None),
         lambda: phase.seconds(EPOCH_START.replace(tzinfo=None), EPOCH_START),
     ]
     for failing_call in failing_calls:

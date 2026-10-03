@@ -15,8 +15,9 @@ Both give the filter step their plain values (:meth:`PairMeasurement.measured`,
 import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from fractions import Fraction
 from typing import Final, Literal
+
+from gmpy2 import mpq
 
 from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.domain.double_difference import TripleValue
@@ -85,7 +86,7 @@ class PairMeasurement:
         The measurement time, from the MJD.
     interpolated_datetime : datetime
         The start of the epoch the measurement falls in.
-    delta : Fraction
+    delta : mpq
         The measurement time after the epoch start, s, exactly.
     """
 
@@ -107,7 +108,7 @@ class PairMeasurement:
         return epoch_start(self.measurement_datetime)
 
     @property
-    def delta(self) -> Fraction:
+    def delta(self) -> mpq:
         """The measurement time after the epoch start, s, exactly."""
         return seconds(self.measurement_datetime, self.interpolated_datetime)
 
@@ -206,7 +207,7 @@ def measure_pair(
     measured_phase: int,
     rms: int,
     prediction: State | None,
-    w: Fraction,
+    w: mpq,
     anchor: int | None,
 ) -> PairMeasurement:
     """Decycle a reading and refer it to its epoch start (design 7).
@@ -222,7 +223,7 @@ def measure_pair(
     prediction : State or None
         The pair's prediction at the epoch start, or ``None`` when it has
         none.
-    w : Fraction
+    w : mpq
         The steering applied between the epoch start and the measurement,
         ps.
     anchor : int or None
@@ -249,7 +250,7 @@ def measure_pair(
     >>> prediction = State(x=1_234_567 + exact(0.0123) * 600, y=0.0123)
     >>> measure_pair(
     ...     measurement_mjd=60941.251588, measured_phase=34579, rms=3,
-    ...     prediction=prediction, w=Fraction(0), anchor=None,
+    ...     prediction=prediction, w=mpq(0), anchor=None,
     ... ).z
     1234577
     """

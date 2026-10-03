@@ -22,9 +22,10 @@ it found is returned as events.
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from fractions import Fraction
 from itertools import combinations
 from typing import Final, Literal
+
+from gmpy2 import mpq
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
@@ -89,7 +90,7 @@ class Slips:
 
 
 def slip_check(
-    innovations: Mapping[PairKey, Fraction],
+    innovations: Mapping[PairKey, mpq],
     scales: Mapping[PairKey, float],
     last_flags: Mapping[PairKey, str],
     refs: frozenset[str],
@@ -99,7 +100,7 @@ def slip_check(
 
     Parameters
     ----------
-    innovations : Mapping of (str, str) to Fraction
+    innovations : Mapping of (str, str) to mpq
         The innovation, ps, of every pair with a measurement and a
         prediction.
     scales : Mapping of (str, str) to float
@@ -125,9 +126,9 @@ def slip_check(
     --------
     >>> from itertools import permutations
     >>> refs = ("mc1", "mc2", "mc3")
-    >>> innovations = {pair: Fraction(0) for pair in permutations(refs, 2)}
-    >>> innovations |= {("mc1", "ox1"): Fraction(200_000),
-    ...                 ("mc2", "ox1"): Fraction(0), ("mc3", "ox1"): Fraction(0)}
+    >>> innovations = {pair: mpq(0) for pair in permutations(refs, 2)}
+    >>> innovations |= {("mc1", "ox1"): mpq(200_000),
+    ...                 ("mc2", "ox1"): mpq(0), ("mc3", "ox1"): mpq(0)}
     >>> scales = dict.fromkeys(innovations, 1.0)
     >>> flags = dict.fromkeys(innovations, "A")
     >>> slip_check(innovations, scales, flags, frozenset(refs), frozenset()).corrections
@@ -227,7 +228,7 @@ class _EpochInnovations:
 
     def __init__(
         self,
-        innovations: Mapping[PairKey, Fraction],
+        innovations: Mapping[PairKey, mpq],
         scales: Mapping[PairKey, float],
         excluded: frozenset[PairKey],
     ) -> None:
@@ -235,7 +236,7 @@ class _EpochInnovations:
 
         Parameters
         ----------
-        innovations : Mapping of (str, str) to Fraction
+        innovations : Mapping of (str, str) to mpq
             The innovations.
         scales : Mapping of (str, str) to float
             The innovation scales.

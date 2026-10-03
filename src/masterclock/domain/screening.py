@@ -22,10 +22,11 @@ tests found is returned as events, for the program to log.
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from fractions import Fraction
 from itertools import combinations
 from statistics import median
 from typing import Final, Literal
+
+from gmpy2 import mpq
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
@@ -83,13 +84,13 @@ class _EpochInnovations:
     """One epoch's innovations and scales, and the exclusions made so far."""
 
     def __init__(
-        self, innovations: Mapping[PairKey, Fraction], scales: Mapping[PairKey, float]
+        self, innovations: Mapping[PairKey, mpq], scales: Mapping[PairKey, float]
     ) -> None:
         """Hold the epoch's values.
 
         Parameters
         ----------
-        innovations : Mapping of (str, str) to Fraction
+        innovations : Mapping of (str, str) to mpq
             The innovation of every pair with a measurement and a prediction.
         scales : Mapping of (str, str) to float
             The innovation scale of every pair with a prediction.
@@ -176,7 +177,7 @@ class _EpochInnovations:
 
 
 def screen_references(
-    innovations: Mapping[PairKey, Fraction],
+    innovations: Mapping[PairKey, mpq],
     scales: Mapping[PairKey, float],
     refs: frozenset[str],
 ) -> Screening:
@@ -184,7 +185,7 @@ def screen_references(
 
     Parameters
     ----------
-    innovations : Mapping of (str, str) to Fraction
+    innovations : Mapping of (str, str) to mpq
         The innovation, ps, of every pair that has both a measurement and a
         prediction at the epoch.
     scales : Mapping of (str, str) to float
@@ -207,7 +208,7 @@ def screen_references(
 
     Examples
     --------
-    >>> innovations = {("mc1", "mc1"): Fraction(100), ("mc1", "ox1"): Fraction(99)}
+    >>> innovations = {("mc1", "mc1"): mpq(100), ("mc1", "ox1"): mpq(99)}
     >>> scales = dict.fromkeys(innovations, 3.0)
     >>> sorted(screen_references(innovations, scales, frozenset({"mc1"})).excluded)
     [('mc1', 'ox1')]

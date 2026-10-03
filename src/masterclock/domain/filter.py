@@ -7,7 +7,7 @@ passes an accepted measurement through unchanged. The pole sits at lambda
 for every M, so the closed loop (I - K H) Phi has every eigenvalue equal to
 lambda.
 
-The phase is summed exactly, as a :class:`~fractions.Fraction`, and rounded
+The phase is summed exactly, as a :class:`~gmpy2.mpq`, and rounded
 only when a row stores it, to whole femtoseconds (see
 :data:`~masterclock.domain.phase.FS_PER_PS`); rates, drifts and gains are
 floats.
@@ -37,9 +37,10 @@ import functools
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from fractions import Fraction
 from itertools import pairwise
 from typing import Final, Literal, cast
+
+from gmpy2 import mpq
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
@@ -119,7 +120,7 @@ def gains(filter_states: int, M: float | None) -> tuple[float, float, float]:
 
 
 @functools.cache
-def exact_gains(filter_states: int, M: float | None) -> tuple[Fraction, float, float]:
+def exact_gains(filter_states: int, M: float | None) -> tuple[mpq, float, float]:
     """Give the gains of :func:`gains`, the phase gain as the fraction it holds.
 
     Each model's gains are worked out once in a run and the same values
@@ -134,7 +135,7 @@ def exact_gains(filter_states: int, M: float | None) -> tuple[Fraction, float, f
 
     Returns
     -------
-    tuple of (Fraction, float, float)
+    tuple of (mpq, float, float)
         g exactly, as :func:`~masterclock.domain.phase.exact` gives it, then
         h/T and 2k/T**2.
 
@@ -146,20 +147,20 @@ def exact_gains(filter_states: int, M: float | None) -> tuple[Fraction, float, f
     Examples
     --------
     >>> exact_gains(1, None)
-    (Fraction(1, 1), 0.0, 0.0)
+    (mpq(1,1), 0.0, 0.0)
     """
     g, h_over_t, two_k_over_t2 = gains(filter_states, M)
     return exact(g), h_over_t, two_k_over_t2
 
 
-def predict(last_row: Row | None, u: tuple[Fraction, float]) -> State | None:
+def predict(last_row: Row | None, u: tuple[mpq, float]) -> State | None:
     """Predict a series' state at the next epoch from its last row.
 
     Parameters
     ----------
     last_row : Row or None
         The series' last row, or ``None`` for a series with none.
-    u : tuple of (Fraction, float)
+    u : tuple of (mpq, float)
         The steering input over the epoch: u_x, exact, and u_y.
 
     Returns
@@ -188,7 +189,7 @@ def predict(last_row: Row | None, u: tuple[Fraction, float]) -> State | None:
 
 def update(
     prediction: State,
-    innovation: Fraction,
+    innovation: mpq,
     filter_states: int,
     M: float | None,
     *,
@@ -200,7 +201,7 @@ def update(
     ----------
     prediction : State
         The predicted state at the epoch.
-    innovation : Fraction
+    innovation : mpq
         The measurement less the predicted phase, exact.
     filter_states : int
         How many states the estimator has.
@@ -529,7 +530,7 @@ def hold(
 def accept(
     draft: RowDraft,
     prediction: State,
-    innovation: Fraction,
+    innovation: mpq,
     scale_floor: float,
     *,
     nu: float | None = None,
@@ -542,7 +543,7 @@ def accept(
         The row as built so far, of a series with an innovation scale.
     prediction : State
         The series' prediction at the epoch.
-    innovation : Fraction
+    innovation : mpq
         The measurement less the predicted phase, exact.
     scale_floor : float
         The lowest the innovation scale may go, ps: the measurement's own
@@ -713,12 +714,12 @@ def classify(rejects: tuple[Reject, ...], sigma: float) -> Classified:
     return Classified(step_kind=None)
 
 
-def within_gate(innovation: Fraction, innovation_scale: float) -> bool:
+def within_gate(innovation: mpq, innovation_scale: float) -> bool:
     """Tell whether an innovation passes the gate's width (design 9.1).
 
     Parameters
     ----------
-    innovation : Fraction
+    innovation : mpq
         The measurement less the predicted phase, exact.
     innovation_scale : float
         The innovation scale, ps.
@@ -737,7 +738,7 @@ def within_gate(innovation: Fraction, innovation_scale: float) -> bool:
 
     Examples
     --------
-    >>> within_gate(Fraction(15), 3.0), within_gate(Fraction(-31, 2), 3.0)
+    >>> within_gate(mpq(15), 3.0), within_gate(mpq(-31, 2), 3.0)
     (True, False)
     """
     gate_numerator, gate_denominator = exact_ratio(K_OUT * innovation_scale)
@@ -770,7 +771,7 @@ def rms_ok(rms: int, rms_max: int | None) -> bool:
     return rms_max is None or rms <= rms_max
 
 
-def count_reject(draft: RowDraft, innovation: Fraction) -> None:
+def count_reject(draft: RowDraft, innovation: mpq) -> None:
     """Count a rejected measurement and put it in the reject buffer (design 9.3).
 
     The draft gets one more consecutive reject, and (epoch, innovation)
@@ -781,7 +782,7 @@ def count_reject(draft: RowDraft, innovation: Fraction) -> None:
     ----------
     draft : RowDraft
         The row as built so far; changed in place.
-    innovation : Fraction
+    innovation : mpq
         The rejected measurement less the predicted phase.
     """
     reject_entry = (draft.interpolated_datetime, float(innovation))
@@ -818,7 +819,7 @@ def phase_step(draft: RowDraft, prediction: State, z: int, scale_floor: float) -
     """
     innovation_sum = sum(
         (exact(reject_innovation) for _, reject_innovation in draft.rejects),
-        Fraction(0),
+        mpq(0),
     )
     step_ps = round_even(innovation_sum / _STEP_REJECTS)
     corrected_prediction = State(

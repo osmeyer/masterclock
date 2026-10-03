@@ -9,18 +9,21 @@ The one phase held more finely is the estimator's, in whole femtoseconds
 (see :data:`FS_PER_PS`).
 
 Where a phase is combined with a float - a rate times a time, say - the sum
-is formed exactly, as a :class:`~fractions.Fraction`, and rounded once,
-ties to even. A float holds every whole number only up to 2**53, and a sum
-done in floats would round at every step; a Fraction holds every float
-exactly, so the sum is exact at any size. A time offset is taken from two
+is formed exactly, as a :class:`~gmpy2.mpq` (gmpy2's exact rational
+number), and rounded once, ties to even. A float holds every whole number
+only up to 2**53, and a sum done in floats would round at every step; an
+mpq holds every float exactly, so the sum is exact at any size. A float is
+made an mpq (:func:`exact`) before it is combined with one: an mpq and a
+float together give an inexact float. A time offset is taken from two
 datetimes as a whole number of microseconds, so it is exact too.
 """
 
 import math
 from dataclasses import dataclass
 from datetime import timedelta
-from fractions import Fraction
 from typing import TYPE_CHECKING, Final
+
+from gmpy2 import mpq
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError, PhaseError
@@ -66,7 +69,7 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 
-def seconds(later_instant: datetime, earlier_instant: datetime) -> Fraction:
+def seconds(later_instant: datetime, earlier_instant: datetime) -> mpq:
     """Give the time from one datetime to another in seconds, exactly.
 
     Parameters
@@ -78,7 +81,7 @@ def seconds(later_instant: datetime, earlier_instant: datetime) -> Fraction:
 
     Returns
     -------
-    Fraction
+    mpq
         ``later_instant - earlier_instant`` in seconds: a whole number of
         microseconds over one million, negative when ``later_instant`` is the
         earlier of the two.
@@ -95,7 +98,7 @@ def seconds(later_instant: datetime, earlier_instant: datetime) -> Fraction:
     ...     datetime(2025, 9, 23, 6, 2, 17, 203200, tzinfo=UTC),
     ...     datetime(2025, 9, 23, 6, 0, tzinfo=UTC),
     ... )
-    Fraction(85752, 625)
+    mpq(85752,625)
     """
     if later_instant.tzinfo is None or earlier_instant.tzinfo is None:
         message = (
@@ -104,12 +107,12 @@ def seconds(later_instant: datetime, earlier_instant: datetime) -> Fraction:
         )
         _log.error(message)
         raise PhaseError(message)
-    return Fraction(
+    return mpq(
         (later_instant - earlier_instant) // _MICROSECOND, _MICROSECONDS_PER_SECOND
     )
 
 
-def exact(number: float) -> Fraction:
+def exact(number: float) -> mpq:
     """Give the exact value a float holds, as a fraction.
 
     Parameters
@@ -119,7 +122,7 @@ def exact(number: float) -> Fraction:
 
     Returns
     -------
-    Fraction
+    mpq
         The binary value the float holds, exactly: 0.1 gives the fraction
         nearest one tenth that a float can hold, not one tenth itself.
 
@@ -133,13 +136,13 @@ def exact(number: float) -> Fraction:
     >>> exact(0.0123) == 0.0123
     True
     >>> exact(2.5)
-    Fraction(5, 2)
+    mpq(5,2)
     """
     if not math.isfinite(number):
         message = f"value {number} is not finite"
         _log.error(message)
         raise FilterError(message)
-    return Fraction(number)
+    return mpq(number)
 
 
 def exact_ratio(number: float) -> tuple[int, int]:
@@ -175,12 +178,12 @@ def exact_ratio(number: float) -> tuple[int, int]:
     return number.as_integer_ratio()
 
 
-def round_even(exact_sum: Fraction | int) -> int:
+def round_even(exact_sum: mpq | int) -> int:
     """Round an exact value to the nearest whole number, a tie to the even one.
 
     Parameters
     ----------
-    exact_sum : Fraction or int
+    exact_sum : mpq or int
         An exact sum, such as a phase plus a float term.
 
     Returns
@@ -191,20 +194,22 @@ def round_even(exact_sum: Fraction | int) -> int:
 
     Examples
     --------
-    >>> [round_even(Fraction(n, 2)) for n in (5, 7, -5)]
+    >>> [round_even(mpq(n, 2)) for n in (5, 7, -5)]
     [2, 4, -2]
-    >>> round_even(Fraction(12_345_773_124, 10_000))
+    >>> round_even(mpq(12_345_773_124, 10_000))
     1234577
     """
-    return round(exact_sum)
+    if isinstance(exact_sum, int):
+        return exact_sum
+    return int(round(exact_sum))  # noqa: RUF046 - round() of an mpq gives an mpz, not an int
 
 
-def to_fs(phase_ps: Fraction | int) -> int:
+def to_fs(phase_ps: mpq | int) -> int:
     """Round a phase in picoseconds to whole femtoseconds, a tie to even.
 
     Parameters
     ----------
-    phase_ps : Fraction or int
+    phase_ps : mpq or int
         An exact phase, ps.
 
     Returns
@@ -214,15 +219,15 @@ def to_fs(phase_ps: Fraction | int) -> int:
 
     Examples
     --------
-    >>> to_fs(Fraction(12_345_744_574, 10_000))
+    >>> to_fs(mpq(12_345_744_574, 10_000))
     1234574457
-    >>> to_fs(Fraction(1, 2000))
+    >>> to_fs(mpq(1, 2000))
     0
     """
     return round_even(phase_ps * FS_PER_PS)
 
 
-def from_fs(phase_fs: int) -> Fraction:
+def from_fs(phase_fs: int) -> mpq:
     """Give a phase held in whole femtoseconds in picoseconds, exactly.
 
     Parameters
@@ -232,15 +237,15 @@ def from_fs(phase_fs: int) -> Fraction:
 
     Returns
     -------
-    Fraction
+    mpq
         The same phase, ps.
 
     Examples
     --------
     >>> from_fs(1_234_574_457)
-    Fraction(1234574457, 1000)
+    mpq(1234574457,1000)
     """
-    return Fraction(phase_fs, FS_PER_PS)
+    return mpq(phase_fs, FS_PER_PS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,14 +264,14 @@ class Decycled:
     z: int
 
 
-def _check_reading(phi: int, delta: Fraction) -> None:
+def _check_reading(phi: int, delta: mpq) -> None:
     """Refuse a reading that is not a phase, or not taken within its epoch.
 
     Parameters
     ----------
     phi : int
         The reading, ps.
-    delta : Fraction
+    delta : mpq
         The measurement time after the epoch start, s.
 
     Raises
@@ -289,8 +294,8 @@ def _check_reading(phi: int, delta: Fraction) -> None:
 
 def decycle(
     phi: int,
-    delta: Fraction,
-    w: Fraction,
+    delta: mpq,
+    w: mpq,
     prediction: State | None,
     anchor: int | None,
 ) -> Decycled:
@@ -308,10 +313,10 @@ def decycle(
     ----------
     phi : int
         The reading, ps, from 0 to :data:`PHASE_MAX`.
-    delta : Fraction
+    delta : mpq
         The measurement time after the epoch start, s: δ, from 0 to
         :data:`EPOCH_SECONDS`, the end excluded.
-    w : Fraction
+    w : mpq
         Steering applied between the epoch start and the measurement, ps.
     prediction : State or None
         The predicted state at the epoch start, or ``None`` when the series
@@ -339,7 +344,7 @@ def decycle(
 
     >>> from masterclock.domain.series import State
     >>> prediction = State(x=1_234_567 + exact(0.0123) * 600, y=0.0123)
-    >>> decycle(34_579, Fraction(1_372_032, 10_000), Fraction(0), prediction, None)
+    >>> decycle(34_579, mpq(1_372_032, 10_000), mpq(0), prediction, None)
     Decycled(cycle_count=6, z=1234577)
     """
     _check_reading(phi, delta)

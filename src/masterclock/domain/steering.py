@@ -22,8 +22,9 @@ term is a float.
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from fractions import Fraction
 from typing import TYPE_CHECKING, Final
+
+from gmpy2 import mpq
 
 from masterclock.domain.phase import EPOCH_SECONDS, exact, seconds
 from masterclock.domain.references import is_reference
@@ -131,7 +132,7 @@ def steer_u(
     series_key: Sequence[str],
     epoch_start: datetime,
     steering: Mapping[str, Sequence[SteerEvent]],
-) -> tuple[Fraction, float]:
+) -> tuple[mpq, float]:
     """Give the steering input over the epoch before a mark.
 
     Parameters
@@ -146,7 +147,7 @@ def steer_u(
 
     Returns
     -------
-    tuple of (Fraction, float)
+    tuple of (mpq, float)
         u_x, the sum over the events in (E - T, E] of the sign times
         dx + dy (E - t_m), exact; and u_y, the sum of the sign times dy.
 
@@ -161,9 +162,9 @@ def steer_u(
     >>> mark = datetime(2025, 9, 23, 6, tzinfo=UTC)
     >>> event = SteerEvent(applied_datetime=mark, dx=2.0, dy=0.5)
     >>> steer_u(("mc1", "mc2"), mark, {"mc2": (event,)})
-    (Fraction(-2, 1), -0.5)
+    (mpq(-2,1), -0.5)
     """
-    ux = Fraction(0)
+    ux = mpq(0)
     uy = 0.0
     for sign, steer_event in _signed_events(
         steering, series_key, epoch_start - _EPOCH, epoch_start
@@ -181,7 +182,7 @@ def steer_w(
     epoch_start: datetime,
     steering: Mapping[str, Sequence[SteerEvent]],
     measured_at: datetime,
-) -> Fraction:
+) -> mpq:
     """Give the steering applied between a mark and a measurement.
 
     Parameters
@@ -197,7 +198,7 @@ def steer_w(
 
     Returns
     -------
-    Fraction
+    mpq
         w(t), the sum over the events in (E, t] of the sign times
         dx + dy (t - t_m), exact.
 
@@ -206,7 +207,7 @@ def steer_w(
     PhaseError
         If ``measured_at`` or an event's instant has no timezone.
     """
-    w = Fraction(0)
+    w = mpq(0)
     for sign, steer_event in _signed_events(
         steering, series_key, epoch_start, measured_at
     ):

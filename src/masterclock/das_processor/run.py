@@ -39,7 +39,7 @@ from masterclock.das_processor.files import (
     write_buffer,
 )
 from masterclock.das_processor.read_cd5m5m import DASData, read_all_blocks
-from masterclock.das_processor.read_steering import read_steering
+from masterclock.das_processor.read_steering import SteeringFiles
 from masterclock.das_processor.registry import (
     ExistingSeries,
     build_registry,
@@ -153,6 +153,7 @@ def build_epoch(
     config: AppConfig,
     clock_config: ClockConfig,
     last_epoch: Epoch | None = None,
+    steering_files: SteeringFiles | None = None,
 ) -> Epoch:
     """Resolve everything an epoch needs (design 6.3).
 
@@ -171,6 +172,9 @@ def build_epoch(
     last_epoch : Epoch or None, optional
         The epoch processed before this one in the run, whose settings are
         kept when they still hold; ``None`` for the run's first.
+    steering_files : SteeringFiles or None, optional
+        The run's steering files, read once and then as lines are added;
+        ``None`` to read them afresh.
 
     Returns
     -------
@@ -197,10 +201,10 @@ def build_epoch(
     steering_refs = sorted(
         {mc for series_key in series_keys for mc in signs(series_key)}
     )
+    if steering_files is None:
+        steering_files = SteeringFiles(config.das.steering_path)
     steering = {
-        mc: read_steering(
-            config.das.steering_path, mc, epoch_start - _EPOCH, epoch_start + _EPOCH
-        )
+        mc: steering_files.events(mc, epoch_start - _EPOCH, epoch_start + _EPOCH)
         for mc in steering_refs
     }
     if (
@@ -794,6 +798,7 @@ def process_epoch(
     config: AppConfig,
     clock_config: ClockConfig,
     last_epoch: Epoch | None = None,
+    steering_files: SteeringFiles | None = None,
 ) -> EpochDone:
     """Process one epoch and add its rows to the day buffer (design 6.3).
 
@@ -813,6 +818,8 @@ def process_epoch(
     last_epoch : Epoch or None, optional
         The epoch processed before this one in the run, whose settings
         :func:`build_epoch` may keep; ``None`` for the run's first.
+    steering_files : SteeringFiles or None, optional
+        The run's steering files; ``None`` to read them afresh.
 
     Returns
     -------
@@ -841,7 +848,13 @@ def process_epoch(
         ),
     )
     epoch = build_epoch(
-        epoch_start, das_block, earlier_series, config, clock_config, last_epoch
+        epoch_start,
+        das_block,
+        earlier_series,
+        config,
+        clock_config,
+        last_epoch,
+        steering_files,
     )
     pair_step = process_pairs(epoch, last_rows)
     triple_step = process_triples(epoch, last_rows, pair_step)
@@ -928,6 +941,7 @@ def run(
     journal = processed_path / JOURNAL_FILE_TEMPLATE.format(rf=channel)
     day_buffer = DayBuffer(channel, journal)
     last_epoch: Epoch | None = None
+    steering_files = SteeringFiles(config.das.steering_path)
     epochs_done = 0
     while (
         next_das_block is not None
@@ -939,7 +953,13 @@ def run(
             das_block = next_das_block
             next_das_block = _next_block(das_blocks, epoch_start + _EPOCH)
         last_epoch = process_epoch(
-            epoch_start, das_block, day_buffer, config, clock_config, last_epoch
+            epoch_start,
+            das_block,
+            day_buffer,
+            config,
+            clock_config,
+            last_epoch,
+            steering_files,
         ).epoch
         if (epoch_start + _EPOCH).date() != epoch_start.date():
             write_buffer(day_buffer)

@@ -6,8 +6,9 @@ the steering of every reference that steers a series, read over
 (E - T, E + T]; and each series' settings, a pair taking its second
 clock's entry and RMS limit and a triple its clock c's entry, kept from
 the last epoch of the run while its series and every clock's settings are
-unchanged; an epoch with no block has no references and the existing
-series only; and the epoch is checked to hold settings for exactly its
+unchanged; the steering files are read once in a run, each line parsed
+once; an epoch with no block has no references and the existing series
+only; and the epoch is checked to hold settings for exactly its
 series.
 
 The pairs of an epoch are predicted, decycled against the prediction or the
@@ -52,7 +53,7 @@ from masterclock.app.exceptions import ConfigError
 from masterclock.app.log import TRACE
 from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import datetime_to_mjd, mjd_to_datetime
-from masterclock.das_processor import files, registry, run
+from masterclock.das_processor import files, read_steering, registry, run
 from masterclock.das_processor.clock_config import ClockConfig, read_clock_config
 from masterclock.das_processor.config import JOURNAL_FILE_TEMPLATE, AppConfig
 from masterclock.das_processor.exceptions import DataFileError
@@ -2059,3 +2060,29 @@ def test_a_run_keeps_each_epoch_s_settings_for_the_next(
     run.run(config, read_clock_config(dated_file), None, ShutdownHandler())
     assert time_constants == [100.0, 100.0, 150.0, 150.0, 150.0, 150.0]
     assert worked_out == [LATE_START, LATE_START + 2 * T]
+
+
+def test_a_run_reads_each_steering_line_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parse each line of a steering file once in a run, not once an epoch."""
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(6)])
+    steering_lines = [
+        f"{datetime_to_mjd(LATE_START + i * T + timedelta(seconds=30)):.6f} 0.0 0.0\n"
+        for i in range(6)
+    ]
+    (tmp_path / "steering" / STEERING_FILE_TEMPLATE.format(mc="mc1")).write_text(
+        "".join(steering_lines), encoding="ascii"
+    )
+    parsed_lines: list[str] = []
+    real_parse = read_steering._parse_steering_line
+
+    def count_parse(line_place: str, line: str) -> object:
+        """Note the line, then parse it."""
+        parsed_lines.append(line)
+        return real_parse(line_place, line)
+
+    monkeypatch.setattr(read_steering, "_parse_steering_line", count_parse)
+    run.run(config, clock_config, None, ShutdownHandler())
+    assert parsed_lines == [steering_line[:-1] for steering_line in steering_lines]

@@ -1,13 +1,19 @@
 """Tests for src/masterclock/das_processor/read_steering.py.
 
 The rules covered: a reference's steering file holds one event per line,
-an MJD, a phase change and a rate change, in time order; read_steering
+an MJD, a phase change and a rate change, in time order; SteeringFiles
 gives the events in (after, through], as SteerEvents; a missing file means
 the reference has never been steered and gives no events; and a file that
 cannot be read, a line that does not parse, a value in another form than
 plain decimals or not finite, an MJD outside the data days, a line earlier
 than the one before it, and a last line with no newline each raise
 DataFileError.
+
+Each line is read and checked once in a run: later reads take only the
+lines appended since, numbered and ordered after the lines before them; a
+file replaced or shorter than what was read is read again from its start,
+one removed gives no events, one that appears is read; and a refused read
+keeps nothing of it.
 
 An event lies from the first data day's start to the last day's end, and a
 refusal is word for word and logged as raised. Each event read is checked
@@ -16,19 +22,21 @@ instant with its timezone, finite changes, no unknown field.
 """
 
 import dataclasses
+import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Final
+from typing import Final, NoReturn
 
 import pytest
 from pydantic import ValidationError
 
 from masterclock.app.timeutil import mjd_to_datetime
+from masterclock.das_processor import read_steering as read_steering_module
 from masterclock.das_processor.exceptions import DataFileError
 from masterclock.das_processor.read_steering import (
     STEERING_FILE_TEMPLATE,
     SteerEventFields,
-    read_steering,
+    SteeringFiles,
 )
 from masterclock.domain.steering import SteerEvent
 
@@ -45,6 +53,13 @@ WINDOW_START: Final = mjd_to_datetime(60941.25)
 
 WINDOW_END: Final = mjd_to_datetime(60941.256944)
 """Exactly the third event's time."""
+
+
+def read_steering(
+    steering_path: Path, mc: str, window_start: datetime, window_end: datetime
+) -> tuple[SteerEvent, ...]:
+    """Read ``mc``'s events in (window_start, window_end] afresh."""
+    return SteeringFiles(steering_path).events(mc, window_start, window_end)
 
 
 def steering_directory_with(
@@ -154,7 +169,7 @@ def test_a_line_out_of_the_span_is_still_checked(tmp_path: Path) -> None:
 
 
 def test_a_file_that_cannot_be_read_is_refused(tmp_path: Path) -> None:
-    """Raise DataFileError for a steering file that is not a readable file."""
+    """Raise DataFileError for a steering file that is not a regular file."""
     (tmp_path / STEERING_FILE_TEMPLATE.format(mc="mc2")).mkdir()
     with pytest.raises(DataFileError, match="cannot read"):
         read_steering(tmp_path, "mc2", WINDOW_START, WINDOW_END)
@@ -238,3 +253,177 @@ def test_an_event_read_is_checked(event_field: str, wrong_value: object) -> None
     }
     with pytest.raises(ValidationError, match=event_field):
         SteerEventFields.model_validate(event_fields)
+
+
+# ------------------------------------------------------ read once in a run
+
+
+def counted_parses(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every steering line parsed."""
+    parsed_lines: list[str] = []
+    real_parse = read_steering_module._parse_steering_line
+
+    def count_parse(line_place: str, line: str) -> SteerEvent:
+        """Note the line, then parse it."""
+        parsed_lines.append(line)
+        return real_parse(line_place, line)
+
+    monkeypatch.setattr(read_steering_module, "_parse_steering_line", count_parse)
+    return parsed_lines
+
+
+def test_each_line_is_read_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Parse a file's lines once, however many windows are asked for."""
+    steering_files = SteeringFiles(steering_directory_with(tmp_path))
+    parsed_lines = counted_parses(monkeypatch)
+    first_events = steering_files.events("mc2", WINDOW_START, WINDOW_END)
+    assert steering_files.events("mc2", WINDOW_START, WINDOW_END) == first_events
+    assert (
+        len(steering_files.events("mc2", datetime(2025, 9, 23, tzinfo=UTC), WINDOW_END))
+        == 3
+    )
+    assert parsed_lines == STEERING_LINES.splitlines()
+
+
+def test_appended_lines_are_read_after_the_lines_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read only lines appended since, and give their events with the earlier ones."""
+    steering_directory = steering_directory_with(tmp_path)
+    steering_files = SteeringFiles(steering_directory)
+    steering_files.events("mc2", WINDOW_START, WINDOW_END)
+    parsed_lines = counted_parses(monkeypatch)
+    steering_file = steering_directory / STEERING_FILE_TEMPLATE.format(mc="mc2")
+    with steering_file.open("a", encoding="ascii") as steering_stream:
+        steering_stream.write("60941.270000 4.0 0.0\n")
+    steer_events = steering_files.events("mc2", WINDOW_START, mjd_to_datetime(60941.27))
+    assert [steer_event.dx for steer_event in steer_events] == [1.5, -2.25, 0.0, 4.0]
+    assert parsed_lines == ["60941.270000 4.0 0.0"]
+
+
+@pytest.mark.parametrize(
+    ("appended_text", "message_pattern"),
+    [
+        ("60942.0 x 0.0\n", "line 5"),
+        ("60941.255000 0.0 0.0\n", "line 5 .* earlier"),
+        ("60941.270000 4.0 0.0", "line 5 .* no newline"),
+        ("60941.270000 4.0 0.0\n60941.27 1·0 0.0\n", "cannot read"),
+    ],
+)
+def test_an_appended_line_is_checked_as_a_line_of_the_file(
+    tmp_path: Path, appended_text: str, message_pattern: str
+) -> None:
+    """Refuse a damaged appended line, named and ordered after the lines before it."""
+    steering_directory = steering_directory_with(tmp_path)
+    steering_files = SteeringFiles(steering_directory)
+    steering_files.events("mc2", WINDOW_START, WINDOW_END)
+    steering_file = steering_directory / STEERING_FILE_TEMPLATE.format(mc="mc2")
+    with steering_file.open("ab") as steering_stream:
+        steering_stream.write(appended_text.encode())
+    with pytest.raises(DataFileError, match=message_pattern):
+        steering_files.events("mc2", WINDOW_START, WINDOW_END)
+
+
+def test_a_refused_read_keeps_nothing_of_it(tmp_path: Path) -> None:
+    """Keep the events read before a refused read, and read its lines again later."""
+    steering_directory = steering_directory_with(tmp_path)
+    steering_files = SteeringFiles(steering_directory)
+    wide_start = datetime(2025, 9, 23, tzinfo=UTC)
+    wide_end = datetime(2025, 9, 24, tzinfo=UTC)
+    events_before = steering_files.events("mc2", wide_start, wide_end)
+    steering_file = steering_directory / STEERING_FILE_TEMPLATE.format(mc="mc2")
+    with steering_file.open("a", encoding="ascii") as steering_stream:
+        steering_stream.write("60941.270000 4.0 0.0\n60941.280000 5.0")
+    with pytest.raises(DataFileError, match=r"line 6 .* no newline"):
+        steering_files.events("mc2", wide_start, wide_end)
+    with pytest.raises(DataFileError, match=r"line 6 .* no newline"):
+        steering_files.events("mc2", wide_start, wide_end)
+    with steering_file.open("a", encoding="ascii") as steering_stream:
+        steering_stream.write(" 0.0\n")
+    steer_events = steering_files.events("mc2", wide_start, wide_end)
+    assert steer_events[:4] == events_before
+    assert [steer_event.dx for steer_event in steer_events[4:]] == [4.0, 5.0]
+
+
+def test_a_replaced_or_shorter_file_is_read_again(tmp_path: Path) -> None:
+    """Read a file from its start when it is another file, or shorter than read."""
+    steering_directory = steering_directory_with(tmp_path)
+    steering_files = SteeringFiles(steering_directory)
+    wide_start = datetime(2025, 9, 23, tzinfo=UTC)
+    wide_end = datetime(2025, 9, 24, tzinfo=UTC)
+    steering_files.events("mc2", wide_start, wide_end)
+    steering_file = steering_directory / STEERING_FILE_TEMPLATE.format(mc="mc2")
+    steering_file.write_text("60941.253125 7.0 0.0\n", encoding="ascii")
+    assert [
+        steer_event.dx
+        for steer_event in steering_files.events("mc2", wide_start, wide_end)
+    ] == [7.0]
+    replacement = tmp_path / "replacement.dat"
+    replacement.write_text(
+        "60941.250000 8.0 0.0\n60941.253125 9.0 0.0\n", encoding="ascii"
+    )
+    replacement.replace(steering_file)
+    assert [
+        steer_event.dx
+        for steer_event in steering_files.events("mc2", wide_start, wide_end)
+    ] == [8.0, 9.0]
+
+
+def test_a_file_replaced_by_one_as_long_is_read_again(tmp_path: Path) -> None:
+    """Read a replaced file from its start, though it is as long as what was read."""
+    steering_directory = steering_directory_with(tmp_path)
+    steering_files = SteeringFiles(steering_directory)
+    wide_start = datetime(2025, 9, 23, tzinfo=UTC)
+    wide_end = datetime(2025, 9, 24, tzinfo=UTC)
+    steering_files.events("mc2", wide_start, wide_end)
+    steering_file = steering_directory / STEERING_FILE_TEMPLATE.format(mc="mc2")
+    replacement = tmp_path / "replacement.dat"
+    replacement.write_text(STEERING_LINES.replace("1.5", "6.5"), encoding="ascii")
+    replacement.replace(steering_file)
+    steer_events = steering_files.events("mc2", wide_start, wide_end)
+    assert [steer_event.dx for steer_event in steer_events][:2] == [0.0, 6.5]
+
+
+def test_a_file_removed_gives_no_events_and_one_that_appears_is_read(
+    tmp_path: Path,
+) -> None:
+    """Give nothing once a file is gone, and read a file that appears later."""
+    steering_directory = steering_directory_with(tmp_path)
+    steering_files = SteeringFiles(steering_directory)
+    assert steering_files.events("mc2", WINDOW_START, WINDOW_END)
+    (steering_directory / STEERING_FILE_TEMPLATE.format(mc="mc2")).unlink()
+    assert steering_files.events("mc2", WINDOW_START, WINDOW_END) == ()
+    assert steering_files.events("mc3", WINDOW_START, WINDOW_END) == ()
+    steering_directory_with(tmp_path, mc="mc3")
+    assert len(steering_files.events("mc3", WINDOW_START, WINDOW_END)) == 2
+
+
+def test_a_file_that_cannot_be_looked_at_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raise DataFileError when the file's status cannot be read, or it cannot open."""
+    steering_directory = steering_directory_with(tmp_path)
+
+    def refuse(*_: object, **__: object) -> NoReturn:
+        """Fail as a file system refusing access would."""
+        message = "refused"
+        raise PermissionError(message)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "stat", refuse)
+        with pytest.raises(DataFileError, match=r"cannot read .* refused"):
+            read_steering(steering_directory, "mc2", WINDOW_START, WINDOW_END)
+    monkeypatch.setattr(Path, "open", refuse)
+    with pytest.raises(DataFileError, match=r"cannot read .* refused"):
+        read_steering(steering_directory, "mc2", WINDOW_START, WINDOW_END)
+
+
+def test_a_steering_file_that_is_not_a_regular_file_is_refused(
+    tmp_path: Path,
+) -> None:
+    """Raise DataFileError for a named pipe, which shows no length to read."""
+    os.mkfifo(tmp_path / STEERING_FILE_TEMPLATE.format(mc="mc2"))
+    with pytest.raises(DataFileError, match="not a regular file"):
+        read_steering(tmp_path, "mc2", WINDOW_START, WINDOW_END)

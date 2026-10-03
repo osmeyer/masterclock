@@ -55,7 +55,6 @@ from fractions import Fraction
 from typing import Final, Literal
 
 import pytest
-from pydantic import ValidationError
 
 from masterclock.domain import filter as estimator
 from masterclock.domain.exceptions import FilterError
@@ -68,7 +67,7 @@ from masterclock.domain.phase import (
     round_even,
     to_fs,
 )
-from masterclock.domain.series import Row, SeriesParams, State
+from masterclock.domain.series import Row, SeriesParams, State, check_row
 
 EPOCH_START: Final = datetime(2025, 9, 23, 5, 50, tzinfo=UTC)
 """An invented ten-minute mark."""
@@ -91,7 +90,7 @@ GAIN_TABLE: Final = {
 
 
 def last_row(**field_changes: object) -> Row:
-    """Build the last row of the worked epoch, with ``field_changes`` applied."""
+    """Build the worked epoch's last row, checked, with ``field_changes`` applied."""
     row_fields: dict[str, object] = {
         "interpolated_datetime": EPOCH_START,
         "innovation": 0.0,
@@ -104,13 +103,16 @@ def last_row(**field_changes: object) -> Row:
         "epochs_in_segment": 811,
         "epochs_since_accept": 0,
         "consecutive_rejects": 0,
+        "rejects": (),
         "filter_states": 3,
         "time_constant": 100.0,
         "scale_time_constant": 50.0,
         "flags": "A",
     }
     row_fields.update(field_changes)
-    return Row.model_validate(row_fields)
+    row = Row(**row_fields)  # type: ignore[arg-type]
+    check_row(row)
+    return row
 
 
 def significant_figures(number: float, digits: int = 6) -> float:
@@ -428,7 +430,7 @@ def make_series_params(**field_changes: object) -> SeriesParams:
         "rms_max": 80,
     }
     settings_fields.update(field_changes)
-    return SeriesParams.model_validate(settings_fields)
+    return SeriesParams(**settings_fields)  # type: ignore[arg-type]
 
 
 ONE_STATE_FIELDS: Final[dict[str, object]] = {
@@ -467,7 +469,7 @@ def test_a_draft_has_the_fields_of_a_row() -> None:
     field_names = [
         draft_field.name for draft_field in dataclasses.fields(estimator.RowDraft)
     ]
-    assert field_names == list(Row.model_fields)
+    assert field_names == [row_field.name for row_field in dataclasses.fields(Row)]
 
 
 def test_a_new_series_starts_dormant_in_segment_zero() -> None:
@@ -508,7 +510,7 @@ def test_carry_moves_the_last_row_on_one_epoch() -> None:
     )
     draft = estimator.carry(NEXT_EPOCH_START, previous_row, make_series_params(M=150.0))
     expected_fields = {
-        **dict(previous_row),
+        **dataclasses.asdict(previous_row),
         "interpolated_datetime": NEXT_EPOCH_START,
         "innovation": None,
         "epochs_in_segment": 812,
@@ -801,9 +803,8 @@ def test_a_configuration_change_starts_a_warm_segment() -> None:
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
     changed_params = make_series_params(M=150.0, M_sigma=60.0)
-    draft = estimator.start_segment(
-        moved_on(previous_row), changed_params, keep_offset=True
-    )
+    draft = moved_on(previous_row)
+    estimator.start_segment(draft, changed_params, keep_offset=True)
     row = estimator.hold(draft, prediction, "P", changed_params)
     assert (row.flags, row.segment, row.epochs_in_segment) == ("PNU", 5, 0)
     assert (row.step_offset, row.time_constant, row.scale_time_constant) == (
@@ -819,9 +820,8 @@ def test_a_frequency_step_starts_a_warm_segment_and_accepts() -> None:
     previous_row = last_row(step_offset=25)
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
-    draft = estimator.start_segment(
-        moved_on(previous_row), make_series_params(), keep_offset=True
-    )
+    draft = moved_on(previous_row)
+    estimator.start_segment(draft, make_series_params(), keep_offset=True)
     row = estimator.accept(draft, prediction, Fraction(2), 3)
     assert (row.flags, row.segment, row.step_offset) == ("ANU", 5, 25)
     assert row.x_fs == to_fs(estimator.update(prediction, Fraction(2), 3, 100.0).x)
@@ -877,7 +877,7 @@ def test_flags_are_written_in_their_order() -> None:
     draft = estimator.carry(
         NEXT_EPOCH_START, previous_row, make_series_params(), slip=True
     )
-    draft = estimator.start_segment(draft, make_series_params(), keep_offset=True)
+    estimator.start_segment(draft, make_series_params(), keep_offset=True)
     assert draft.flags == "SN"
     assert estimator.accept(draft, prediction, Fraction(0), 3).flags == "ASNU"
 
@@ -1012,7 +1012,8 @@ def test_a_counted_reject_enters_the_buffer() -> None:
         epochs_since_accept=3,
         flags="R",
     )
-    draft = estimator.count_reject(moved_on(previous_row), Fraction(81, 2))
+    draft = moved_on(previous_row)
+    estimator.count_reject(draft, Fraction(81, 2))
     assert draft.consecutive_rejects == 4
     assert draft.rejects == (
         *reject_buffer(10.0, 20.0, 31.0)[1:],
@@ -1661,18 +1662,14 @@ def test_unchanged_settings_start_no_segment() -> None:
         {"z": 1},
         {"z": 1, "sigma_dd": 3.0, "slip": True},
         {"z": 1, "rms": 3, "pair_cold_started": True},
-        {"z": 1, "rms": -1},
-        {"z": 1, "sigma_dd": -1.0},
-        {"z": 1, "sigma_dd": float("nan")},
-        {"z": 1.5, "rms": 3},
     ],
 )
 def test_a_measurement_is_a_pair_s_or_a_triple_s(
     input_fields: dict[str, object],
 ) -> None:
     """Refuse a measurement that is neither a pair's (rms) nor a triple's (sigma_dd)."""
-    with pytest.raises((ValidationError, FilterError)):
-        estimator.FilterInput.model_validate(input_fields)
+    with pytest.raises(FilterError):
+        estimator.FilterInput(**input_fields)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
@@ -1869,6 +1866,8 @@ def test_every_filter_error_is_logged_as_raised(
             make_series_params(filter_states=2, M=30.0),
             keep_offset=True,
         ),
+        lambda: estimator.finish(moved_on(last_row(), x_fs=None), "A"),
+        lambda: estimator.FilterInput(z=0),
     ]
     for failing_call in failing_calls:
         caplog.clear()

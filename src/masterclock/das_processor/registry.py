@@ -14,10 +14,9 @@ the channel's files.
 """
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, NoReturn
-
-from pydantic import BaseModel, ConfigDict
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.das_processor.channels import RfChannel
@@ -49,7 +48,8 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 
-class ExistingSeries(BaseModel):
+@dataclass(frozen=True, slots=True)
+class ExistingSeries:
     """The series that exist before an epoch.
 
     Parameters
@@ -59,8 +59,6 @@ class ExistingSeries(BaseModel):
     triples : frozenset of (str, str, str)
         The triples.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     pairs: frozenset[PairKey]
     triples: frozenset[TripleKey]

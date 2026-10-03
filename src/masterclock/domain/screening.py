@@ -21,12 +21,11 @@ tests found is returned as events, for the program to log.
 
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from fractions import Fraction
 from itertools import combinations
 from statistics import median
 from typing import Final, Literal
-
-from pydantic import BaseModel, ConfigDict
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
@@ -43,7 +42,8 @@ type _TwoWay = tuple[float, float]
 """A link's two-way innovation and its scale."""
 
 
-class ScreeningEvent(BaseModel):
+@dataclass(frozen=True, slots=True)
+class ScreeningEvent:
     """One thing screening found at an epoch, for the program to log.
 
     Parameters
@@ -58,14 +58,13 @@ class ScreeningEvent(BaseModel):
         The pairs the finding excluded, sorted; empty when none.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
     finding: Literal["self_missing", "self_fail", "reciprocity_fail", "closure_fail"]
     references: tuple[str, ...]
     excluded: tuple[PairKey, ...]
 
 
-class Screening(BaseModel):
+@dataclass(frozen=True, slots=True)
+class Screening:
     """What screening decided at an epoch.
 
     Parameters
@@ -75,8 +74,6 @@ class Screening(BaseModel):
     events : tuple of ScreeningEvent
         What the tests found, in the order they ran.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     excluded: frozenset[PairKey]
     events: tuple[ScreeningEvent, ...]

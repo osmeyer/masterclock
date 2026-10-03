@@ -21,7 +21,6 @@ from fractions import Fraction
 from typing import Final
 
 import pytest
-from pydantic import ValidationError
 
 from masterclock.domain.double_difference import (
     Component,
@@ -277,24 +276,17 @@ def test_a_local_triple_is_cold_when_its_pair_is() -> None:
         {"accepted": True, "z": 1},
         {"accepted": True, "rms": 3},
         {"accepted": False, "z": 1, "rms": 3},
-        {"accepted": True, "z": 1, "rms": -1},
-        {"accepted": True, "z": 1.0, "rms": 3},
     ],
 )
 def test_a_component_is_accepted_with_a_value_or_not_without_one(
-    component_fields: dict[str, object],
+    component_fields: dict[str, object], caplog: pytest.LogCaptureFixture
 ) -> None:
     """Refuse a component whose z and rms do not match whether it was accepted."""
-    with pytest.raises(ValidationError):
-        Component.model_validate(component_fields)
-
-
-def test_a_value_names_the_components_it_used() -> None:
-    """Refuse components_used other than 111, 110 or 101."""
-    with pytest.raises(ValidationError):
-        TripleValue.model_validate(
-            {"z": 1, "sigma": 1.0, "components_used": "011", "pair_cold_started": False}
-        )
+    with pytest.raises(PhaseError, match="exactly when it was accepted") as raised:
+        Component(**component_fields)  # type: ignore[arg-type]
+    assert [log_record.getMessage() for log_record in caplog.records] == [
+        str(raised.value)
+    ]
 
 
 def test_a_missing_back_direction_squares_the_forward_rms() -> None:

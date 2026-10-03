@@ -24,7 +24,6 @@ from itertools import permutations
 from typing import Final
 
 import pytest
-from pydantic import ValidationError
 
 from masterclock.domain import screening
 from masterclock.domain.exceptions import FilterError
@@ -335,14 +334,6 @@ def test_an_innovation_needs_a_scale() -> None:
     scales = {("mc1", "mc2"): 1.0}
     with pytest.raises(FilterError, match="no innovation scale"):
         screening.screen_references(innovations, scales, frozenset({"mc1", "mc2"}))
-
-
-def test_an_event_names_a_known_kind() -> None:
-    """Refuse an event of a kind screening does not give."""
-    with pytest.raises(ValidationError):
-        screening.ScreeningEvent.model_validate(
-            {"finding": "other", "references": ("mc1",), "excluded": ()}
-        )
 
 
 def test_a_triangle_with_a_link_not_measured_both_ways_is_not_tested() -> None:

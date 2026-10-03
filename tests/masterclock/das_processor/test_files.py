@@ -29,6 +29,13 @@ with a journal, the earliest buffered epoch is flushed to it before any data
 file opens and it is deleted after the last flush, a journal already there
 is refused, and one not whole is read as no write stopped.
 
+A row read back is checked by pydantic models with a row's, a pair
+measurement's and a triple measurement's fields, in their order: each
+value of its kind, a datetime with its timezone, no counter below 0, a
+reading within one period, an rms and a sigma not below 0, every float
+finite, components 111, 110 or 101 only, no unknown field, and every rule a
+row keeps.
+
 A row that parses but breaks a record's rules is a damaged line; every
 refusal, device fault, roll-back and redo message is word for word, and each
 error is logged as raised; free space is counted per device, just enough
@@ -36,6 +43,7 @@ being enough; a missing archive is made beside one already there; and a
 measurement time on a whole second keeps its microseconds.
 """
 
+import dataclasses
 import logging
 import os
 import shutil
@@ -49,6 +57,7 @@ from typing import Final, Literal
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from pydantic import BaseModel, ValidationError
 
 from masterclock.app.timeutil import datetime_to_mjd
 from masterclock.das_processor import files
@@ -60,7 +69,14 @@ from masterclock.domain.measurements import (
     measure_pair,
 )
 from masterclock.domain.phase import PHASE_MAX, exact
-from masterclock.domain.series import PairKey, Row, SeriesKey, State, TripleKey
+from masterclock.domain.series import (
+    PairKey,
+    Row,
+    SeriesKey,
+    State,
+    TripleKey,
+    check_row,
+)
 
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """The worked epoch's start."""
@@ -107,7 +123,9 @@ def worked_row(**changed_fields: object) -> Row:
         "flags": "A",
     }
     row_fields.update(changed_fields)
-    return Row.model_validate(row_fields)
+    row = Row(**row_fields)  # type: ignore[arg-type]
+    check_row(row)
+    return row
 
 
 MEAS_EXAMPLE: Final = (
@@ -395,8 +413,10 @@ def test_a_value_too_wide_for_its_column_is_refused(
 
 def test_a_cycle_count_too_wide_is_refused() -> None:
     """Raise DataFileError for a cycle count wider than its column."""
-    wide_measurement = PairMeasurement.model_validate(
-        {**APPENDIX_A_READING, "cycle_count": 10**12, "z": 1}
+    wide_measurement = PairMeasurement(
+        **APPENDIX_A_READING,  # type: ignore[arg-type]
+        cycle_count=10**12,
+        z=1,
     )
     with pytest.raises(DataFileError, match="cycle_count"):
         files.format_meas_row(
@@ -2027,3 +2047,143 @@ def test_a_sound_file_is_not_damaged(
         E + 2 * ONE_EPOCH, damaged=False
     )
     assert not caplog.records
+
+
+# ------------------------------------------------------- read-back models
+
+
+@pytest.mark.parametrize(
+    ("fields_model", "domain_type"),
+    [
+        (files.RowFields, Row),
+        (files.PairMeasurementFields, PairMeasurement),
+        (files.TripleMeasurementFields, TripleMeasurement),
+    ],
+)
+def test_a_read_back_model_has_its_type_s_fields_in_order(
+    fields_model: type[BaseModel], domain_type: type[object]
+) -> None:
+    """Give each read-back model exactly its type's fields, so the type builds."""
+    type_fields = [
+        type_field.name
+        for type_field in dataclasses.fields(domain_type)  # type: ignore[arg-type]
+    ]
+    assert list(fields_model.model_fields) == type_fields
+
+
+def worked_row_fields(**changed_fields: object) -> dict[str, object]:
+    """Give the worked epoch's accepted row as fields, ``changed_fields`` made."""
+    return {
+        **{
+            row_field.name: getattr(worked_row(), row_field.name)
+            for row_field in dataclasses.fields(Row)
+        },
+        **changed_fields,
+    }
+
+
+def test_row_fields_read_back_give_the_row() -> None:
+    """Give the row the fields are of."""
+    assert files.RowFields.model_validate(worked_row_fields()).row() == worked_row()
+
+
+@pytest.mark.parametrize(
+    ("row_field", "wrong_value"),
+    [
+        ("segment", -1),
+        ("epochs_in_segment", -1),
+        ("epochs_since_accept", -1),
+        ("consecutive_rejects", -1),
+        ("filter_states", 4),
+        ("x_fs", 1.5),
+        ("segment", True),
+        ("interpolated_datetime", E.replace(tzinfo=None)),
+        ("rejects", ((E.replace(tzinfo=None), 1.0),)),
+        ("flags", "AR"),
+        ("colour", "red"),
+    ],
+)
+def test_row_fields_read_back_are_checked(row_field: str, wrong_value: object) -> None:
+    """Refuse a value of the wrong kind, a naive mark, and a row that breaks a rule."""
+    with pytest.raises(ValidationError, match=row_field):
+        files.RowFields.model_validate(worked_row_fields(**{row_field: wrong_value}))
+
+
+def appendix_a_measurement_fields(**changed_fields: object) -> dict[str, object]:
+    """Give Appendix A's pair measurement as fields, ``changed_fields`` made."""
+    return {
+        **APPENDIX_A_READING,
+        "cycle_count": 6,
+        "z": 1_234_577,
+        "slip": False,
+        **changed_fields,
+    }
+
+
+def test_pair_measurement_fields_read_back_give_the_measurement() -> None:
+    """Give the measurement the fields are of."""
+    fields_read = files.PairMeasurementFields.model_validate(
+        appendix_a_measurement_fields()
+    )
+    assert fields_read.measurement() == APPENDIX_A_MEASUREMENT
+
+
+@pytest.mark.parametrize(
+    ("measurement_field", "wrong_value"),
+    [
+        ("measured_phase", -1),
+        ("measured_phase", PHASE_MAX + 1),
+        ("rms", -1),
+        ("measurement_mjd", float("nan")),
+        ("z", 1.5),
+        ("colour", "red"),
+    ],
+)
+def test_pair_measurement_fields_read_back_are_checked(
+    measurement_field: str, wrong_value: object
+) -> None:
+    """Refuse a reading outside one period, a negative rms, an MJD not finite."""
+    with pytest.raises(ValidationError, match=measurement_field):
+        files.PairMeasurementFields.model_validate(
+            appendix_a_measurement_fields(**{measurement_field: wrong_value})
+        )
+
+
+TRIPLE_FIELDS: Final[dict[str, object]] = {
+    "z": 6_666_667,
+    "double_difference_sigma": 3.3166,
+    "components_used": "110",
+    "pair_cold_started": False,
+}
+"""A triple measurement's fields."""
+
+
+def test_triple_measurement_fields_read_back_give_the_measurement() -> None:
+    """Give the measurement the fields are of; a sigma of 0 is taken."""
+    assert files.TripleMeasurementFields.model_validate(
+        TRIPLE_FIELDS
+    ).measurement() == TripleMeasurement(**TRIPLE_FIELDS)  # type: ignore[arg-type]
+    assert files.TripleMeasurementFields.model_validate(
+        {**TRIPLE_FIELDS, "double_difference_sigma": 0.0}
+    )
+
+
+@pytest.mark.parametrize(
+    ("measurement_field", "wrong_value"),
+    [
+        *(("components_used", used) for used in ("011", "100", "1", "", "111 ")),
+        *(
+            ("double_difference_sigma", sigma)
+            for sigma in (-1.0, -1e-300, float("nan"), float("inf"))
+        ),
+        ("colour", "red"),
+    ],
+)
+def test_triple_measurement_fields_read_back_are_checked(
+    measurement_field: str, wrong_value: object
+) -> None:
+    """Refuse components other than 111, 110 or 101, or a sigma below 0 or infinite."""
+    with pytest.raises(ValidationError, match=measurement_field):
+        files.TripleMeasurementFields.model_validate(
+            {**TRIPLE_FIELDS, measurement_field: wrong_value}
+        )

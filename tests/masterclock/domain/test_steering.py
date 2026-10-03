@@ -1,7 +1,7 @@
 """Tests for src/masterclock/domain/steering.py.
 
-The rules covered: a steering event carries a finite change of phase and
-rate at an instant with a timezone; a series is steered by every reference
+The rules covered: a steering event holds its changes of phase and rate
+and the instant they were applied, and is frozen; a series is steered by every reference
 in its effective difference, with the signs of design 7.1 and none for a
 self pair; the input over the previous epoch counts the events in
 (E - T, E], moved on to E; the steering inside an epoch counts the events
@@ -12,12 +12,12 @@ phase at E as it was, and enters the next epoch's input in full.
 w adds up every event inside the epoch.
 """
 
+import dataclasses
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
 from typing import Final
 
 import pytest
-from pydantic import ValidationError
 
 from masterclock.domain import phase, steering
 from masterclock.domain.series import State
@@ -49,40 +49,9 @@ def test_an_event_holds_its_changes() -> None:
     )
 
 
-@pytest.mark.parametrize("change_field", ["dx", "dy"])
-@pytest.mark.parametrize("bad_change", [float("nan"), float("inf")])
-def test_an_event_refuses_a_change_that_is_not_finite(
-    change_field: str, bad_change: float
-) -> None:
-    """Refuse nan and infinity for either change."""
-    with pytest.raises(ValidationError, match=change_field):
-        steering.SteerEvent.model_validate(
-            {
-                "applied_datetime": EPOCH_START,
-                "dx": 0.0,
-                "dy": 0.0,
-                change_field: bad_change,
-            }
-        )
-
-
-@pytest.mark.parametrize(
-    "event_fields",
-    [
-        {"applied_datetime": EPOCH_START.replace(tzinfo=None), "dx": 0.0, "dy": 0.0},
-        {"applied_datetime": EPOCH_START, "dx": "1", "dy": 0.0},
-        {"applied_datetime": EPOCH_START, "dx": 0.0, "dy": 0.0, "colour": "red"},
-    ],
-)
-def test_an_event_is_strict(event_fields: dict[str, object]) -> None:
-    """Refuse a naive instant, text for a number, and an unknown field."""
-    with pytest.raises(ValidationError):
-        steering.SteerEvent.model_validate(event_fields)
-
-
 def test_an_event_is_frozen() -> None:
     """Refuse a change to a built event."""
-    with pytest.raises(ValidationError, match="frozen"):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         steer_event(EPOCH_START).dx = 1.0  # type: ignore[misc]
 
 

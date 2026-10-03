@@ -12,18 +12,17 @@ Both give the filter step their plain values (:meth:`PairMeasurement.measured`,
 :meth:`TripleMeasurement.measured`).
 """
 
+import dataclasses
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from fractions import Fraction
-from typing import Annotated, Final, Literal
-
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Final, Literal
 
 from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.domain.double_difference import TripleValue
 from masterclock.domain.filter import FilterInput
 from masterclock.domain.phase import (
     EPOCH_SECONDS,
-    PHASE_MAX,
     PHASE_PERIOD,
     decycle,
     seconds,
@@ -59,7 +58,8 @@ def epoch_start(moment: datetime) -> datetime:
     return midnight + (moment - midnight) // _EPOCH * _EPOCH
 
 
-class PairMeasurement(BaseModel):
+@dataclass(frozen=True, slots=True)
+class PairMeasurement:
     """One pair's measurement at an epoch: a row of its measurement file.
 
     Parameters
@@ -87,19 +87,11 @@ class PairMeasurement(BaseModel):
         The start of the epoch the measurement falls in.
     delta : Fraction
         The measurement time after the epoch start, s, exactly.
-
-    Raises
-    ------
-    pydantic.ValidationError
-        If a value is out of range, or a field is of the wrong kind or
-        unknown.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
-    measurement_mjd: Annotated[float, Field(allow_inf_nan=False)]
-    measured_phase: Annotated[int, Field(ge=0, le=PHASE_MAX)]
-    rms: Annotated[int, Field(ge=0)]
+    measurement_mjd: float
+    measured_phase: int
+    rms: int
     cycle_count: int
     z: int
     slip: bool = False
@@ -133,12 +125,11 @@ class PairMeasurement(BaseModel):
             The cycle count and z moved by ``cycles`` periods, marked as
             slip corrected.
         """
-        return self.model_copy(
-            update={
-                "cycle_count": self.cycle_count + cycles,
-                "z": self.z + cycles * PHASE_PERIOD,
-                "slip": True,
-            }
+        return dataclasses.replace(
+            self,
+            cycle_count=self.cycle_count + cycles,
+            z=self.z + cycles * PHASE_PERIOD,
+            slip=True,
         )
 
     def filter_input(self) -> FilterInput:
@@ -152,7 +143,8 @@ class PairMeasurement(BaseModel):
         return FilterInput(z=self.z, rms=self.rms, slip=self.slip)
 
 
-class TripleMeasurement(BaseModel):
+@dataclass(frozen=True, slots=True)
+class TripleMeasurement:
     """One triple's measurement at an epoch: a row of its double-difference file.
 
     Parameters
@@ -165,18 +157,10 @@ class TripleMeasurement(BaseModel):
         Which of (s, c), (r, s) and (s, r) gave it, in that order.
     pair_cold_started : bool
         Whether one of its pairs cold-started at the epoch.
-
-    Raises
-    ------
-    pydantic.ValidationError
-        If a value is out of range, or a field is of the wrong kind or
-        unknown.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
     z: int
-    double_difference_sigma: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    double_difference_sigma: float
     components_used: Literal["111", "110", "101"]
     pair_cold_started: bool
 

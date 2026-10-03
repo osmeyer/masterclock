@@ -25,6 +25,7 @@ from typing import Annotated, Any, Final, NoReturn, Self
 import yaml
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     PositiveInt,
@@ -52,6 +53,35 @@ _MERGE_TAG: Final[str] = "tag:yaml.org,2002:merge"
 
 _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
+
+
+def _refuse_bool(given_states: object) -> object:
+    """Refuse a bool where a number of states is meant.
+
+    Parameters
+    ----------
+    given_states : object
+        The value given for the number of states.
+
+    Returns
+    -------
+    object
+        ``given_states``, unchanged.
+
+    Raises
+    ------
+    ValueError
+        If ``given_states`` is a bool, which pydantic would otherwise take as the
+        literal it equals: ``True`` as 1.
+    """
+    if isinstance(given_states, bool):
+        message = f"the number of states is 1, 2 or 3, not a bool: {given_states}"
+        raise ValueError(message)
+    return given_states
+
+
+type _FilterStates = Annotated[FilterStates, BeforeValidator(_refuse_bool)]
+"""How many states an estimator has, as the file gives it: 1, 2 or 3, never a bool."""
 
 type _TimeConstant = Annotated[float, Field(ge=1, allow_inf_nan=False)]
 """A time constant, epochs: at least one."""
@@ -143,7 +173,7 @@ class TypeDefault(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    filter_states: FilterStates
+    filter_states: _FilterStates
     time_constant: _TimeConstant | None = None
     scale_time_constant: _TimeConstant
     initial_innovation_scale: _Scale
@@ -180,7 +210,7 @@ class Entry(BaseModel):
 
     type: str | None = None
     effective_mjd: DataMjd | None = None
-    filter_states: FilterStates | None = None
+    filter_states: _FilterStates | None = None
     time_constant: _TimeConstant | None = None
     scale_time_constant: _TimeConstant | None = None
     initial_innovation_scale: _Scale | None = None
@@ -222,7 +252,7 @@ class ClockEntry(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
-    filter_states: FilterStates
+    filter_states: _FilterStates
     time_constant: _TimeConstant | None
     scale_time_constant: _TimeConstant
     initial_innovation_scale: _Scale

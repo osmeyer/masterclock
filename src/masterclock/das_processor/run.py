@@ -8,12 +8,11 @@ that epoch or plain values.
 """
 
 from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
-from typing import Final, Self
-
-from pydantic import AwareDatetime, BaseModel, ConfigDict, model_validator
+from typing import Final
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.app.shutdown import ShutdownHandler
@@ -79,12 +78,13 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 
-class Epoch(BaseModel):
+@dataclass(frozen=True, slots=True)
+class Epoch:
     """Everything one epoch needs, with the configuration resolved (design 4.3).
 
     Parameters
     ----------
-    interpolated_datetime : AwareDatetime
+    interpolated_datetime : datetime
         The epoch start E.
     das_block : DASData or None
         The epoch's DAS block; ``None`` when the DAS measured nothing.
@@ -102,14 +102,12 @@ class Epoch(BaseModel):
 
     Raises
     ------
-    pydantic.ValidationError
+    ValueError
         If the block is of another epoch, or the settings are not for
         exactly the epoch's series.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
-    interpolated_datetime: AwareDatetime
+    interpolated_datetime: datetime
     das_block: DASData | None
     refs: frozenset[str]
     steering: dict[str, tuple[SteerEvent, ...]]
@@ -117,14 +115,8 @@ class Epoch(BaseModel):
     triples: tuple[TripleKey, ...]
     series_params: dict[SeriesKey, SeriesParams]
 
-    @model_validator(mode="after")
-    def _check(self) -> Self:
+    def __post_init__(self) -> None:
         """Refuse a block of another epoch, or settings for other series.
-
-        Returns
-        -------
-        Self
-            The epoch, unchanged.
 
         Raises
         ------
@@ -144,7 +136,6 @@ class Epoch(BaseModel):
         if set(self.series_params) != {*self.pairs, *self.triples}:
             message = "an epoch holds settings for exactly its pairs and triples"
             raise ValueError(message)
-        return self
 
 
 def build_epoch(
@@ -208,7 +199,8 @@ def build_epoch(
     )
 
 
-class PairStep(BaseModel):
+@dataclass(frozen=True, slots=True)
+class PairStep:
     """What the pairs of an epoch gave (design 6.3).
 
     Parameters
@@ -224,8 +216,6 @@ class PairStep(BaseModel):
     slips : Slips
         What the slip check decided.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     step_results: dict[PairKey, StepResult]
     measurements: dict[PairKey, PairMeasurement]
@@ -374,7 +364,8 @@ def process_pairs(epoch: Epoch, last_rows: Mapping[SeriesKey, Row]) -> PairStep:
     )
 
 
-class TripleStep(BaseModel):
+@dataclass(frozen=True, slots=True)
+class TripleStep:
     """What the triples of an epoch gave (design 12).
 
     Parameters
@@ -386,8 +377,6 @@ class TripleStep(BaseModel):
     predictions : dict of (str, str, str) to State or None
         Each triple's prediction at E.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     step_results: dict[TripleKey, StepResult]
     measurements: dict[TripleKey, TripleMeasurement]
@@ -494,7 +483,8 @@ def process_triples(
 # --------------------------------------------------------------- the epoch loop
 
 
-class EpochDone(BaseModel):
+@dataclass(frozen=True, slots=True)
+class EpochDone:
     """What processing an epoch gave, for the run to log (design 6.3).
 
     Parameters
@@ -506,8 +496,6 @@ class EpochDone(BaseModel):
     triple_step : TripleStep
         What its triples gave.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     epoch: Epoch
     pair_step: PairStep

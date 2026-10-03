@@ -37,6 +37,7 @@ triple goes on when its reference is missing; a run with no data and no
 files does nothing; and a gap at the start of a run is predicted.
 """
 
+import dataclasses
 import logging
 import math
 from datetime import UTC, datetime, timedelta
@@ -44,7 +45,6 @@ from pathlib import Path
 from typing import Final
 
 import pytest
-from pydantic import ValidationError
 
 from masterclock.app.exceptions import ConfigError
 from masterclock.app.log import TRACE
@@ -63,7 +63,7 @@ from masterclock.das_processor.read_steering import STEERING_FILE_TEMPLATE
 from masterclock.das_processor.registry import ExistingSeries
 from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.phase import PHASE_PERIOD
-from masterclock.domain.series import Row, SeriesKey, TripleKey
+from masterclock.domain.series import Row, SeriesKey, TripleKey, check_row
 
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
 """An invented epoch start."""
@@ -253,14 +253,13 @@ def test_an_epoch_holds_settings_for_exactly_its_series(tmp_path: Path) -> None:
     epoch = run.build_epoch(
         E, das_block_of(MEASURED_PAIRS), NO_SERIES, config, clock_config
     )
-    epoch_fields = dict(epoch)
-    epoch_fields["series_params"] = {
+    fewer_params = {
         series_key: series_params
         for series_key, series_params in epoch.series_params.items()
         if series_key != ("mc1", "mc1")
     }
-    with pytest.raises(ValidationError, match="settings"):
-        run.Epoch.model_validate(epoch_fields)
+    with pytest.raises(ValueError, match="settings"):
+        dataclasses.replace(epoch, series_params=fewer_params)
 
 
 def test_an_epoch_s_block_is_of_its_epoch(tmp_path: Path) -> None:
@@ -269,9 +268,8 @@ def test_an_epoch_s_block_is_of_its_epoch(tmp_path: Path) -> None:
     epoch = run.build_epoch(
         E, das_block_of(MEASURED_PAIRS), NO_SERIES, config, clock_config
     )
-    epoch_fields = {**dict(epoch), "interpolated_datetime": E + T}
-    with pytest.raises(ValidationError, match="block"):
-        run.Epoch.model_validate(epoch_fields)
+    with pytest.raises(ValueError, match="block"):
+        dataclasses.replace(epoch, interpolated_datetime=E + T)
 
 
 # ------------------------------------------------------------ pairs of an epoch
@@ -301,7 +299,9 @@ def last_row(**changed_fields: object) -> Row:
         "flags": "A",
     }
     row_fields.update(changed_fields)
-    return Row.model_validate(row_fields)
+    row = Row(**row_fields)  # type: ignore[arg-type]
+    check_row(row)
+    return row
 
 
 WORKED_LAST_ROW: Final = last_row(
@@ -1202,13 +1202,12 @@ def test_a_phase_step_is_logged_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a phase step with its size and the step offset (16.2)."""
-    stepping_row = WORKED_LAST_ROW.model_copy(
-        update={
-            "flags": "R",
-            "consecutive_rejects": 2,
-            "rejects": ((PREVIOUS_EPOCH - T, 150.0), (PREVIOUS_EPOCH, 150.0)),
-            "epochs_since_accept": 2,
-        }
+    stepping_row = dataclasses.replace(
+        WORKED_LAST_ROW,
+        flags="R",
+        consecutive_rejects=2,
+        rejects=((PREVIOUS_EPOCH - T, 150.0), (PREVIOUS_EPOCH, 150.0)),
+        epochs_since_accept=2,
     )
     last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): stepping_row}
     moved_measurement = DASMeasurement(
@@ -1266,7 +1265,7 @@ def test_a_configuration_change_is_logged_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a warm start for new time constants (16.2)."""
-    older_row = WORKED_LAST_ROW.model_copy(update={"time_constant": 80.0})
+    older_row = dataclasses.replace(WORKED_LAST_ROW, time_constant=80.0)
     last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): older_row}
     epoch = epoch_of(
         [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
@@ -1282,13 +1281,12 @@ def test_a_frequency_step_is_logged_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log a frequency step and the segment it starts (16.2)."""
-    ramping_row = WORKED_LAST_ROW.model_copy(
-        update={
-            "flags": "R",
-            "consecutive_rejects": 2,
-            "rejects": ((PREVIOUS_EPOCH - T, 30.0), (PREVIOUS_EPOCH, 60.0)),
-            "epochs_since_accept": 2,
-        }
+    ramping_row = dataclasses.replace(
+        WORKED_LAST_ROW,
+        flags="R",
+        consecutive_rejects=2,
+        rejects=((PREVIOUS_EPOCH - T, 30.0), (PREVIOUS_EPOCH, 60.0)),
+        epochs_since_accept=2,
     )
     last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): ramping_row}
     moved_measurement = DASMeasurement(
@@ -1541,14 +1539,13 @@ def test_a_phase_step_logs_the_step_alone_and_the_new_offset(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log the step as the change in offset, and the offset it reaches (16.2)."""
-    stepping_row = WORKED_LAST_ROW.model_copy(
-        update={
-            "flags": "R",
-            "consecutive_rejects": 2,
-            "rejects": ((PREVIOUS_EPOCH - T, 150.0), (PREVIOUS_EPOCH, 150.0)),
-            "epochs_since_accept": 2,
-            "step_offset": 40,
-        }
+    stepping_row = dataclasses.replace(
+        WORKED_LAST_ROW,
+        flags="R",
+        consecutive_rejects=2,
+        rejects=((PREVIOUS_EPOCH - T, 150.0), (PREVIOUS_EPOCH, 150.0)),
+        epochs_since_accept=2,
+        step_offset=40,
     )
     last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): stepping_row}
     moved_measurement = DASMeasurement(
@@ -1572,14 +1569,13 @@ def test_a_frequency_step_with_a_configuration_change_is_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Log both when new settings and a frequency step come in one epoch (16.2)."""
-    ramping_row = WORKED_LAST_ROW.model_copy(
-        update={
-            "flags": "R",
-            "consecutive_rejects": 2,
-            "rejects": ((PREVIOUS_EPOCH - T, 30.0), (PREVIOUS_EPOCH, 60.0)),
-            "epochs_since_accept": 2,
-            "time_constant": 80.0,
-        }
+    ramping_row = dataclasses.replace(
+        WORKED_LAST_ROW,
+        flags="R",
+        consecutive_rejects=2,
+        rejects=((PREVIOUS_EPOCH - T, 30.0), (PREVIOUS_EPOCH, 60.0)),
+        epochs_since_accept=2,
+        time_constant=80.0,
     )
     last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "nav23"): ramping_row}
     moved_measurement = DASMeasurement(

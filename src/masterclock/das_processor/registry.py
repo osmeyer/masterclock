@@ -13,6 +13,7 @@ archive. The series that exist before a run are read back from the names of
 the channel's files.
 """
 
+import functools
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -142,10 +143,15 @@ def build_registry(
     return tuple(sorted(pairs)), tuple(sorted(triples))
 
 
+@functools.cache
 def series_file(
     processed_path: Path, channel: RfChannel, series_key: SeriesKey
 ) -> Path:
     """Give the path of a series' file (design 5.1).
+
+    A series' path never changes, so each is built once and the same path
+    given every time after; a path that cannot be built is refused every
+    time it is asked for.
 
     Parameters
     ----------

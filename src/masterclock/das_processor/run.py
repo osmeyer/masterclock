@@ -387,7 +387,11 @@ def _innovations(
     return innovations, scales
 
 
-def process_pairs(epoch: Epoch, last_rows: Mapping[SeriesKey, Row]) -> PairStep:
+def process_pairs(
+    epoch: Epoch,
+    last_rows: Mapping[SeriesKey, Row],
+    last_segments: Mapping[SeriesKey, int] | None = None,
+) -> PairStep:
     """Process an epoch's pairs: predict, decycle, screen, check slips, filter.
 
     Parameters
@@ -395,7 +399,12 @@ def process_pairs(epoch: Epoch, last_rows: Mapping[SeriesKey, Row]) -> PairStep:
     epoch : Epoch
         The epoch.
     last_rows : Mapping of series key to Row
-        Each series' last row; a series missing here is new.
+        Each series' row of the epoch before E; a series missing here is
+        new, or starts again.
+    last_segments : Mapping of series key to int or None, optional
+        The segment of the newest row of each series that starts again
+        after epochs it had no row for, the series starting in the next
+        (see :func:`~masterclock.domain.filter.carry`); none when ``None``.
 
     Returns
     -------
@@ -437,6 +446,7 @@ def process_pairs(epoch: Epoch, last_rows: Mapping[SeriesKey, Row]) -> PairStep:
             predictions[pair],
             None if measurement is None else measurement.filter_input(),
             excluded=pair in excluded_pairs,
+            last_segment=(last_segments or {}).get(pair),
         )
     return PairStep(
         step_results=step_results,
@@ -501,7 +511,10 @@ def _component(pair_step: PairStep, pair: PairKey) -> Component:
 
 
 def process_triples(
-    epoch: Epoch, last_rows: Mapping[SeriesKey, Row], pair_step: PairStep
+    epoch: Epoch,
+    last_rows: Mapping[SeriesKey, Row],
+    pair_step: PairStep,
+    last_segments: Mapping[SeriesKey, int] | None = None,
 ) -> TripleStep:
     """Process an epoch's triples: double differences, then the filter (design 12).
 
@@ -510,9 +523,13 @@ def process_triples(
     epoch : Epoch
         The epoch.
     last_rows : Mapping of series key to Row
-        Each series' last row; a series missing here is new.
+        Each series' row of the epoch before E; a series missing here is
+        new, or starts again.
     pair_step : PairStep
         What the epoch's pairs gave.
+    last_segments : Mapping of series key to int or None, optional
+        The segment of the newest row of each series that starts again
+        (see :func:`process_pairs`); none when ``None``.
 
     Returns
     -------
@@ -562,6 +579,7 @@ def process_triples(
             last_rows.get(triple),
             prediction,
             None if measurement is None else measurement.filter_input(),
+            last_segment=(last_segments or {}).get(triple),
         )
     return TripleStep(
         step_results=step_results, measurements=measurements, predictions=predictions
@@ -623,7 +641,7 @@ def data_series(config: AppConfig) -> list[tuple[Path, FileKind, SeriesKey]]:
 
 
 def next_epoch(config: AppConfig) -> datetime:
-    """Roll every file back to the epoch they all hold, and give the next (design 6.7).
+    """Cut back what cannot be kept, and give the next epoch (design 6.7).
 
     Parameters
     ----------
@@ -633,10 +651,11 @@ def next_epoch(config: AppConfig) -> datetime:
     Returns
     -------
     datetime
-        One epoch after L, the oldest epoch any file is good through, or
-        the epoch before a write that stopped part way, when its journal is
-        there; with no file holding a whole row, the epoch containing
-        ``start_from_mjd``.
+        One epoch after the newest epoch any file is good through; with no
+        file holding a whole row, the epoch containing ``start_from_mjd``.
+        A file may end earlier: its series was left out of the later
+        epochs, or a damaged end was cut off, and it starts cold when it is
+        next in an epoch.
 
     Raises
     ------
@@ -648,27 +667,29 @@ def next_epoch(config: AppConfig) -> datetime:
     Notes
     -----
     The journal is read before any file is checked. When it is there, a
-    file whose first row is damaged is one the stopped write was creating,
-    its length on the device but not its rows, and the roll-back deletes
-    it, to be made again. Each damaged file is logged once at ERROR by the
-    file check, and a roll-back that changed anything, or followed a
-    stopped write, is logged once at WARNING, with the epoch, why, and how
-    many files it cut, deleted and left.
+    write stopped part way, and every file is cut back to before the
+    write's first epoch; a file whose first row is damaged is then one the
+    write was creating, its length on the device but not its rows, and it
+    is deleted, to be made again. A damaged file is cut back to its last
+    good row. Each damaged file is logged once at ERROR by the file check,
+    and a roll-back that changed anything, or followed a stopped write, is
+    logged once at WARNING, with why, how many files it cut, deleted and
+    left, and the epoch the run goes on after.
     """
     journal = config.processed.processed_path / JOURNAL_FILE_TEMPLATE.format(
         rf=config.das.rf
     )
-    common_epoch = _roll_back_all(config, read_journal(journal))
+    newest_epoch = _roll_back_all(config, read_journal(journal))
     clear_journal(journal)
-    if common_epoch is None:
+    if newest_epoch is None:
         return floor_to_ten_minutes(mjd_to_datetime(config.processed.start_from_mjd))
-    return common_epoch + _EPOCH
+    return newest_epoch + _EPOCH
 
 
 def _roll_back_all(
     config: AppConfig, stopped_write_epoch: datetime | None
 ) -> datetime | None:
-    """Check every file, roll them all back to one epoch, and log it once.
+    """Check every file, cut each back to what it can keep, and log it once.
 
     Parameters
     ----------
@@ -681,7 +702,7 @@ def _roll_back_all(
     Returns
     -------
     datetime or None
-        L, the epoch every file now ends at; ``None`` when none holds a
+        The newest epoch any file now ends at; ``None`` when none holds a
         whole row.
 
     Raises
@@ -696,52 +717,60 @@ def _roll_back_all(
         check_file(data_file, file_kind, stopped_write=stopped_write)
         for data_file, file_kind, _ in series_files
     ]
-    good_epochs = [file_check.good_through for file_check in file_checks]
-    if stopped_write_epoch is not None:
-        good_epochs.append(stopped_write_epoch - _EPOCH)
-    common_epoch = min(
-        (good_epoch for good_epoch in good_epochs if good_epoch is not None),
+    kept_epochs = _kept_epochs(file_checks, stopped_write_epoch)
+    cuts = [
+        roll_back(data_file, file_kind, kept_epoch)
+        for (data_file, file_kind, _), kept_epoch in zip(
+            series_files, kept_epochs, strict=True
+        )
+    ]
+    newest_epoch = max(
+        (kept_epoch for kept_epoch in kept_epochs if kept_epoch is not None),
         default=None,
     )
-    cuts = [
-        roll_back(data_file, file_kind, common_epoch)
-        for data_file, file_kind, _ in series_files
-    ]
     if stopped_write or any(cut != "kept" for cut in cuts):
         _log_roll_back(
             config.das.rf,
-            common_epoch,
-            _roll_back_reason(file_checks, stopped_write),
+            newest_epoch,
+            "a write that stopped part way"
+            if stopped_write
+            else "damaged files, each logged at ERROR",
             cuts,
         )
-    return common_epoch
+    return newest_epoch
 
 
-def _roll_back_reason(file_checks: list[FileCheck], stopped_write: bool) -> str:
-    """Say why a roll-back happened, for its log entry.
+def _kept_epochs(
+    file_checks: list[FileCheck], stopped_write_epoch: datetime | None
+) -> list[datetime | None]:
+    """Give the last epoch each file keeps.
 
     Parameters
     ----------
     file_checks : list of FileCheck
         What the file check found in each file.
-    stopped_write : bool
-        Whether the write journal was there.
+    stopped_write_epoch : datetime or None
+        The first epoch of a write that stopped part way; ``None`` when
+        there was none.
 
     Returns
     -------
-    str
-        A write that stopped part way, damaged files, or files that ended
-        at different epochs, in that order of precedence.
+    list of datetime or None
+        For each file, its last good row's epoch, and no later than the
+        epoch before ``stopped_write_epoch``; ``None`` for a file that keeps
+        no row.
     """
-    if stopped_write:
-        return "a write that stopped part way"
-    if any(file_check.damaged for file_check in file_checks):
-        return "damaged files, each logged at ERROR"
-    return "files that ended at different epochs"
+    kept_epochs = [file_check.good_through for file_check in file_checks]
+    if stopped_write_epoch is None:
+        return kept_epochs
+    return [
+        None if kept_epoch is None else min(kept_epoch, stopped_write_epoch - _EPOCH)
+        for kept_epoch in kept_epochs
+    ]
 
 
 def _log_roll_back(
-    channel: RfChannel, common_epoch: datetime | None, reason: str, cuts: list[Cut]
+    channel: RfChannel, newest_epoch: datetime | None, reason: str, cuts: list[Cut]
 ) -> None:
     """Log a roll-back once, at WARNING (design 6.7, 16.2).
 
@@ -749,22 +778,22 @@ def _log_roll_back(
     ----------
     channel : {'a', 'b'}
         The RF channel.
-    common_epoch : datetime or None
-        The epoch every file was rolled back to; ``None`` for no row.
+    newest_epoch : datetime or None
+        The newest epoch any file ends at after it; ``None`` for no row.
     reason : str
         Why, in words.
     cuts : list of {'kept', 'cut', 'deleted'}
         What the roll-back did to each file.
     """
     _log.warning(
-        "rolled back every file of channel %s to %s, after %s:"
-        " %d files cut, %d deleted, %d already there",
+        "cut back the files of channel %s after %s: %d files cut, %d deleted,"
+        " %d left; the newest row is now of %s",
         channel,
-        "no row" if common_epoch is None else common_epoch,
         reason,
         cuts.count("cut"),
         cuts.count("deleted"),
         cuts.count("kept"),
+        "no epoch" if newest_epoch is None else newest_epoch,
     )
 
 
@@ -792,6 +821,36 @@ def read_last_state(config: AppConfig) -> dict[SeriesKey, Row]:
     }
 
 
+def _rows_before(
+    newest_rows: Mapping[SeriesKey, Row], epoch_start: datetime
+) -> tuple[dict[SeriesKey, Row], dict[SeriesKey, int]]:
+    """Split the series' newest rows into last rows and series that start again.
+
+    Parameters
+    ----------
+    newest_rows : Mapping of series key to Row
+        Each series' newest row.
+    epoch_start : datetime
+        The epoch start E.
+
+    Returns
+    -------
+    tuple of (dict, dict)
+        The rows of the epoch before E, each its series' last row; and for
+        every series whose newest row is older, its segment. Such a series
+        had no row for the epoch before E, so it starts cold at E, as a new
+        series does, in the segment after its newest row's.
+    """
+    last_rows: dict[SeriesKey, Row] = {}
+    last_segments: dict[SeriesKey, int] = {}
+    for series_key, newest_row in newest_rows.items():
+        if newest_row.interpolated_datetime == epoch_start - _EPOCH:
+            last_rows[series_key] = newest_row
+        else:
+            last_segments[series_key] = newest_row.segment
+    return last_rows, last_segments
+
+
 def process_epoch(
     epoch_start: datetime,
     das_block: DASData | None,
@@ -811,7 +870,7 @@ def process_epoch(
         The epoch's DAS block, or ``None`` when the DAS measured nothing.
     day_buffer : DayBuffer
         The day buffer, whose newest rows are the series' last rows; when
-        it holds none, they are read from the files.
+        it holds none, they are read from the files into it.
     config : AppConfig
         The run's settings.
     clock_config : ClockConfig
@@ -833,21 +892,22 @@ def process_epoch(
         If anything about the epoch cannot be read, worked out or
         formatted; the buffer then holds none of the epoch's rows.
     """
-    last_rows = (
-        dict(day_buffer.last_rows) if day_buffer.last_rows else read_last_state(config)
-    )
+    if not day_buffer.last_rows:
+        day_buffer.last_rows.update(read_last_state(config))
+    newest_rows = dict(day_buffer.last_rows)
     earlier_series = ExistingSeries(
         pairs=frozenset(
             (series_key[0], series_key[1])
-            for series_key in last_rows
+            for series_key in newest_rows
             if len(series_key) == _PAIR
         ),
         triples=frozenset(
             (series_key[0], series_key[1], series_key[-1])
-            for series_key in last_rows
+            for series_key in newest_rows
             if len(series_key) == _TRIPLE
         ),
     )
+    last_rows, last_segments = _rows_before(newest_rows, epoch_start)
     epoch = build_epoch(
         epoch_start,
         das_block,
@@ -857,8 +917,8 @@ def process_epoch(
         last_epoch,
         steering_files,
     )
-    pair_step = process_pairs(epoch, last_rows)
-    triple_step = process_triples(epoch, last_rows, pair_step)
+    pair_step = process_pairs(epoch, last_rows, last_segments)
+    triple_step = process_triples(epoch, last_rows, pair_step, last_segments)
     series_records: list[tuple[SeriesKey, MeasRecord | DdiffRecord]] = [
         (
             pair,
@@ -920,7 +980,7 @@ def run(
 
     Notes
     -----
-    The run starts one epoch after the epoch every file holds (see
+    The run starts one epoch after the newest epoch any file holds (see
     :func:`next_epoch`); while no series exists yet, at the first block,
     since an epoch before it holds no series and writes nothing, and a run
     of one epoch would otherwise never get past it. An epoch with no block

@@ -24,13 +24,16 @@ corrected slips at INFO; rejects, screening failures, a missing self pair
 and undecided slips at WARNING; each series' outcome at
 DEBUG and its prediction and update at TRACE.
 
-The next epoch is one after the oldest epoch every file is good through,
-every file rolled back to it, or one before the epoch a write journal
-names, the journal then deleted, and a file whose first row is damaged,
-refused without a journal, deleted with one, to be made again; with no
-file, the epoch containing start_from_mjd. A roll-back is logged once at
-WARNING, with the epoch, its reason and what it did, and nothing is logged
-when nothing was rolled back.
+The next epoch is one after the newest epoch any file is good through: a
+damaged file is cut back to its last good row and the rest left; after a
+write that stopped part way, every file is cut back to before the epoch its
+journal names, the journal then deleted, and a file whose first row is
+damaged is refused without a journal and deleted with one, to be made
+again; with no file, the epoch containing start_from_mjd. A roll-back is
+logged once at WARNING, with its reason, what it did and the newest row
+left, and nothing is logged when nothing was cut. A series whose newest row
+is not of the epoch before starts cold, in the segment after its newest
+row's.
 
 Each series takes the settings in force at its epoch; a link not accepted
 does not make its triple cold; the TRACE lines and steps with a settings
@@ -956,24 +959,22 @@ def test_a_run_restarted_after_every_epoch_writes_the_same_files(
         )
 
 
-def test_a_damaged_line_found_at_the_start_redoes_every_file_from_its_epoch(
+def test_a_damaged_line_found_at_the_start_cuts_only_its_file(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Roll every file back before a damaged line, then redo them alike (6.7, U26)."""
-    clean_config, clock_config = make_loop_deployment(tmp_path / "clean")
-    write_das_files(tmp_path / "clean", [LATE_START + i * T for i in range(6)])
-    run.run(clean_config, clock_config, None, ShutdownHandler())
-    damaged_config, clock_config = make_loop_deployment(tmp_path / "damaged")
-    write_das_files(tmp_path / "damaged", [LATE_START + i * T for i in range(6)])
-    run.run(damaged_config, clock_config, None, ShutdownHandler())
+    """Cut a damaged file before its damaged line, and go on after the newest row."""
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(6)])
+    run.run(config, clock_config, None, ShutdownHandler())
     data_file = registry.series_file(
-        damaged_config.processed.processed_path, "a", ("mc1", "ox23")
+        config.processed.processed_path, "a", ("mc1", "ox23")
     )
     file_bytes = bytearray(data_file.read_bytes())
     line_size = files.MEAS_WIDTH + 1
     file_bytes[(files.MEAS_HEADER_LINES + 2) * line_size + 3] = ord("x")
     data_file.write_bytes(bytes(file_bytes[: -line_size // 2]))
-    assert run.next_epoch(damaged_config) == LATE_START + 2 * T
+    caplog.clear()
+    assert run.next_epoch(config) == LATE_START + 6 * T
     log_entries = [
         (log_record.levelname, log_record.getMessage()) for log_record in caplog.records
     ]
@@ -982,21 +983,14 @@ def test_a_damaged_line_found_at_the_start_redoes_every_file_from_its_epoch(
         f"data file {data_file} is damaged after its row of {LATE_START + T}: "
     )
     assert log_entries[1][1] == (
-        f"rolled back every file of channel a to {LATE_START + T}, after damaged"
-        f" files, each logged at ERROR: {len(LOOP_SERIES)} files cut, 0 deleted,"
-        " 0 already there"
+        "cut back the files of channel a after damaged files, each logged at ERROR:"
+        f" 1 files cut, 0 deleted, {len(LOOP_SERIES) - 1} left; the newest row is"
+        f" now of {LATE_START + 5 * T}"
     )
-    run.run(damaged_config, clock_config, None, ShutdownHandler())
-    for series_key in LOOP_SERIES:
-        first_series_file = registry.series_file(
-            clean_config.processed.processed_path, "a", series_key
-        )
-        second_series_file = registry.series_file(
-            damaged_config.processed.processed_path, "a", series_key
-        )
-        assert first_series_file.read_bytes() == second_series_file.read_bytes(), (
-            series_key
-        )
+    for checked_file, file_kind, series_key in run.data_series(config):
+        assert files.good_through(checked_file, file_kind) == (
+            LATE_START + (T if checked_file == data_file else 5 * T)
+        ), series_key
 
 
 def test_a_journal_found_at_the_start_rolls_every_file_back_before_its_epoch(
@@ -1016,9 +1010,9 @@ def test_a_journal_found_at_the_start_rolls_every_file_back_before_its_epoch(
     caplog.clear()
     assert run.next_epoch(stopped_config) == LATE_START + 3 * T
     assert [log_record.getMessage() for log_record in caplog.records] == [
-        f"rolled back every file of channel a to {LATE_START + 2 * T}, after a write"
-        f" that stopped part way: {len(LOOP_SERIES)} files cut, 0 deleted,"
-        " 0 already there"
+        "cut back the files of channel a after a write that stopped part way:"
+        f" {len(LOOP_SERIES)} files cut, 0 deleted, 0 left; the newest row is now of"
+        f" {LATE_START + 2 * T}"
     ]
     caplog.clear()
     assert run.next_epoch(stopped_config) == LATE_START + 3 * T
@@ -1793,10 +1787,10 @@ def test_a_new_file_left_without_its_rows_by_a_stopped_write_is_made_again(
         )
 
 
-def test_files_ending_apart_are_rolled_back_with_that_reason(
+def test_files_ending_apart_are_left_as_they_are(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Log the roll-back once, naming files that ended at different epochs."""
+    """Leave a file that ends early, log nothing, and go on after the newest row."""
     config, clock_config = make_loop_deployment(tmp_path)
     write_das_files(tmp_path, [LATE_START + i * T for i in range(3)])
     run.run(config, clock_config, None, ShutdownHandler())
@@ -1804,18 +1798,11 @@ def test_files_ending_apart_are_rolled_back_with_that_reason(
         config.processed.processed_path, "a", ("mc1", "ox23")
     )
     data_file.write_bytes(data_file.read_bytes()[: -(files.MEAS_WIDTH + 1)])
+    shorter_bytes = data_file.read_bytes()
     caplog.clear()
-    assert run.next_epoch(config) == LATE_START + 2 * T
-    assert [
-        (log_record.levelname, log_record.getMessage()) for log_record in caplog.records
-    ] == [
-        (
-            "WARNING",
-            f"rolled back every file of channel a to {LATE_START + T}, after files that"
-            f" ended at different epochs: {len(LOOP_SERIES) - 1} files cut, 0 deleted,"
-            " 1 already there",
-        )
-    ]
+    assert run.next_epoch(config) == LATE_START + 3 * T
+    assert caplog.records == []
+    assert data_file.read_bytes() == shorter_bytes
 
 
 # ------------------------------------------------- work an epoch need not do
@@ -2084,3 +2071,32 @@ def test_a_run_reads_each_steering_line_once(
     monkeypatch.setattr(read_steering, "_parse_steering_line", count_parse)
     run.run(config, clock_config, None, ShutdownHandler())
     assert parsed_lines == [steering_line[:-1] for steering_line in steering_lines]
+
+
+def test_a_series_with_no_row_for_the_epoch_before_starts_again() -> None:
+    """Give rows of the epoch before as last rows, and older series their segments."""
+    current_row = last_row()
+    older_row = last_row(interpolated_datetime=PREVIOUS_EPOCH - 3 * T, segment=6)
+    last_rows, last_segments = run._rows_before(
+        {("mc1", "mc1"): current_row, ("mc2", "mc2"): older_row}, E
+    )
+    assert last_rows == {("mc1", "mc1"): current_row}
+    assert last_segments == {("mc2", "mc2"): 6}
+
+
+def test_a_pair_and_a_triple_starting_again_start_in_their_next_segments(
+    tmp_path: Path,
+) -> None:
+    """Start a pair and a triple with no last row dormant in the segment after."""
+    epoch = epoch_of([*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], {}, tmp_path)
+    last_segments: dict[SeriesKey, int] = {
+        ("mc2", "ox23"): 5,
+        ("mc1", "mc2", "ox23"): 3,
+    }
+    pair_step = run.process_pairs(epoch, {}, last_segments)
+    triple_step = run.process_triples(epoch, {}, pair_step, last_segments)
+    pair_row = pair_step.step_results[("mc2", "ox23")].row
+    triple_row = triple_step.step_results[("mc1", "mc2", "ox23")].row
+    assert (pair_row.flags, pair_row.segment) == ("RD", 6)
+    assert (triple_row.flags, triple_row.segment) == ("PD", 4)
+    assert pair_step.step_results[("mc1", "mc1")].row.segment == 0

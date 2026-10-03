@@ -280,6 +280,7 @@ def carry(
     series_params: SeriesParams,
     *,
     slip: bool = False,
+    last_segment: int | None = None,
 ) -> RowDraft:
     """Start an epoch's row from the series' last row.
 
@@ -294,14 +295,19 @@ def carry(
     slip : bool, optional
         Whether the slip check corrected this epoch's measurement; the row
         then carries S.
+    last_segment : int or None, optional
+        For a series that starts again after epochs it had no row for, the
+        segment of its last row; it starts in the next one. ``None`` for a
+        new series, which starts in segment 0.
 
     Returns
     -------
     RowDraft
-        For a new series: dormant, with no state, in segment 0, every
-        counter 0, the model and time constants of ``series_params``. Otherwise
-        the last row moved on to ``epoch_start``, with no innovation, one more
-        epoch in its segment and no flags. S when ``slip``.
+        For a new series: dormant, with no state, in segment 0, or one
+        after ``last_segment`` when it is given, every counter 0, the model
+        and time constants of ``series_params``. Otherwise the last row
+        moved on to ``epoch_start``, with no innovation, one more epoch in
+        its segment and no flags. S when ``slip``.
 
     Examples
     --------
@@ -323,7 +329,7 @@ def carry(
             y=None,
             d=None,
             innovation_scale=None,
-            segment=0,
+            segment=0 if last_segment is None else last_segment + 1,
             step_offset=0,
             epochs_in_segment=0,
             epochs_since_accept=0,
@@ -1161,6 +1167,7 @@ def filter_step(
     measurement: FilterInput | None,
     *,
     excluded: bool = False,
+    last_segment: int | None = None,
 ) -> StepResult:
     """Give a series' row at an epoch: the whole of the decision flow (design 9.6).
 
@@ -1179,6 +1186,11 @@ def filter_step(
         The series' measurement at E, or ``None`` when there is none.
     excluded : bool, optional
         Whether screening or the slip check excluded the measurement.
+    last_segment : int or None, optional
+        For a series that starts again after epochs it had no row for, so
+        that ``last_row`` is ``None``, the segment of its last row in its
+        file, the series starting in the next (see :func:`carry`); ``None``
+        for a new series.
 
     Returns
     -------
@@ -1202,6 +1214,7 @@ def filter_step(
         last_row,
         series_params,
         slip=measurement is not None and measurement.slip,
+        last_segment=last_segment,
     )
     if (
         last_row is not None

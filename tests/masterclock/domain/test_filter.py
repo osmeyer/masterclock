@@ -11,7 +11,8 @@ noise-free ramp or parabola is followed to within 1 ps, whether the phase
 is kept exact or each row stores it in whole femtoseconds.
 
 The row lifecycle: a row starts from the last row moved on one epoch, or
-dormant in segment 0 for a new series; an accepted row holds the update,
+dormant in segment 0 for a new series, or in the segment after its last
+row's for one that starts again; an accepted row holds the update,
 clears the counters and the buffer, and moves the innovation scale by the
 innovation before the update, never below its floor; a held row (P, X or R)
 stores the prediction and keeps the scale, the counters and the buffer, one
@@ -526,6 +527,27 @@ def test_a_new_series_starts_dormant_in_segment_zero() -> None:
         scale_time_constant=40.0,
         flags="",
     )
+
+
+def test_a_series_starting_again_starts_in_the_segment_after_its_last() -> None:
+    """Start dormant in the segment after the given one, and cold-start past it."""
+    series_params = make_series_params()
+    draft = estimator.carry(NEXT_EPOCH_START, None, series_params, last_segment=7)
+    assert (draft.segment, draft.x_fs, draft.flags) == (8, None, "")
+    epoch_start = NEXT_EPOCH_START
+    previous_row: Row | None = None
+    for _ in range(3):
+        previous_row = estimator.filter_step(
+            epoch_start,
+            series_params,
+            previous_row,
+            None,
+            estimator.FilterInput(z=WORKED_Z, rms=3),
+            last_segment=7,
+        ).row
+        epoch_start += EPOCH_LENGTH
+    assert previous_row is not None
+    assert (previous_row.flags, previous_row.segment) == ("ANU", 9)
 
 
 def test_carry_moves_the_last_row_on_one_epoch() -> None:

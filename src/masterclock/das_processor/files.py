@@ -23,9 +23,11 @@ reads back without one.
 
 Rows are buffered and written a day at a time (:func:`write_buffer`), every
 check made before the first byte, under a write journal that names the
-first epoch being written. A run that starts checks every file and rolls
-them all back to the oldest epoch they all hold, or to before the epoch a
-journal names (:func:`roll_back`, :func:`read_journal`).
+first epoch being written. A run that starts checks every file, cuts a
+damaged one back to its last good row, and cuts every file back to before
+the epoch a journal names (:func:`roll_back`, :func:`read_journal`). Files
+may end at different epochs: a series writes no row for an epoch it is not
+in.
 """
 
 import dataclasses
@@ -1979,38 +1981,31 @@ def _keep_through(
     Raises
     ------
     DataFileError
-        If the file cannot be read, changed or deleted, its first row is
-        not good, or the row for ``last_kept_epoch`` found by counting one row per
-        epoch from the first is missing or of another epoch.
+        If the file cannot be read, changed or deleted.
+
+    Notes
+    -----
+    A file's rows are in time order, though an epoch may have none: a
+    series writes no row while it is left out of the epochs. The rows kept
+    are found by a binary search over the line slots, a slot that is not a
+    good row counting as after ``last_kept_epoch``: every row up to it is
+    good, so the damage lies after it.
     """
     line_size, header_lines = WIDTHS[file_kind] + 1, HEADER_LINES[file_kind]
     try:
         with data_file.open("rb") as open_file:
             file_length = open_file.seek(0, os.SEEK_END)
-            row_slots = file_length // line_size - header_lines
-            first_epoch = (
-                row_epoch(_slot(open_file, header_lines, line_size), file_kind)
-                if row_slots > 0
-                else None
-            )
-            if (
-                last_kept_epoch is None
-                or first_epoch is None
-                or last_kept_epoch < first_epoch
-            ):
-                kept_rows = 0
-            else:
-                kept_rows = (last_kept_epoch - first_epoch) // _EPOCH + 1
-                if kept_rows > row_slots:
-                    _fail(f"{data_file} has no row for {last_kept_epoch}")
-                found_epoch = row_epoch(
-                    _slot(open_file, header_lines + kept_rows - 1, line_size), file_kind
+            row_slots = max(file_length // line_size - header_lines, 0)
+            kept_rows = 0
+            if last_kept_epoch is not None:
+                kept_rows = _rows_through(
+                    open_file,
+                    row_slots,
+                    header_lines,
+                    line_size,
+                    file_kind,
+                    last_kept_epoch,
                 )
-                if found_epoch != last_kept_epoch:
-                    _fail(
-                        f"{data_file} does not hold one row per epoch:"
-                        f" {found_epoch} for {last_kept_epoch}"
-                    )
     except OSError as exc:
         _fail(f"cannot read data file {data_file}: {exc}", exc)
     if kept_rows == 0:
@@ -2021,6 +2016,50 @@ def _keep_through(
         return "kept"
     _truncate(data_file, new_length)
     return "cut"
+
+
+def _rows_through(
+    open_file: BinaryIO,
+    row_slots: int,
+    header_lines: int,
+    line_size: int,
+    file_kind: FileKind,
+    last_kept_epoch: datetime,
+) -> int:
+    """Count a file's rows up to and including an epoch, by binary search.
+
+    Parameters
+    ----------
+    open_file : BinaryIO
+        The file, open.
+    row_slots : int
+        Its whole line slots after the header.
+    header_lines : int
+        Its header's lines.
+    line_size : int
+        Its line width, newline included.
+    file_kind : {'meas', 'ddiff'}
+        Its kind.
+    last_kept_epoch : datetime
+        The last epoch to keep.
+
+    Returns
+    -------
+    int
+        How many slots from the first hold good rows at or before
+        ``last_kept_epoch``.
+    """
+    low, high = 0, row_slots
+    while low < high:
+        middle = (low + high) // 2
+        middle_epoch = row_epoch(
+            _slot(open_file, header_lines + middle, line_size), file_kind
+        )
+        if middle_epoch is not None and middle_epoch <= last_kept_epoch:
+            low = middle + 1
+        else:
+            high = middle
+    return low
 
 
 def _delete(deleted_file: Path) -> None:
@@ -2068,19 +2107,20 @@ def _truncate(data_file: Path, new_length: int) -> None:
 
 
 def roll_back(
-    data_file: Path, file_kind: FileKind, common_epoch: datetime | None
+    data_file: Path, file_kind: FileKind, last_kept_epoch: datetime | None
 ) -> Cut:
-    """Roll a file back to the epoch every file holds (design 6.7).
+    """Cut a file back to its rows up to an epoch (design 6.7).
 
     Parameters
     ----------
     data_file : Path
-        The file, good through ``common_epoch`` or later.
+        The file, its rows good up to ``last_kept_epoch``.
     file_kind : {'meas', 'ddiff'}
         Its kind.
-    common_epoch : datetime or None
-        L, the oldest epoch any file of the channel is good through;
-        ``None`` when no file holds a whole row.
+    last_kept_epoch : datetime or None
+        The last epoch to keep: the file's last good row, or the epoch
+        before a write that stopped part way if that is earlier; ``None``
+        to keep none.
 
     Returns
     -------
@@ -2091,17 +2131,16 @@ def roll_back(
     Raises
     ------
     DataFileError
-        If the file cannot be read, changed or deleted, or does not hold
-        one row per epoch.
+        If the file cannot be read, changed or deleted.
 
     Notes
     -----
-    The file is truncated just after its row for ``common_epoch``, which also
-    removes any damaged or torn line after it, or deleted when it has no
-    row at or before ``common_epoch``. A file that already ends there is left as
-    it is.
+    The file is truncated just after its last row at or before
+    ``last_kept_epoch``, which also removes any damaged or torn line after
+    it, or deleted when it has no such row. A file that already ends there
+    is left as it is.
     """
-    return _keep_through(data_file, file_kind, common_epoch)
+    return _keep_through(data_file, file_kind, last_kept_epoch)
 
 
 def redo_from(
@@ -2124,15 +2163,15 @@ def redo_from(
     Raises
     ------
     DataFileError
-        If a file cannot be read, changed or deleted, its first row is not
-        good, or it does not hold one row per epoch.
+        If a file cannot be read, changed or deleted, or its first row is
+        not good.
 
     Notes
     -----
     Each file is truncated just before its first row at or after ``redo_epoch``,
     and deleted when it has no earlier row. A file is never kept past its
-    last good row, so a damaged one is cut there instead, and the roll-back
-    that follows (see :func:`roll_back`) brings every file to one epoch.
+    last good row, so a damaged one is cut there instead. The run then goes
+    on from the newest epoch any file holds (see :func:`roll_back`).
     Running it again after an interruption finishes the deletion: a file
     already cut is left as it is. The redo is logged once at INFO, with how
     many files it cut, deleted and left.

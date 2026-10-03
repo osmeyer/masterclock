@@ -20,8 +20,9 @@ through the row before its first line that does not parse, holds nothing
 good when it has no whole row, and is refused when its first row does not
 parse, unless a write stopped part way, when it holds nothing good; a
 damaged file is explained once at ERROR, where and why; and the last row
-of a sound file is read back as its row (U26). A roll-back says what it did
-to each file and logs nothing; a redo is logged once at INFO.
+of a sound file is read back as its row (U26). A roll-back keeps a file's
+rows up to an epoch, found by searching though epochs may have no row, says
+what it did to the file and logs nothing; a redo is logged once at INFO.
 
 The write: every check is made before a file is opened, and a failed one
 changes nothing; files are written one at a time, measurement files first;
@@ -1239,18 +1240,18 @@ def row_epochs_of(meas_path: Path) -> list[datetime]:
     ]
 
 
-def test_a_file_is_rolled_back_to_just_after_the_common_epoch(
+def test_a_file_is_rolled_back_to_just_after_the_epoch_kept(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Truncate just after the row for L, and say it was cut, logging nothing (6.7)."""
+    """Truncate just after the epoch's row, say it was cut, log nothing (6.7)."""
     meas_path = written_meas_file(tmp_path / "meas" / "das_a.mc2.ox23.dat", 5)
     assert files.roll_back(meas_path, "meas", E + 2 * ONE_EPOCH) == "cut"
     assert row_epochs_of(meas_path) == [E, E + ONE_EPOCH, E + 2 * ONE_EPOCH]
     assert not caplog.records
 
 
-def test_a_torn_line_after_the_common_epoch_goes_too(tmp_path: Path) -> None:
-    """Remove a torn line with the rows after L."""
+def test_a_torn_line_after_the_epoch_kept_goes_too(tmp_path: Path) -> None:
+    """Remove a torn line with the rows after the epoch kept."""
     meas_path = written_meas_file(tmp_path / "meas" / "das_a.mc2.ox23.dat", 3)
     with meas_path.open("ab") as open_file:
         open_file.write(b"2025-09-23 06:3")
@@ -1259,10 +1260,10 @@ def test_a_torn_line_after_the_common_epoch_goes_too(tmp_path: Path) -> None:
     assert files.good_through(meas_path, "meas") == E + 2 * ONE_EPOCH
 
 
-def test_a_sound_file_ending_at_the_common_epoch_is_untouched(
+def test_a_sound_file_ending_at_the_epoch_kept_is_untouched(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Leave a file that already ends at L as it is, unlogged."""
+    """Leave a file that already ends at the epoch kept as it is, unlogged."""
     meas_path = written_meas_file(tmp_path / "meas" / "das_a.mc2.ox23.dat", 3)
     stat_before = meas_path.stat()
     files.roll_back(meas_path, "meas", E + 2 * ONE_EPOCH)
@@ -1275,31 +1276,60 @@ def test_a_sound_file_ending_at_the_common_epoch_is_untouched(
     assert not caplog.records
 
 
-@pytest.mark.parametrize("common_epoch", [None, E - ONE_EPOCH])
-def test_a_file_with_no_row_at_or_before_the_common_epoch_is_deleted(
-    tmp_path: Path, common_epoch: datetime | None
+@pytest.mark.parametrize("last_kept_epoch", [None, E - ONE_EPOCH])
+def test_a_file_with_no_row_at_or_before_the_epoch_kept_is_deleted(
+    tmp_path: Path, last_kept_epoch: datetime | None
 ) -> None:
-    """Delete a file whose first row is after L, and every file when there is no L."""
+    """Delete a file whose first row is after the epoch kept, or keeping none."""
     meas_path = written_meas_file(tmp_path / "meas" / "das_a.mc2.ox23.dat", 3)
-    files.roll_back(meas_path, "meas", common_epoch)
+    files.roll_back(meas_path, "meas", last_kept_epoch)
     assert not meas_path.exists()
 
 
-def test_a_file_without_one_row_per_epoch_is_refused(tmp_path: Path) -> None:
-    """Raise DataFileError when the row found for L is of another epoch."""
-    meas_path = written_meas_file(tmp_path / "meas" / "das_a.mc2.ox23.dat", 2)
-    row_lines = predicted_row_lines(4)
-    with meas_path.open("a", encoding="ascii") as open_file:
-        open_file.write(row_lines[3])
-    with pytest.raises(DataFileError, match="one row per epoch"):
-        files.roll_back(meas_path, "meas", E + 2 * ONE_EPOCH)
+GAPPED_ROWS: Final = (0, 1, 3, 4, 7)
+"""The epochs, counted from E, that a file with gaps has rows for."""
 
 
-def test_a_common_epoch_past_the_file_s_rows_is_refused(tmp_path: Path) -> None:
-    """Raise DataFileError when the file holds no row for L at all."""
-    meas_path = written_meas_file(tmp_path / "meas" / "das_a.mc2.ox23.dat", 2)
-    with pytest.raises(DataFileError, match="no row for"):
-        files.roll_back(meas_path, "meas", E + 5 * ONE_EPOCH)
+def gapped_meas_file(meas_path: Path) -> Path:
+    """Write the pair's file with rows for the epochs of GAPPED_ROWS only."""
+    meas_path.parent.mkdir(exist_ok=True)
+    row_lines = predicted_row_lines(max(GAPPED_ROWS) + 1)
+    meas_path.write_text(
+        files.header("meas", "a", PAIR_KEY)
+        + "".join(row_lines[epoch_index] for epoch_index in GAPPED_ROWS),
+        encoding="ascii",
+    )
+    return meas_path
+
+
+@pytest.mark.parametrize("kept_index", range(-1, max(GAPPED_ROWS) + 2))
+def test_a_file_with_gaps_keeps_its_rows_up_to_the_epoch(
+    tmp_path: Path, kept_index: int
+) -> None:
+    """Keep every row at or before the epoch, though some epochs have no row (6.7)."""
+    meas_path = gapped_meas_file(tmp_path / "meas" / "das_a.mc2.ox23.dat")
+    cut = files.roll_back(meas_path, "meas", E + kept_index * ONE_EPOCH)
+    kept_epochs = [
+        E + epoch_index * ONE_EPOCH
+        for epoch_index in GAPPED_ROWS
+        if epoch_index <= kept_index
+    ]
+    if not kept_epochs:
+        assert (cut, meas_path.exists()) == ("deleted", False)
+        return
+    assert row_epochs_of(meas_path) == kept_epochs
+    assert cut == ("kept" if kept_index >= max(GAPPED_ROWS) else "cut")
+
+
+def test_a_damaged_end_counts_as_after_the_epoch_kept(tmp_path: Path) -> None:
+    """Cut a file with gaps and a damaged last line just after the epoch kept."""
+    meas_path = gapped_meas_file(tmp_path / "meas" / "das_a.mc2.ox23.dat")
+    with meas_path.open("ab") as open_file:
+        open_file.write(b"x" * files.MEAS_WIDTH + b"\n")
+    assert files.roll_back(meas_path, "meas", E + 7 * ONE_EPOCH) == "cut"
+    assert row_epochs_of(meas_path) == [
+        E + epoch_index * ONE_EPOCH for epoch_index in GAPPED_ROWS
+    ]
 
 
 def write_archive(tmp_path: Path) -> list[tuple[Path, files.FileKind]]:
@@ -1375,10 +1405,10 @@ def test_an_interrupted_redo_finishes_when_run_again(
     ] == [E, E]
 
 
-def test_a_redo_and_a_roll_back_at_one_start_keep_the_archive_in_step(
+def test_a_redo_and_a_roll_back_at_one_start_keep_each_file_whole(
     tmp_path: Path,
 ) -> None:
-    """Redo first, then roll back what is left to the common epoch (review focus 5)."""
+    """Redo first, then cut each file to its own last good row (review focus 5)."""
     data_files = write_archive(tmp_path)
     triple_path = data_files[1][0]
     with triple_path.open("ab") as open_file:
@@ -1388,17 +1418,11 @@ def test_a_redo_and_a_roll_back_at_one_start_keep_the_archive_in_step(
         files.good_through(meas_path, file_kind) for meas_path, file_kind in data_files
     ]
     assert good_epochs == [E + 3 * ONE_EPOCH, E + 2 * ONE_EPOCH]
-    common_epoch = min(
-        good_epoch for good_epoch in good_epochs if good_epoch is not None
-    )
-    for meas_path, file_kind in data_files:
-        files.roll_back(meas_path, file_kind, common_epoch)
+    for (meas_path, file_kind), good_epoch in zip(data_files, good_epochs, strict=True):
+        files.roll_back(meas_path, file_kind, good_epoch)
     assert [
         files.good_through(meas_path, file_kind) for meas_path, file_kind in data_files
-    ] == [
-        E + 2 * ONE_EPOCH,
-        E + 2 * ONE_EPOCH,
-    ]
+    ] == good_epochs
     assert all(
         meas_path.stat().st_size % (files.WIDTHS[file_kind] + 1) == 0
         for meas_path, file_kind in data_files

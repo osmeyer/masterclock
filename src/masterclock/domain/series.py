@@ -1,9 +1,9 @@
 """What one series of the forward estimator holds: its state, settings and rows.
 
-A series is the run of rows of one pair or one triple, one row per epoch.
-Each row is the whole state of the series at its epoch: the estimate, the
-counters and the reject buffer the next epoch starts from, so nothing else
-carries between epochs.
+A series is the run of rows of one pair or one triple, one row for each
+epoch it is in. Each row is the whole state of the series at its epoch: the
+estimate, the counters and the reject buffer the next epoch starts from, so
+nothing else carries between epochs.
 
 Every type here is a plain frozen dataclass, built without checks: its
 values come from code or from data already checked where it entered the

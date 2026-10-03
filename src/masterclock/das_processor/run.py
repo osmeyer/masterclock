@@ -7,6 +7,7 @@ steers a series, and each series' settings. Everything below it receives
 that epoch or plain values.
 """
 
+import logging
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -14,7 +15,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Final
 
-from masterclock.app.log import MasterClockLogger, get_logger
+from masterclock.app.log import TRACE, MasterClockLogger, get_logger
 from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import datetime_to_mjd, mjd_to_datetime
 from masterclock.das_processor.channels import RfChannel
@@ -76,6 +77,12 @@ _TRIPLE: Final[int] = 3
 
 _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
+
+_NO_STEERING_INPUT: Final[tuple[Fraction, float]] = (Fraction(0), 0.0)
+"""The steering input of a series no event moves: u_x and u_y both zero."""
+
+_NO_COMPONENT: Final[Component] = Component(accepted=False)
+"""The part in a triple of a pair the epoch does not hold."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +231,50 @@ class PairStep:
     slips: Slips
 
 
+def _steered(epoch: Epoch) -> bool:
+    """Tell whether any steering event falls in an epoch's steering window.
+
+    Parameters
+    ----------
+    epoch : Epoch
+        The epoch.
+
+    Returns
+    -------
+    bool
+        Whether any reference has an event in (E - T, E + T]. When none
+        has, every series' steering input and steering inside the epoch is
+        zero, and is not worked out series by series.
+    """
+    return any(epoch.steering.values())
+
+
+def _steering_input(
+    series_key: SeriesKey, epoch: Epoch, *, steered: bool
+) -> tuple[Fraction, float]:
+    """Give a series' steering input over the epoch before E.
+
+    Parameters
+    ----------
+    series_key : series key
+        The series.
+    epoch : Epoch
+        The epoch.
+    steered : bool
+        Whether any event falls in the epoch's steering window (see
+        :func:`_steered`).
+
+    Returns
+    -------
+    tuple of (Fraction, float)
+        What :func:`~masterclock.domain.steering.steer_u` gives; zero, as it
+        would give, when no event falls in the window.
+    """
+    if not steered:
+        return _NO_STEERING_INPUT
+    return steer_u(series_key, epoch.interpolated_datetime, epoch.steering)
+
+
 def _measured_pairs(
     epoch: Epoch,
     last_rows: Mapping[SeriesKey, Row],
@@ -250,11 +301,16 @@ def _measured_pairs(
     if epoch.das_block is None:
         return {}
     epoch_start = epoch.interpolated_datetime
+    steered = _steered(epoch)
     measurements = {}
     for das_measurement in epoch.das_block.measurements:
         pair = (das_measurement.reference, das_measurement.clock)
-        w = steer_w(
-            pair, epoch_start, epoch.steering, das_measurement.measurement_datetime
+        w = (
+            steer_w(
+                pair, epoch_start, epoch.steering, das_measurement.measurement_datetime
+            )
+            if steered
+            else _NO_STEERING_INPUT[0]
         )
         anchor = anchor_of(last_rows.get(pair))
         measurements[pair] = measure_pair(
@@ -330,8 +386,11 @@ def process_pairs(epoch: Epoch, last_rows: Mapping[SeriesKey, Row]) -> PairStep:
         If a reading or its offset is out of range.
     """
     epoch_start = epoch.interpolated_datetime
+    steered = _steered(epoch)
     predictions = {
-        pair: predict(last_rows.get(pair), steer_u(pair, epoch_start, epoch.steering))
+        pair: predict(
+            last_rows.get(pair), _steering_input(pair, epoch, steered=steered)
+        )
         for pair in epoch.pairs
     }
     measurements = _measured_pairs(epoch, last_rows, predictions)
@@ -436,7 +495,10 @@ def process_triples(
     TripleStep
         Every triple's row and double difference, in sorted key order. A
         local triple (r, r, c) is given its self pair for both links, so
-        the check that it collapses to its pair runs every epoch.
+        the check that it collapses to its pair runs every epoch. Each
+        pair's part in the triples is worked out once for the epoch; a pair
+        the epoch does not hold takes part as one not accepted, with no
+        prediction.
 
     Raises
     ------
@@ -446,6 +508,8 @@ def process_triples(
         If a row breaks a rule of a row.
     """
     epoch_start = epoch.interpolated_datetime
+    steered = _steered(epoch)
+    components = {pair: _component(pair_step, pair) for pair in epoch.pairs}
     step_results: dict[TripleKey, StepResult] = {}
     measurements: dict[TripleKey, TripleMeasurement] = {}
     predictions: dict[TripleKey, State | None] = {}
@@ -453,9 +517,9 @@ def process_triples(
         r, s, c = triple
         triple_value = double_difference(
             triple,
-            _component(pair_step, (s, c)),
-            _component(pair_step, (r, s)),
-            _component(pair_step, (s, r)),
+            components.get((s, c), _NO_COMPONENT),
+            components.get((r, s), _NO_COMPONENT),
+            components.get((s, r), _NO_COMPONENT),
         )
         measurement = (
             None
@@ -465,7 +529,7 @@ def process_triples(
         if measurement is not None:
             measurements[triple] = measurement
         prediction = predict(
-            last_rows.get(triple), steer_u(triple, epoch_start, epoch.steering)
+            last_rows.get(triple), _steering_input(triple, epoch, steered=steered)
         )
         predictions[triple] = prediction
         step_results[triple] = filter_step(
@@ -1075,8 +1139,13 @@ def log_epoch(
     corrected slips; steps, cold starts, dormancy, configuration changes
     and the epoch's counts at INFO; each series' outcome at DEBUG and its
     prediction and update at TRACE. Series are logged in key order, pairs
-    first.
+    first. Nothing is worked out for a level the log leaves out: when
+    WARNING is not logged the epoch is not looked at, and a TRACE line is
+    made only when TRACE is logged.
     """
+    if not _log.isEnabledFor(logging.WARNING):
+        return
+    trace_logged = _log.isEnabledFor(TRACE)
     pair_step, triple_step = epoch_done.pair_step, epoch_done.triple_step
     _log_screening(pair_step, channel)
     series_results: list[tuple[SeriesKey, StepResult, State | None]] = [
@@ -1090,7 +1159,8 @@ def log_epoch(
     for series_key, step_result, prediction in series_results:
         series_label = series_name(channel, series_key)
         _log_series(series_label, step_result, last_rows.get(series_key))
-        _log_trace(series_label, step_result.row, prediction)
+        if trace_logged:
+            _log_trace(series_label, step_result.row, prediction)
     accepted_count = sum(
         "A" in step_result.row.flags for _, step_result, _ in series_results
     )

@@ -14,10 +14,12 @@ which give every float back exactly; the estimator's phase, held in whole
 femtoseconds, is written in ps with three decimals. A value too wide for its
 column is refused before anything is written.
 
-A row read back (:func:`parse_meas_row`, :func:`parse_ddiff_row`) is
-formatted again and must give the same line, so a line is accepted only in
-the one form das_processor writes. The measurement file holds no
-innovation, so a measurement row reads back without one.
+A row read back (:func:`parse_meas_row`, :func:`parse_ddiff_row`) is data
+from outside the program: its values are checked by pydantic models, the
+row against every rule a row keeps, and it is formatted again and must give
+the same line, so a line is accepted only in the one form das_processor
+writes. The measurement file holds no innovation, so a measurement row
+reads back without one.
 
 Rows are buffered and written a day at a time (:func:`write_buffer`), every
 check made before the first byte, under a write journal that names the
@@ -26,17 +28,25 @@ them all back to the oldest epoch they all hold, or to before the epoch a
 journal names (:func:`roll_back`, :func:`read_journal`).
 """
 
+import dataclasses
 import math
 import os
 import re
 import shutil
 from collections.abc import Callable, Iterable
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import BinaryIO, Final, Literal, NamedTuple, NoReturn, Self
+from typing import Annotated, BinaryIO, Final, Literal, NamedTuple, NoReturn, Self
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    model_validator,
+)
 
 from masterclock.app.exceptions import describe_error
 from masterclock.app.log import MasterClockLogger, get_logger
@@ -48,12 +58,14 @@ from masterclock.das_processor.exceptions import DataFileError
 from masterclock.das_processor.read_cd5m5m import RMS_WIDTH
 from masterclock.domain.exceptions import FilterError, PhaseError
 from masterclock.domain.measurements import PairMeasurement, TripleMeasurement
-from masterclock.domain.phase import EPOCH_SECONDS, FS_PER_PS
+from masterclock.domain.phase import EPOCH_SECONDS, FS_PER_PS, PHASE_MAX
 from masterclock.domain.references import REFERENCE_PATTERN
 from masterclock.domain.series import (
+    FilterStates,
     Reject,
     Row,
     SeriesKey,
+    check_row,
 )
 
 type FileKind = Literal["meas", "ddiff"]
@@ -240,7 +252,8 @@ def _fail(message: str, cause: Exception | None = None) -> NoReturn:
 # ------------------------------------------------------------------ records
 
 
-class MeasRecord(BaseModel):
+@dataclass(frozen=True, slots=True)
+class MeasRecord:
     """One row of a measurement file: a pair's measurement and its row.
 
     Parameters
@@ -259,25 +272,22 @@ class MeasRecord(BaseModel):
         measurement's slip correction and the row's S do not go together.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
     measurement: PairMeasurement | None
     row: Row
 
-    @model_validator(mode="after")
-    def _check(self) -> Self:
+    def __post_init__(self) -> None:
         """Refuse a measurement that does not belong with its row.
 
-        Returns
-        -------
-        Self
-            The record, unchanged.
+        Raises
+        ------
+        DataFileError
+            As the class says.
         """
         _check_measured(self.measurement is not None, self.row)
         if self.measurement is None:
             if "S" in self.row.flags:
                 _fail(f"row of {self.row.interpolated_datetime}: S with no measurement")
-            return self
+            return
         if self.measurement.interpolated_datetime != self.row.interpolated_datetime:
             _fail(
                 f"row of {self.row.interpolated_datetime}: its measurement is of"
@@ -288,10 +298,10 @@ class MeasRecord(BaseModel):
                 f"row of {self.row.interpolated_datetime}: a slip correction"
                 " goes with flag S and S with a slip correction"
             )
-        return self
 
 
-class DdiffRecord(BaseModel):
+@dataclass(frozen=True, slots=True)
+class DdiffRecord:
     """One row of a double-difference file: a triple's measurement and its row.
 
     Parameters
@@ -309,24 +319,20 @@ class DdiffRecord(BaseModel):
         or the row carries S, which a triple never does.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
     measurement: TripleMeasurement | None
     row: Row
 
-    @model_validator(mode="after")
-    def _check(self) -> Self:
+    def __post_init__(self) -> None:
         """Refuse a measurement that does not belong with its row.
 
-        Returns
-        -------
-        Self
-            The record, unchanged.
+        Raises
+        ------
+        DataFileError
+            As the class says.
         """
         _check_measured(self.measurement is not None, self.row)
         if "S" in self.row.flags:
             _fail(f"row of {self.row.interpolated_datetime}: a triple never carries S")
-        return self
 
 
 def _check_measured(has_measurement: bool, row: Row) -> None:
@@ -699,6 +705,136 @@ def format_ddiff_row(ddiff_record: DdiffRecord) -> str:
 # ---------------------------------------------------------------- parsing
 
 
+class RowFields(BaseModel):
+    """A row's fields as read back from a file, checked before the row is used.
+
+    The fields are a :class:`~masterclock.domain.series.Row`'s, with the same
+    names, order and meanings, each of exactly its kind; the row they make
+    must keep every rule a row keeps
+    (:func:`~masterclock.domain.series.check_row`).
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If a field is of the wrong kind, missing or unknown, a datetime has
+        no timezone, or the row breaks a rule of a row, a counter below 0
+        among them.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    interpolated_datetime: AwareDatetime
+    innovation: float | None
+    x_fs: int | None
+    y: float | None
+    d: float | None
+    innovation_scale: float | None
+    segment: int
+    step_offset: int
+    epochs_in_segment: int
+    epochs_since_accept: int
+    consecutive_rejects: int
+    rejects: tuple[tuple[AwareDatetime, float], ...]
+    filter_states: FilterStates
+    time_constant: float | None
+    scale_time_constant: float
+    flags: str
+
+    @model_validator(mode="after")
+    def _check(self) -> Self:
+        """Refuse fields that make no valid row.
+
+        Returns
+        -------
+        Self
+            The fields, unchanged.
+
+        Raises
+        ------
+        ValueError
+            Naming the first rule of a row the fields break.
+        """
+        check_row(self.row())
+        return self
+
+    def row(self) -> Row:
+        """Give the row the fields make.
+
+        Returns
+        -------
+        Row
+            The row.
+        """
+        return Row(**dict(self))
+
+
+class PairMeasurementFields(BaseModel):
+    """A pair measurement's fields as read back from a measurement file.
+
+    The fields are a :class:`~masterclock.domain.measurements.PairMeasurement`'s,
+    with the same names, order and meanings.
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If a field is of the wrong kind, missing or unknown, the MJD is not
+        finite, the reading is outside 0 to
+        :data:`~masterclock.domain.phase.PHASE_MAX`, or the rms is below 0.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    measurement_mjd: Annotated[float, Field(allow_inf_nan=False)]
+    measured_phase: Annotated[int, Field(ge=0, le=PHASE_MAX)]
+    rms: Annotated[int, Field(ge=0)]
+    cycle_count: int
+    z: int
+    slip: bool
+
+    def measurement(self) -> PairMeasurement:
+        """Give the measurement the fields make.
+
+        Returns
+        -------
+        PairMeasurement
+            The measurement.
+        """
+        return PairMeasurement(**dict(self))
+
+
+class TripleMeasurementFields(BaseModel):
+    """A triple measurement's fields as read back from a double-difference file.
+
+    The fields are a
+    :class:`~masterclock.domain.measurements.TripleMeasurement`'s, with the
+    same names, order and meanings.
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If a field is of the wrong kind, missing or unknown, the sigma is
+        below 0 or not finite, or the components are not one of 111, 110
+        and 101.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    z: int
+    double_difference_sigma: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    components_used: Literal["111", "110", "101"]
+    pair_cold_started: bool
+
+    def measurement(self) -> TripleMeasurement:
+        """Give the measurement the fields make.
+
+        Returns
+        -------
+        TripleMeasurement
+            The measurement.
+        """
+        return TripleMeasurement(**dict(self))
+
+
 def _fields(line: str, columns: tuple[Column, ...]) -> list[str | None]:
     """Split a row into its fields.
 
@@ -858,8 +994,8 @@ def _row(
     ------
     ValueError
         If a field is not of its kind or not finite, or the fields make no
-        valid row: a pydantic ValidationError, which is not logged, so a
-        file check can read a damaged line quietly.
+        valid row (see :class:`RowFields`): a pydantic ValidationError, which
+        is not logged, so a file check can read a damaged line quietly.
     """
     (
         x,
@@ -886,7 +1022,7 @@ def _row(
                 )
             )
     filter_states, time_constant, scale_time_constant, flags = state_texts[15:]
-    return Row.model_validate(
+    return RowFields.model_validate(
         {
             "interpolated_datetime": epoch_start,
             "innovation": innovation,
@@ -905,7 +1041,7 @@ def _row(
             "scale_time_constant": _float_value(_given(scale_time_constant)),
             "flags": _given(flags),
         }
-    )
+    ).row()
 
 
 def _pair_measurement(
@@ -936,14 +1072,16 @@ def _pair_measurement(
     _, mjd_text, phase_text, rms_text, cycles_text, z_text = (
         _given(field_text) for field_text in measurement_texts
     )
-    return PairMeasurement(
-        measurement_mjd=_float_value(mjd_text),
-        measured_phase=int(phase_text),
-        rms=int(rms_text),
-        cycle_count=int(cycles_text),
-        z=int(z_text),
-        slip="S" in flags,
-    )
+    return PairMeasurementFields.model_validate(
+        {
+            "measurement_mjd": _float_value(mjd_text),
+            "measured_phase": int(phase_text),
+            "rms": int(rms_text),
+            "cycle_count": int(cycles_text),
+            "z": int(z_text),
+            "slip": "S" in flags,
+        }
+    ).measurement()
 
 
 def _attempt[RecordT: (MeasRecord, DdiffRecord)](
@@ -1067,14 +1205,14 @@ def _ddiff_record(line: str) -> DdiffRecord:
     )
     triple_measurement = None
     if z_text is not None or sigma_text is not None or components_used is not None:
-        triple_measurement = TripleMeasurement.model_validate(
+        triple_measurement = TripleMeasurementFields.model_validate(
             {
                 "z": int(_given(z_text)),
                 "double_difference_sigma": _float_value(_given(sigma_text)),
                 "components_used": _given(components_used),
                 "pair_cold_started": False,
             }
-        )
+        ).measurement()
     return DdiffRecord(measurement=triple_measurement, row=row)
 
 
@@ -1527,7 +1665,7 @@ class DayBuffer:
             )
         if isinstance(file_record, MeasRecord):
             row_line = format_meas_row(file_record)
-            kept_row = file_record.row.model_copy(update={"innovation": None})
+            kept_row = dataclasses.replace(file_record.row, innovation=None)
         else:
             row_line = format_ddiff_row(file_record)
             kept_row = file_record.row

@@ -15,10 +15,9 @@ a fault. Every value is summed exactly and rounded once, a tie to even.
 """
 
 import math
+from dataclasses import dataclass
 from fractions import Fraction
-from typing import Annotated, Final, Literal, Self
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Final, Literal
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import PhaseError
@@ -29,7 +28,8 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 
-class Component(BaseModel):
+@dataclass(frozen=True, slots=True)
+class Component:
     """One pair's part in a triple at an epoch.
 
     Parameters
@@ -49,42 +49,34 @@ class Component(BaseModel):
 
     Raises
     ------
-    pydantic.ValidationError
-        If ``z`` and ``rms`` are not given exactly when ``accepted``, or a
-        value is of the wrong kind or out of range.
+    PhaseError
+        If ``z`` and ``rms`` are not given exactly when ``accepted``.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     accepted: bool
     z: int | None = None
-    rms: Annotated[int, Field(ge=0)] | None = None
+    rms: int | None = None
     predicted_phase: Fraction | None = None
     cold_started: bool = False
 
-    @model_validator(mode="after")
-    def _check_value(self) -> Self:
+    def __post_init__(self) -> None:
         """Refuse a value without an acceptance, or an acceptance without one.
-
-        Returns
-        -------
-        Self
-            The component, unchanged.
 
         Raises
         ------
-        ValueError
+        PhaseError
             If ``z`` or ``rms`` is given and not accepted, or missing and
             accepted.
         """
         given_parts = (self.z is not None, self.rms is not None)
         if given_parts != (self.accepted, self.accepted):
             message = "a component has its z and rms exactly when it was accepted"
-            raise ValueError(message)
-        return self
+            _log.error(message)
+            raise PhaseError(message)
 
 
-class TripleValue(BaseModel):
+@dataclass(frozen=True, slots=True)
+class TripleValue:
     """A triple's measurement at an epoch.
 
     Parameters
@@ -98,8 +90,6 @@ class TripleValue(BaseModel):
     pair_cold_started : bool
         Whether one of its pairs cold-started at the epoch.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     z: int
     sigma: float

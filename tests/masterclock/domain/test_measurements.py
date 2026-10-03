@@ -5,10 +5,13 @@ to its epoch start, against the prediction or, without one, the anchor; it
 holds the plain values it was made from, and its measurement time, epoch
 start and offset after the epoch start are worked out from the MJD, the
 offset exactly from the datetimes, and none of them can be passed in; an
-epoch starts at midnight and every epoch after; a slip correction moves the cycle count
-and z by whole periods and marks it; a pair or triple measurement gives
-the filter step its plain values; and a triple measurement names the
-components it used, as 111, 110 or 101 only.
+epoch starts at midnight and every epoch after; a slip correction moves the
+cycle count and z by whole periods and marks it; a pair or triple
+measurement gives the filter step its plain values; and a triple's sigma
+may be zero.
+
+The ranges of a measurement's values are checked where a measurement is
+read back from a file, and tested there (das_processor/test_files.py).
 """
 
 from datetime import UTC, datetime
@@ -16,7 +19,6 @@ from fractions import Fraction
 from typing import Final
 
 import pytest
-from pydantic import ValidationError
 
 from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.domain.double_difference import TripleValue
@@ -112,9 +114,14 @@ def test_the_offset_comes_from_the_datetimes_not_the_mjd() -> None:
 )
 def test_what_follows_from_the_mjd_cannot_be_passed_in(derived_field: str) -> None:
     """Refuse a value given that the measurement works out from its MJD."""
-    with pytest.raises(ValidationError):
-        PairMeasurement.model_validate(
-            {**APPENDIX_A_READING, derived_field: Fraction(1), "cycle_count": 6, "z": 1}
+    with pytest.raises(TypeError, match=derived_field):
+        PairMeasurement(
+            **{  # type: ignore[arg-type]
+                **APPENDIX_A_READING,
+                derived_field: Fraction(1),
+                "cycle_count": 6,
+                "z": 1,
+            }
         )
 
 
@@ -123,25 +130,6 @@ def test_a_measurement_knows_its_time_and_epoch() -> None:
     pair_measurement = measure_appendix_a_reading(PREDICTION, Fraction(0), None)
     assert pair_measurement.measurement_datetime == mjd_to_datetime(60941.251588)
     assert pair_measurement.interpolated_datetime == mjd_to_datetime(60941.25)
-
-
-@pytest.mark.parametrize(
-    ("bad_values", "refused_field"),
-    [
-        ({"measured_phase": -1}, "measured_phase"),
-        ({"measured_phase": PHASE_PERIOD}, "measured_phase"),
-        ({"rms": -1}, "rms"),
-        ({"measurement_mjd": float("nan")}, "measurement_mjd"),
-    ],
-)
-def test_a_reading_out_of_range_is_refused(
-    bad_values: dict[str, object], refused_field: str
-) -> None:
-    """Refuse a phase outside one period, a negative rms, or an MJD not finite."""
-    with pytest.raises(ValidationError, match=refused_field):
-        PairMeasurement.model_validate(
-            {**APPENDIX_A_READING, **bad_values, "cycle_count": 0, "z": 0}
-        )
 
 
 @pytest.mark.parametrize(
@@ -198,32 +186,6 @@ def test_a_triple_measurement_comes_from_its_value() -> None:
     assert triple_measurement.filter_input() == FilterInput(
         z=6_666_667, sigma_dd=3.3166, pair_cold_started=True
     )
-
-
-@pytest.mark.parametrize("components_used", ["011", "100", "1", "", "111 "])
-def test_a_triple_names_only_the_components_it_can_use(components_used: str) -> None:
-    """Refuse components_used other than 111, 110 or 101."""
-    with pytest.raises(ValidationError):
-        TripleMeasurement.model_validate(
-            {
-                "z": 1,
-                "double_difference_sigma": 1.0,
-                "components_used": components_used,
-                "pair_cold_started": False,
-            }
-        )
-
-
-@pytest.mark.parametrize("sigma", [-1.0, -1e-300, float("nan"), float("inf")])
-def test_a_triple_sigma_is_finite_and_not_negative(sigma: float) -> None:
-    """Refuse a double-difference sigma below zero or not finite."""
-    with pytest.raises(ValidationError):
-        TripleMeasurement(
-            z=1,
-            double_difference_sigma=sigma,
-            components_used="111",
-            pair_cold_started=False,
-        )
 
 
 def test_a_triple_sigma_may_be_zero() -> None:

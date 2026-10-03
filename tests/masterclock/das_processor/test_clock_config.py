@@ -164,7 +164,7 @@ def test_an_unknown_clock_has_no_entry(tmp_path: Path) -> None:
             "changes the filter_states of ox23",
         ),
         ("filter_states: 3,", "filter_states: 4,", "filter_states"),
-        ("filter_states: 3,", "filter_states: true,", "filter_states"),
+        ("filter_states: 3,", "filter_states: true,", "filter_states.*not a bool"),
         ("time_constant: 30.0,", "", "cesium.*time constant"),
         ("time_constant: 30.0,", "time_constant: 0.5,", "time_constant"),
         (

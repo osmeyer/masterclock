@@ -13,14 +13,15 @@ only when a row stores it, to whole femtoseconds (see
 floats.
 
 Each epoch gives every series one row. The row starts as a
-:class:`RowDraft` carried on from the last row (:func:`carry`), may begin a
-new segment (:func:`start_segment`), and is finished by what the epoch did:
-an accepted measurement updates the state (:func:`accept`); a rejected,
-excluded or missing one leaves the prediction standing (:func:`hold`); a
-series with no valid state is dormant (:func:`dormant`): it buffers its
-measurements (:func:`acquire`, decycled against :func:`anchor_of`) until
-three agree, and starts again from the third alone (:func:`cold_start`).
-Only the finished row is checked, by :func:`finish`.
+:class:`RowDraft` carried on from the last row (:func:`carry`), which each
+step changes in place: it may begin a new segment (:func:`start_segment`),
+and is finished by what the epoch did: an accepted measurement updates the
+state (:func:`accept`); a rejected, excluded or missing one leaves the
+prediction standing (:func:`hold`); a series with no valid state is dormant
+(:func:`dormant`): it buffers its measurements (:func:`acquire`, decycled
+against :func:`anchor_of`) until three agree, and starts again from the
+third alone (:func:`cold_start`). :func:`finish` builds the row from the
+draft once, and checks it.
 
 A measurement is accepted when it passes the gate (:func:`within_gate`,
 :func:`rms_ok`). One that fails is a counted reject (:func:`count_reject`),
@@ -32,15 +33,12 @@ takes the series' measurement as plain values (:class:`FilterInput`) and
 gives its row and whether it cold-started (:class:`StepResult`).
 """
 
-import dataclasses
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from datetime import datetime
 from fractions import Fraction
 from itertools import pairwise
-from typing import Annotated, Final, Literal, Self, cast
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Final, Literal, cast
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
@@ -60,7 +58,7 @@ from masterclock.domain.series import (
     Row,
     SeriesParams,
     State,
-    build_row,
+    check_row,
 )
 
 _T: Final[int] = EPOCH_SECONDS
@@ -200,15 +198,16 @@ SETTLE_FACTOR: Final[int] = 5
 """A segment is unsettled while it has run fewer than this many times M rows."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class RowDraft:
     """A row being built for an epoch: the fields of a :class:`Row`, unchecked.
 
     An epoch builds its row a field or two at a time, and part way it is no
     valid row: it has no outcome flag until the last step. So the steps
-    pass a draft along, each building a new one with
-    :func:`dataclasses.replace`, and :func:`finish` checks the last into a
-    :class:`Row`. The fields are a row's, with the same names and meanings.
+    change one draft in place, and :func:`finish` builds the :class:`Row`
+    from it once, and checks it. The fields are a row's, with the same names
+    and meanings. A draft belongs to the one epoch of one series that made
+    it, and is not used once it is finished.
     """
 
     interpolated_datetime: datetime
@@ -290,20 +289,33 @@ def carry(
             flags=flags,
         )
     return RowDraft(
-        **{
-            **dict(last_row),
-            "interpolated_datetime": epoch_start,
-            "innovation": None,
-            "epochs_in_segment": last_row.epochs_in_segment + 1,
-            "flags": flags,
-        }
+        interpolated_datetime=epoch_start,
+        innovation=None,
+        x_fs=last_row.x_fs,
+        y=last_row.y,
+        d=last_row.d,
+        innovation_scale=last_row.innovation_scale,
+        segment=last_row.segment,
+        step_offset=last_row.step_offset,
+        epochs_in_segment=last_row.epochs_in_segment + 1,
+        epochs_since_accept=last_row.epochs_since_accept,
+        consecutive_rejects=last_row.consecutive_rejects,
+        rejects=last_row.rejects,
+        filter_states=last_row.filter_states,
+        time_constant=last_row.time_constant,
+        scale_time_constant=last_row.scale_time_constant,
+        flags=flags,
     )
 
 
 def start_segment(
     draft: RowDraft, series_params: SeriesParams, *, keep_offset: bool
-) -> RowDraft:
-    """Begin a new segment on a draft.
+) -> None:
+    """Begin a new segment on a draft, in place.
+
+    The draft's segment number becomes one more, with no rows in it yet,
+    the time constants of ``series_params`` and N among the flags. The
+    state is not touched.
 
     Parameters
     ----------
@@ -315,12 +327,6 @@ def start_segment(
     keep_offset : bool
         Whether the segment keeps the step offset: a warm start does, a
         cold start sets it to 0.
-
-    Returns
-    -------
-    RowDraft
-        The segment number one more, no rows in it yet, the time constants
-        of ``series_params``, and N among the flags. The state is not touched.
 
     Raises
     ------
@@ -335,19 +341,17 @@ def start_segment(
         )
         _log.error(message)
         raise FilterError(message)
-    return dataclasses.replace(
-        draft,
-        segment=draft.segment + 1,
-        epochs_in_segment=0,
-        step_offset=draft.step_offset if keep_offset else 0,
-        time_constant=series_params.M,
-        scale_time_constant=series_params.M_sigma,
-        flags=draft.flags + "N",
-    )
+    draft.segment += 1
+    draft.epochs_in_segment = 0
+    if not keep_offset:
+        draft.step_offset = 0
+    draft.time_constant = series_params.M
+    draft.scale_time_constant = series_params.M_sigma
+    draft.flags += "N"
 
 
 def finish(draft: RowDraft, outcome: Outcome) -> Row:
-    """Add the epoch's outcome to a draft and check it into a row.
+    """Add the epoch's outcome to a draft, and build and check its row.
 
     Parameters
     ----------
@@ -367,7 +371,8 @@ def finish(draft: RowDraft, outcome: Outcome) -> Row:
     Raises
     ------
     FilterError
-        If the finished row breaks a rule of :class:`Row`.
+        If the finished row breaks a rule of :class:`Row` (see
+        :func:`~masterclock.domain.series.check_row`).
     """
     flags = draft.flags + outcome
     if (
@@ -376,12 +381,31 @@ def finish(draft: RowDraft, outcome: Outcome) -> Row:
         and draft.epochs_in_segment < SETTLE_FACTOR * draft.time_constant
     ):
         flags += "U"
-    ordered_flags = "".join(letter for letter in FLAG_ORDER if letter in flags)
-    draft_fields = {
-        draft_field.name: getattr(draft, draft_field.name)
-        for draft_field in fields(draft)
-    }
-    return build_row({**draft_fields, "flags": ordered_flags})
+    row = Row(
+        interpolated_datetime=draft.interpolated_datetime,
+        innovation=draft.innovation,
+        x_fs=draft.x_fs,
+        y=draft.y,
+        d=draft.d,
+        innovation_scale=draft.innovation_scale,
+        segment=draft.segment,
+        step_offset=draft.step_offset,
+        epochs_in_segment=draft.epochs_in_segment,
+        epochs_since_accept=draft.epochs_since_accept,
+        consecutive_rejects=draft.consecutive_rejects,
+        rejects=draft.rejects,
+        filter_states=draft.filter_states,
+        time_constant=draft.time_constant,
+        scale_time_constant=draft.scale_time_constant,
+        flags="".join(letter for letter in FLAG_ORDER if letter in flags),
+    )
+    try:
+        check_row(row)
+    except ValueError as exc:
+        message = f"invalid row of {row.interpolated_datetime}: {exc}"
+        _log.error(message)
+        raise FilterError(message) from exc
+    return row
 
 
 def dormant(draft: RowDraft, outcome: Held, *, keep_buffer: bool = False) -> Row:
@@ -408,18 +432,11 @@ def dormant(draft: RowDraft, outcome: Held, *, keep_buffer: bool = False) -> Row
     FilterError
         If the finished row breaks a rule of :class:`Row`.
     """
-    return finish(
-        dataclasses.replace(
-            draft,
-            x_fs=None,
-            y=None,
-            d=None,
-            innovation_scale=None,
-            rejects=draft.rejects if keep_buffer else (),
-            flags=draft.flags + "D",
-        ),
-        outcome,
-    )
+    draft.x_fs = draft.y = draft.d = draft.innovation_scale = None
+    if not keep_buffer:
+        draft.rejects = ()
+    draft.flags += "D"
+    return finish(draft, outcome)
 
 
 def hold(
@@ -457,15 +474,11 @@ def hold(
     FilterError
         If the finished row breaks a rule of :class:`Row`.
     """
-    draft = dataclasses.replace(
-        draft, epochs_since_accept=draft.epochs_since_accept + 1
-    )
+    draft.epochs_since_accept += 1
     if prediction is None or draft.epochs_since_accept > series_params.gmax:
         return dormant(draft, outcome)
-    held_draft = dataclasses.replace(
-        draft, x_fs=to_fs(prediction.x), y=prediction.y, d=prediction.d
-    )
-    return finish(held_draft, outcome)
+    draft.x_fs, draft.y, draft.d = to_fs(prediction.x), prediction.y, prediction.d
+    return finish(draft, outcome)
 
 
 def accept(
@@ -512,18 +525,16 @@ def accept(
     new_scale = math.sqrt(
         max((1 - w) * draft.innovation_scale**2 + w * nu**2, scale_floor**2)
     )
-    accepted_draft = dataclasses.replace(
-        draft,
-        innovation=nu,
-        x_fs=to_fs(updated_state.x),
-        y=updated_state.y,
-        d=updated_state.d,
-        innovation_scale=new_scale,
-        consecutive_rejects=0,
-        rejects=(),
-        epochs_since_accept=0,
+    draft.innovation = nu
+    draft.x_fs, draft.y, draft.d = (
+        to_fs(updated_state.x),
+        updated_state.y,
+        updated_state.d,
     )
-    return finish(accepted_draft, "A")
+    draft.innovation_scale = new_scale
+    draft.consecutive_rejects = draft.epochs_since_accept = 0
+    draft.rejects = ()
+    return finish(draft, "A")
 
 
 def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
@@ -552,20 +563,12 @@ def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
         If ``series_params`` is for another model than the series', or the
         finished row breaks a rule of :class:`Row`.
     """
-    started_draft = start_segment(draft, series_params, keep_offset=False)
-    return finish(
-        dataclasses.replace(
-            started_draft,
-            x_fs=to_fs(z),
-            y=0.0,
-            d=0.0,
-            innovation_scale=series_params.sigma0,
-            consecutive_rejects=0,
-            rejects=(),
-            epochs_since_accept=0,
-        ),
-        "A",
-    )
+    start_segment(draft, series_params, keep_offset=False)
+    draft.x_fs, draft.y, draft.d = to_fs(z), 0.0, 0.0
+    draft.innovation_scale = series_params.sigma0
+    draft.consecutive_rejects = draft.epochs_since_accept = 0
+    draft.rejects = ()
+    return finish(draft, "A")
 
 
 # ------------------------------------------------------- step classification
@@ -580,7 +583,8 @@ _STEP_REJECTS: Final[int] = 3
 """How many consecutive counted rejects a step is looked for in."""
 
 
-class Classified(BaseModel):
+@dataclass(frozen=True, slots=True)
+class Classified:
     """What three consecutive rejects show: a phase step, a frequency step, or neither.
 
     Parameters
@@ -594,8 +598,6 @@ class Classified(BaseModel):
         For a frequency step, the fitted line's slope, ps/s; ``None``
         otherwise.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     step_kind: Literal["phase", "frequency"] | None
     a: float | None = None
@@ -704,29 +706,23 @@ def rms_ok(rms: int, rms_max: int | None) -> bool:
     return rms_max is None or rms <= rms_max
 
 
-def count_reject(draft: RowDraft, innovation: Fraction) -> RowDraft:
+def count_reject(draft: RowDraft, innovation: Fraction) -> None:
     """Count a rejected measurement and put it in the reject buffer (design 9.3).
+
+    The draft gets one more consecutive reject, and (epoch, innovation)
+    added to its buffer, which keeps the newest
+    :data:`~masterclock.domain.series.MAX_REJECTS`.
 
     Parameters
     ----------
     draft : RowDraft
-        The row as built so far.
+        The row as built so far; changed in place.
     innovation : Fraction
         The rejected measurement less the predicted phase.
-
-    Returns
-    -------
-    RowDraft
-        One more consecutive reject, and (epoch, innovation) added to the
-        buffer, which keeps the newest
-        :data:`~masterclock.domain.series.MAX_REJECTS`.
     """
     reject_entry = (draft.interpolated_datetime, float(innovation))
-    return dataclasses.replace(
-        draft,
-        consecutive_rejects=draft.consecutive_rejects + 1,
-        rejects=(*draft.rejects, reject_entry)[-MAX_REJECTS:],
-    )
+    draft.consecutive_rejects += 1
+    draft.rejects = (*draft.rejects, reject_entry)[-MAX_REJECTS:]
 
 
 def phase_step(draft: RowDraft, prediction: State, z: int, scale_floor: float) -> Row:
@@ -764,10 +760,8 @@ def phase_step(draft: RowDraft, prediction: State, z: int, scale_floor: float) -
     corrected_prediction = State(
         x=prediction.x + step_ps, y=prediction.y, d=prediction.d
     )
-    stepped_draft = dataclasses.replace(draft, step_offset=draft.step_offset + step_ps)
-    return accept(
-        stepped_draft, corrected_prediction, z - corrected_prediction.x, scale_floor
-    )
+    draft.step_offset += step_ps
+    return accept(draft, corrected_prediction, z - corrected_prediction.x, scale_floor)
 
 
 def frequency_step(
@@ -817,10 +811,8 @@ def frequency_step(
     corrected_prediction = State(
         x=prediction.x + exact(a) + exact(s) * t3, y=prediction.y + s, d=prediction.d
     )
-    started_draft = start_segment(draft, series_params, keep_offset=True)
-    return accept(
-        started_draft, corrected_prediction, z - corrected_prediction.x, scale_floor
-    )
+    start_segment(draft, series_params, keep_offset=True)
+    return accept(draft, corrected_prediction, z - corrected_prediction.x, scale_floor)
 
 
 def accept_step(
@@ -941,17 +933,13 @@ def acquire(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
         If the finished row breaks a rule of :class:`Row`.
     """
     buffer_entry = (draft.interpolated_datetime, float(z))
-    buffered_rejects = (*draft.rejects, buffer_entry)[-MAX_REJECTS:]
-    buffered_draft = dataclasses.replace(draft, rejects=buffered_rejects)
-    if len(buffered_rejects) == MAX_REJECTS and _consecutive(buffered_rejects):
-        z1, z2, z3 = (exact(buffered_z) for _, buffered_z in buffered_rejects)
+    draft.rejects = (*draft.rejects, buffer_entry)[-MAX_REJECTS:]
+    if len(draft.rejects) == MAX_REJECTS and _consecutive(draft.rejects):
+        z1, z2, z3 = (exact(buffered_z) for _, buffered_z in draft.rejects)
         if abs(z3 - 2 * z2 + z1) <= exact(_ACQUIRE_LIMIT * series_params.sigma0):
-            return cold_start(buffered_draft, z, series_params)
-    return dormant(
-        dataclasses.replace(buffered_draft, consecutive_rejects=0),
-        "R",
-        keep_buffer=True,
-    )
+            return cold_start(draft, z, series_params)
+    draft.consecutive_rejects = 0
+    return dormant(draft, "R", keep_buffer=True)
 
 
 def anchor_of(last_row: Row | None) -> int | None:
@@ -992,7 +980,8 @@ def anchor_of(last_row: Row | None) -> int | None:
 # ------------------------------------------------------------- filter step
 
 
-class FilterInput(BaseModel):
+@dataclass(frozen=True, slots=True)
+class FilterInput:
     """What one series measured at an epoch: a pair's or a triple's value.
 
     Parameters
@@ -1015,10 +1004,9 @@ class FilterInput(BaseModel):
 
     Raises
     ------
-    pydantic.ValidationError
-        If both or neither of ``rms`` and ``sigma_dd`` are given, a value is
-        out of range or of the wrong kind, a triple is marked as slip
-        corrected, or a pair as following a cold start.
+    FilterError
+        If both or neither of ``rms`` and ``sigma_dd`` are given, a triple is
+        marked as slip corrected, or a pair as following a cold start.
 
     Examples
     --------
@@ -1028,39 +1016,31 @@ class FilterInput(BaseModel):
     3.3166
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
     z: int
-    rms: Annotated[int, Field(ge=0)] | None = None
-    sigma_dd: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
+    rms: int | None = None
+    sigma_dd: float | None = None
     slip: bool = False
     pair_cold_started: bool = False
 
-    @model_validator(mode="after")
-    def _check_pair_or_triple(self) -> Self:
+    def __post_init__(self) -> None:
         """Refuse a measurement that is not wholly a pair's or a triple's.
-
-        Returns
-        -------
-        Self
-            The measurement, unchanged.
 
         Raises
         ------
-        ValueError
+        FilterError
             If both or neither of ``rms`` and ``sigma_dd`` are given, a
             triple is slip corrected or a pair follows a cold start.
         """
+        message = ""
         if (self.rms is None) == (self.sigma_dd is None):
             message = "a measurement has an rms (a pair) or a sigma_dd (a triple)"
-            raise ValueError(message)
-        if self.sigma_dd is not None and self.slip:
+        elif self.sigma_dd is not None and self.slip:
             message = "the slip check corrects pairs only"
-            raise ValueError(message)
-        if self.rms is not None and self.pair_cold_started:
+        elif self.rms is not None and self.pair_cold_started:
             message = "only a triple follows its component pairs' cold starts"
-            raise ValueError(message)
-        return self
+        if message:
+            _log.error(message)
+            raise FilterError(message)
 
     @property
     def scale_floor(self) -> float:
@@ -1070,7 +1050,8 @@ class FilterInput(BaseModel):
         return cast("float", self.sigma_dd)  # a triple's, given when rms is not
 
 
-class StepResult(BaseModel):
+@dataclass(frozen=True, slots=True)
+class StepResult:
     """The row a series writes at an epoch, and whether it cold-started there.
 
     Parameters
@@ -1081,8 +1062,6 @@ class StepResult(BaseModel):
         Whether the row is a cold start: a triple built from this pair's
         value then goes dormant (design 12.6).
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     row: Row
     cold_started: bool
@@ -1164,13 +1143,13 @@ def filter_step(
         and "D" not in last_row.flags
         and params_changed(series_params, last_row)
     ):
-        draft = start_segment(draft, series_params, keep_offset=True)
+        start_segment(draft, series_params, keep_offset=True)
     if measurement is None:
         return StepResult(
             row=hold(draft, prediction, "P", series_params), cold_started=False
         )
     if measurement.pair_cold_started:
-        draft = dataclasses.replace(draft, rejects=())
+        draft.rejects = ()
         prediction = None
     if prediction is None:
         row = acquire(draft, measurement.z, series_params)
@@ -1218,7 +1197,7 @@ def _gate(
         If a row breaks a rule of :class:`Row`.
     """
     innovation = measurement.z - prediction.x
-    draft = dataclasses.replace(draft, innovation=float(innovation))
+    draft.innovation = float(innovation)
     if draft.innovation_scale is None:
         message = f"a measurement at {draft.interpolated_datetime} has no scale"
         _log.error(message)
@@ -1231,14 +1210,13 @@ def _gate(
         return accept(draft, prediction, innovation, measurement.scale_floor)
     if in_gate and excluded:
         return hold(draft, prediction, "X", series_params)
-    draft = count_reject(draft, innovation)
+    count_reject(draft, innovation)
     step_row = accept_step(
         draft, prediction, measurement.z, measurement.scale_floor, series_params
     )
     if step_row is not None:
         return step_row
     if draft.consecutive_rejects >= series_params.n_break:
-        return acquire(
-            dataclasses.replace(draft, rejects=()), measurement.z, series_params
-        )
+        draft.rejects = ()
+        return acquire(draft, measurement.z, series_params)
     return hold(draft, prediction, "R", series_params)

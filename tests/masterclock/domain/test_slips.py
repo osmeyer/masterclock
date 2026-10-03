@@ -23,7 +23,6 @@ from itertools import permutations
 from typing import Final
 
 import pytest
-from pydantic import ValidationError
 
 from masterclock.domain import slips
 from masterclock.domain.exceptions import FilterError
@@ -307,14 +306,6 @@ def test_a_pair_needs_a_scale() -> None:
     innovations = epoch_innovations(TWO_REFS, {"mc1": 0, "mc2": 0})
     with pytest.raises(FilterError, match="no innovation scale"):
         slips.slip_check(innovations, {}, {}, frozenset(TWO_REFS), frozenset())
-
-
-def test_an_event_names_a_known_kind() -> None:
-    """Refuse an event of a kind the slip check does not give."""
-    with pytest.raises(ValidationError):
-        slips.SlipEvent.model_validate(
-            {"finding": "other", "clock": "ox1", "pairs": (), "cycles": 0}
-        )
 
 
 # ------------------------------------------ tolerances and gathering, exactly

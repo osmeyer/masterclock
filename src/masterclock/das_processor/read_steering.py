@@ -15,14 +15,17 @@ be sound in every line: one that cannot be read, a line that does not
 parse, and a line earlier than the one before it are each refused, wherever
 the line lies, since the file can no longer be trusted. As in the DAS files,
 numbers are plain decimals only, and a last line with no newline makes the
-file damaged.
+file damaged. Each event read is checked by a pydantic model
+(:class:`SteerEventFields`) before the program uses it.
 """
 
 import math
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Final, NoReturn
+from typing import Annotated, Final, NoReturn
+
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.app.timeutil import mjd_to_datetime
@@ -47,6 +50,36 @@ _COLUMNS: Final[int] = 3
 
 _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
+
+
+class SteerEventFields(BaseModel):
+    """A steering event's fields as read from a steering file, checked.
+
+    The fields are a :class:`~masterclock.domain.steering.SteerEvent`'s, with
+    the same names, order and meanings.
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If the instant has no timezone, a change is not a finite number, or
+        a field is missing or unknown.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    applied_datetime: AwareDatetime
+    dx: Annotated[float, Field(allow_inf_nan=False)]
+    dy: Annotated[float, Field(allow_inf_nan=False)]
+
+    def event(self) -> SteerEvent:
+        """Give the steering event the fields make.
+
+        Returns
+        -------
+        SteerEvent
+            The event.
+        """
+        return SteerEvent(**dict(self))
 
 
 def read_steering(
@@ -190,7 +223,7 @@ def _parse_steering_line(line_place: str, line: str) -> SteerEvent:
     if not FIRST_DAY <= mjd < LAST_DAY + 1:
         _fail(f"{line_place}: {mjd_text!r} is not an MJD on a data day")
     dx, dy = _parse_change(line_place, dx_text), _parse_change(line_place, dy_text)
-    return SteerEvent(applied_datetime=mjd_to_datetime(mjd), dx=dx, dy=dy)
+    return SteerEventFields(applied_datetime=mjd_to_datetime(mjd), dx=dx, dy=dy).event()
 
 
 def _parse_change(line_place: str, column_text: str) -> float:

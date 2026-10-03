@@ -17,11 +17,10 @@ datetimes as a whole number of microseconds, so it is exact too.
 """
 
 import math
+from dataclasses import dataclass
 from datetime import timedelta
 from fractions import Fraction
 from typing import TYPE_CHECKING, Final
-
-from pydantic import BaseModel, ConfigDict
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError, PhaseError
@@ -211,7 +210,8 @@ def from_fs(phase_fs: int) -> Fraction:
     return Fraction(phase_fs, FS_PER_PS)
 
 
-class Decycled(BaseModel):
+@dataclass(frozen=True, slots=True)
+class Decycled:
     """A reading with its whole periods put back, referred to its epoch start.
 
     Parameters
@@ -220,14 +220,7 @@ class Decycled(BaseModel):
         The whole periods added to the reading: n.
     z : int
         The decycled phase at the epoch start, ps: z_E.
-
-    Raises
-    ------
-    pydantic.ValidationError
-        If a value is not an int, or a field is unknown.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     cycle_count: int
     z: int

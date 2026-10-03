@@ -20,41 +20,36 @@ Every phase term is exact (see :mod:`masterclock.domain.phase`); the rate
 term is a float.
 """
 
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from fractions import Fraction
-from typing import TYPE_CHECKING, Annotated, Final
-
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from typing import TYPE_CHECKING, Final
 
 from masterclock.domain.phase import EPOCH_SECONDS, exact, seconds
 from masterclock.domain.references import is_reference
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
-    from datetime import datetime
 
 _EPOCH: Final[timedelta] = timedelta(seconds=EPOCH_SECONDS)
 """One epoch, T."""
 
 
-class SteerEvent(BaseModel):
+@dataclass(frozen=True, slots=True)
+class SteerEvent:
     """One change applied to a reference clock's phase and rate.
+
+    The steering file reader checks every value as it reads it.
 
     Parameters
     ----------
-    applied_datetime : AwareDatetime
-        When the change was applied.
+    applied_datetime : datetime
+        When the change was applied, with its timezone.
     dx : float
-        The change to the reference's phase, ps, in the sign convention of
-        the measurements: a pair (a, b) is x_a - x_b.
+        The change to the reference's phase, ps, finite, in the sign
+        convention of the measurements: a pair (a, b) is x_a - x_b.
     dy : float
-        The change to the reference's rate, ps/s.
-
-    Raises
-    ------
-    pydantic.ValidationError
-        If a change is not a finite number, the instant has no timezone, or
-        a field is unknown.
+        The change to the reference's rate, ps/s, finite.
 
     Examples
     --------
@@ -64,11 +59,9 @@ class SteerEvent(BaseModel):
     -0.00012
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
-    applied_datetime: AwareDatetime
-    dx: Annotated[float, Field(allow_inf_nan=False)]
-    dy: Annotated[float, Field(allow_inf_nan=False)]
+    applied_datetime: datetime
+    dx: float
+    dy: float
 
 
 def signs(series_key: Sequence[str]) -> dict[str, int]:

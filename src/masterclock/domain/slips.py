@@ -21,11 +21,10 @@ it found is returned as events.
 
 import math
 from collections.abc import Mapping
+from dataclasses import dataclass
 from fractions import Fraction
 from itertools import combinations
 from typing import Final, Literal
-
-from pydantic import BaseModel, ConfigDict
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
@@ -46,7 +45,8 @@ type _D = tuple[str, str, int]
 """A D: its references r and s, and its whole number of periods m."""
 
 
-class SlipEvent(BaseModel):
+@dataclass(frozen=True, slots=True)
+class SlipEvent:
     """One thing the slip check found at an epoch, for the program to log.
 
     Parameters
@@ -61,15 +61,14 @@ class SlipEvent(BaseModel):
         The correction in whole periods; 0 when undecided.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
     finding: Literal["slip_corrected", "slip_undecided"]
     clock: str
     pairs: tuple[PairKey, ...]
     cycles: int
 
 
-class Slips(BaseModel):
+@dataclass(frozen=True, slots=True)
+class Slips:
     """What the slip check decided at an epoch.
 
     Parameters
@@ -83,8 +82,6 @@ class Slips(BaseModel):
     events : tuple of SlipEvent
         What was found, clock by clock in sorted order.
     """
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     corrections: dict[PairKey, int]
     excluded: frozenset[PairKey]

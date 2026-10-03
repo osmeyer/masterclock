@@ -10,19 +10,24 @@ than the one before it, and a last line with no newline each raise
 DataFileError.
 
 An event lies from the first data day's start to the last day's end, and a
-refusal is word for word and logged as raised.
+refusal is word for word and logged as raised. Each event read is checked
+by a pydantic model with a steering event's fields, in their order: an
+instant with its timezone, finite changes, no unknown field.
 """
 
+import dataclasses
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final
 
 import pytest
+from pydantic import ValidationError
 
 from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.das_processor.exceptions import DataFileError
 from masterclock.das_processor.read_steering import (
     STEERING_FILE_TEMPLATE,
+    SteerEventFields,
     read_steering,
 )
 from masterclock.domain.steering import SteerEvent
@@ -204,3 +209,32 @@ def test_a_refusal_is_logged_as_raised(
     assert [log_record.getMessage() for log_record in caplog.records] == [
         str(refusal.value)
     ]
+
+
+def test_the_event_model_has_an_event_s_fields_in_order() -> None:
+    """Give the read model exactly SteerEvent's fields, so an event builds."""
+    assert list(SteerEventFields.model_fields) == [
+        event_field.name for event_field in dataclasses.fields(SteerEvent)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("event_field", "wrong_value"),
+    [
+        ("dx", float("nan")),
+        ("dy", float("inf")),
+        ("dx", "1"),
+        ("applied_datetime", WINDOW_START.replace(tzinfo=None)),
+        ("colour", "red"),
+    ],
+)
+def test_an_event_read_is_checked(event_field: str, wrong_value: object) -> None:
+    """Refuse a change not finite or not a number, a naive instant, an unknown field."""
+    event_fields = {
+        "applied_datetime": WINDOW_START,
+        "dx": 0.0,
+        "dy": 0.0,
+        event_field: wrong_value,
+    }
+    with pytest.raises(ValidationError, match=event_field):
+        SteerEventFields.model_validate(event_fields)

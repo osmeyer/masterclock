@@ -15,6 +15,7 @@ Decycling takes the drift term and steering inside the epoch its way, and
 each error is logged as raised.
 """
 
+import dataclasses
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from fractions import Fraction
@@ -23,7 +24,6 @@ from typing import Final
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
-from pydantic import ValidationError
 
 from masterclock.domain import phase
 from masterclock.domain.exceptions import FilterError, PhaseError
@@ -344,15 +344,11 @@ def test_a_measurement_outside_its_epoch_is_refused(delta: Fraction) -> None:
         phase.decycle(0, delta, Fraction(0), None, None)
 
 
-def test_a_decycled_measurement_is_frozen_and_strict() -> None:
-    """Refuse a change, an unknown field, and a cycle count that is not an int."""
+def test_a_decycled_measurement_is_frozen() -> None:
+    """Refuse a change to a decycled measurement."""
     decycled = phase.Decycled(cycle_count=1, z=2)
-    with pytest.raises(ValidationError, match="frozen"):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         decycled.z = 3  # type: ignore[misc]
-    with pytest.raises(ValidationError, match="Extra inputs"):
-        phase.Decycled.model_validate({"cycle_count": 1, "z": 2, "colour": "red"})
-    with pytest.raises(ValidationError, match="cycle_count"):
-        phase.Decycled.model_validate({"cycle_count": 1.0, "z": 2})
 
 
 def test_with_a_prediction_the_anchor_is_not_used() -> None:

@@ -5,70 +5,27 @@ Each row is the whole state of the series at its epoch: the estimate, the
 counters and the reject buffer the next epoch starts from, so nothing else
 carries between epochs.
 
-Every model here is frozen, strict and refuses unknown fields. Strict means
-a value of the wrong kind is refused rather than converted: a phase that is
-not a :class:`~fractions.Fraction` or an ``int``, a ``bool`` for a number, a
-list for a tuple. A float that is not finite raises
-:class:`~masterclock.domain.exceptions.FilterError`, since no estimator value
-can be one. :func:`build_row` builds a row from the values of its fields,
-checked. A row is never changed: :func:`replace` builds a new one and checks
-it again.
+Every type here is a plain frozen dataclass, built without checks: its
+values come from code or from data already checked where it entered the
+program. A row alone is checked against the rules a row keeps
+(:func:`check_row`), when the estimator finishes it and when it is read
+back from a file.
 """
 
 import math
-from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
 from fractions import Fraction
 from itertools import pairwise
-from typing import Annotated, ClassVar, Final, Literal, Self
+from typing import Final, Literal
 
-from pydantic import (
-    AwareDatetime,
-    BaseModel,
-    BeforeValidator,
-    ConfigDict,
-    Field,
-    NonNegativeInt,
-    PositiveInt,
-    ValidationError,
-    ValidationInfo,
-    field_validator,
-    model_validator,
-)
-
-from masterclock.app.exceptions import describe_error
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
 
-
-def _refuse_bool(given_states: object) -> object:
-    """Refuse a bool where a number of states is meant.
-
-    Parameters
-    ----------
-    given_states : object
-        The value given for the number of states.
-
-    Returns
-    -------
-    object
-        ``given_states``, unchanged.
-
-    Raises
-    ------
-    ValueError
-        If ``given_states`` is a bool, which pydantic would otherwise take as the
-        literal it equals: ``True`` as 1.
-    """
-    if isinstance(given_states, bool):
-        message = f"the number of states is 1, 2 or 3, not a bool: {given_states}"
-        raise ValueError(message)
-    return given_states
-
-
-type FilterStates = Annotated[Literal[1, 2, 3], BeforeValidator(_refuse_bool)]
+type FilterStates = Literal[1, 2, 3]
 """How many states a series' estimator has: phase; rate; drift."""
 
-type Reject = tuple[AwareDatetime, float]
+type Reject = tuple[datetime, float]
 """One entry of a row's reject buffer: an epoch and a value.
 
 While a series is tracked, the value is a rejected innovation. While it is
@@ -97,28 +54,8 @@ _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 
-def _finite(field_name: str, number: float | None) -> None:
-    """Refuse a float that is not finite.
-
-    Parameters
-    ----------
-    field_name : str
-        The field the value is for, named in the error.
-    number : float or None
-        The value; ``None`` passes.
-
-    Raises
-    ------
-    FilterError
-        If ``number`` is nan or infinite.
-    """
-    if number is not None and not math.isfinite(number):
-        message = f"{field_name} {number} is not finite"
-        _log.error(message)
-        raise FilterError(message)
-
-
-class State(BaseModel):
+@dataclass(frozen=True, slots=True)
+class State:
     """The estimator's state at one epoch: phase, rate and drift.
 
     Parameters
@@ -130,49 +67,23 @@ class State(BaseModel):
     d : float, optional
         Drift, ps/s²; 0.0, the default, for a 1- or 2-state series.
 
-    Raises
-    ------
-    FilterError
-        If ``y`` or ``d`` is not finite.
-    pydantic.ValidationError
-        If ``x`` is not a Fraction, or a field is of the wrong kind or
-        unknown.
-
     Examples
     --------
     >>> State(x=Fraction(123457438, 100), y=0.0123)
     State(x=Fraction(61728719, 50), y=0.0123, d=0.0)
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
     x: Fraction
     y: float
     d: float = 0.0
 
-    @field_validator("y", "d")
-    @classmethod
-    def _check_finite(cls, rate_or_drift: float, info: ValidationInfo) -> float:
-        """Refuse a rate or drift that is not finite.
 
-        Parameters
-        ----------
-        rate_or_drift : float
-            The rate or drift.
-        info : ValidationInfo
-            Pydantic's validation information, naming the field.
-
-        Returns
-        -------
-        float
-            ``rate_or_drift``, unchanged.
-        """
-        _finite(str(info.field_name), rate_or_drift)
-        return rate_or_drift
-
-
-class SeriesParams(BaseModel):
+@dataclass(frozen=True, slots=True)
+class SeriesParams:
     """Everything one series needs from the configuration at one epoch.
+
+    The clock configuration checks every value when it is read, so the
+    settings it gives are never checked again.
 
     Parameters
     ----------
@@ -192,55 +103,28 @@ class SeriesParams(BaseModel):
     rms_max : int or None
         RMS limit of the gate, ps, above zero, for a pair; ``None`` for a
         triple, whose gate has no RMS test.
-
-    Raises
-    ------
-    pydantic.ValidationError
-        If a value is outside its range, ``M`` is given for a 1-state series
-        or missing for another, or a field is of the wrong kind or unknown.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
     filter_states: FilterStates
-    M: Annotated[float, Field(ge=1, allow_inf_nan=False)] | None
-    M_sigma: Annotated[float, Field(ge=1, allow_inf_nan=False)]
-    sigma0: Annotated[float, Field(gt=0, allow_inf_nan=False)]
-    gmax: PositiveInt
-    n_break: Annotated[int, Field(ge=3)]
-    rms_max: PositiveInt | None
-
-    @model_validator(mode="after")
-    def _check_together(self) -> Self:
-        """Refuse settings whose values do not fit each other.
-
-        Returns
-        -------
-        Self
-            The settings, unchanged.
-
-        Raises
-        ------
-        ValueError
-            If ``M`` is given for a 1-state series or missing for another,
-            or ``n_break`` is above ``gmax``.
-        """
-        if (self.M is None) != (self.filter_states == 1):
-            message = "a time constant M is given exactly when filter_states is 2 or 3"
-            raise ValueError(message)
-        if self.n_break > self.gmax:
-            message = f"n_break {self.n_break} is above gmax {self.gmax}"
-            raise ValueError(message)
-        return self
+    M: float | None
+    M_sigma: float
+    sigma0: float
+    gmax: int
+    n_break: int
+    rms_max: int | None
 
 
-class Row(BaseModel):
+@dataclass(frozen=True, slots=True)
+class Row:
     """The estimator's columns of one row: a series at one epoch.
+
+    A row is built unchecked; :func:`check_row` says whether it keeps the
+    rules given here.
 
     Parameters
     ----------
-    interpolated_datetime : AwareDatetime
-        The epoch start E.
+    interpolated_datetime : datetime
+        The epoch start E, with its timezone.
     innovation : float or None
         The measurement less the prediction, ps; ``None`` without a
         measurement or without a prediction.
@@ -256,18 +140,19 @@ class Row(BaseModel):
     innovation_scale : float or None
         The innovation scale, ps; ``None`` when dormant.
     segment : int
-        Segment number; 0 until the first cold start.
+        Segment number, at least 0; 0 until the first cold start.
     step_offset : int
         Sum of the phase steps accepted in this segment, ps.
     epochs_in_segment : int
-        Rows since the segment started; 0 on its first row.
+        Rows since the segment started, at least 0; 0 on its first row.
     epochs_since_accept : int
-        Rows since the last accepted measurement; 0 on an accepted row.
+        Rows since the last accepted measurement, at least 0; 0 on an
+        accepted row.
     consecutive_rejects : int
-        Consecutive counted rejects.
-    rejects : tuple of (AwareDatetime, float), optional
+        Consecutive counted rejects, at least 0.
+    rejects : tuple of (datetime, float)
         The reject buffer, oldest first, at most :data:`MAX_REJECTS`
-        entries; empty by default.
+        entries, each value finite.
     filter_states : {1, 2, 3}
         How many states the estimator has.
     time_constant : float or None
@@ -279,180 +164,28 @@ class Row(BaseModel):
         Letters of :data:`FLAG_ORDER`, in that order: exactly one of A, R, X
         and P; D never with A, U never with D or on a 1-state series.
 
-    Raises
-    ------
-    FilterError
-        If a float is not finite.
-    pydantic.ValidationError
-        If the flags, the state, the reject buffer or the time constant
-        break a rule above, or a field is of the wrong kind or unknown.
+    Every float is finite. A dormant row (D) holds none of ``x_fs``, ``y``,
+    ``d`` and ``innovation_scale``, and every other row all four; a P row
+    holds no innovation; a 2-state row has no drift other than 0.0, and a
+    1-state row no rate or drift other than 0.0.
     """
 
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
-    interpolated_datetime: AwareDatetime
+    interpolated_datetime: datetime
     innovation: float | None
     x_fs: int | None
     y: float | None
     d: float | None
     innovation_scale: float | None
-    segment: NonNegativeInt
+    segment: int
     step_offset: int
-    epochs_in_segment: NonNegativeInt
-    epochs_since_accept: NonNegativeInt
-    consecutive_rejects: NonNegativeInt
-    rejects: tuple[Reject, ...] = ()
+    epochs_in_segment: int
+    epochs_since_accept: int
+    consecutive_rejects: int
+    rejects: tuple[Reject, ...]
     filter_states: FilterStates
     time_constant: float | None
     scale_time_constant: float
     flags: str
-
-    _STATE: ClassVar[tuple[str, ...]] = ("x_fs", "y", "d", "innovation_scale")
-    """The fields a dormant row leaves empty and every other row fills."""
-
-    @field_validator(
-        "innovation",
-        "y",
-        "d",
-        "innovation_scale",
-        "time_constant",
-        "scale_time_constant",
-    )
-    @classmethod
-    def _check_finite(
-        cls, field_value: float | None, info: ValidationInfo
-    ) -> float | None:
-        """Refuse a float that is not finite.
-
-        Parameters
-        ----------
-        field_value : float or None
-            The value.
-        info : ValidationInfo
-            Pydantic's validation information, naming the field.
-
-        Returns
-        -------
-        float or None
-            ``field_value``, unchanged.
-        """
-        _finite(str(info.field_name), field_value)
-        return field_value
-
-    @field_validator("rejects")
-    @classmethod
-    def _check_rejects(cls, reject_buffer: tuple[Reject, ...]) -> tuple[Reject, ...]:
-        """Refuse a reject buffer too long, out of order or not finite.
-
-        Parameters
-        ----------
-        reject_buffer : tuple of (AwareDatetime, float)
-            The buffer.
-
-        Returns
-        -------
-        tuple of (AwareDatetime, float)
-            ``reject_buffer``, unchanged.
-
-        Raises
-        ------
-        ValueError
-            If it holds more than three entries, or its epochs do not rise
-            from first to last.
-        """
-        for _, reject_value in reject_buffer:
-            _finite("rejects", reject_value)
-        if len(reject_buffer) > MAX_REJECTS:
-            message = (
-                f"the reject buffer holds at most three entries: {len(reject_buffer)}"
-            )
-            raise ValueError(message)
-        if any(
-            later_epoch <= earlier_epoch
-            for (earlier_epoch, _), (later_epoch, _) in pairwise(reject_buffer)
-        ):
-            message = "the reject buffer is held oldest first"
-            raise ValueError(message)
-        return reject_buffer
-
-    @field_validator("flags")
-    @classmethod
-    def _check_flags(cls, row_flags: str) -> str:
-        """Refuse flags that are unknown, repeated, out of order or no outcome.
-
-        Parameters
-        ----------
-        row_flags : str
-            The flags.
-
-        Returns
-        -------
-        str
-            ``row_flags``, unchanged.
-
-        Raises
-        ------
-        ValueError
-            If a letter is not one of :data:`FLAG_ORDER`, appears twice or
-            out of order, the flags hold other than exactly one of A, R, X
-            and P, or D stands with A or U.
-        """
-        ordered_flags = "".join(letter for letter in FLAG_ORDER if letter in row_flags)
-        if row_flags != ordered_flags:
-            message = (
-                f"flags {row_flags!r} are not distinct letters of {FLAG_ORDER} in order"
-            )
-            raise ValueError(message)
-        if len(OUTCOMES & set(row_flags)) != 1:
-            message = (
-                f"flags {row_flags!r} hold other than exactly one of A, R, X and P"
-            )
-            raise ValueError(message)
-        if "D" in row_flags and ("A" in row_flags or "U" in row_flags):
-            message = (
-                f"flags {row_flags!r}: a dormant row is never accepted or unsettled"
-            )
-            raise ValueError(message)
-        return row_flags
-
-    @model_validator(mode="after")
-    def _check_state(self) -> Self:
-        """Refuse a state that does not fit the row's flags or model.
-
-        Returns
-        -------
-        Self
-            The row, unchanged.
-
-        Raises
-        ------
-        ValueError
-            If a dormant row holds any part of a state, another row lacks
-            one, a row without a measurement holds an innovation, a row has
-            a rate or drift its model lacks, the time constant is given for
-            a 1-state series or missing for another, or a 1-state row is
-            unsettled.
-        """
-        is_dormant = "D" in self.flags
-        empty_fields = [
-            field_name
-            for field_name in self._STATE
-            if getattr(self, field_name) is None
-        ]
-        if empty_fields != (list(self._STATE) if is_dormant else []):
-            message = (
-                "a dormant row has no x_fs, y, d or innovation_scale and every other"
-                f" row has all four; flags {self.flags!r}, empty {empty_fields}"
-            )
-            raise ValueError(message)
-        if "P" in self.flags and self.innovation is not None:
-            message = "a row with no measurement (P) has no innovation"
-            raise ValueError(message)
-        if (self.time_constant is None) != (self.filter_states == 1):
-            message = "a time constant is given exactly when filter_states is 2 or 3"
-            raise ValueError(message)
-        self._check_model()
-        return self
 
     def known_state(self) -> tuple[int, float, float]:
         """Give the row's phase, rate and drift.
@@ -473,90 +206,201 @@ class Row(BaseModel):
             raise FilterError(message)
         return self.x_fs, self.y, self.d
 
-    def _check_model(self) -> None:
-        """Refuse a rate, drift or settling the row's model does not have.
 
-        Raises
-        ------
-        ValueError
-            If a 2-state row has a drift other than 0.0, a 1-state row a
-            rate or drift other than 0.0, or a 1-state row carries U.
-        """
-        if self.filter_states < 3 and self.d not in {None, 0.0}:
-            message = f"d is 0.0 in a {self.filter_states}-state row: {self.d}"
-            raise ValueError(message)
-        if self.filter_states == 1 and self.y not in {None, 0.0}:
-            message = f"y is 0.0 in a 1-state row: {self.y}"
-            raise ValueError(message)
-        if self.filter_states == 1 and "U" in self.flags:
-            message = "U is never carried by a 1-state row"
-            raise ValueError(message)
+_STATE_FIELDS: Final[tuple[str, ...]] = ("x_fs", "y", "d", "innovation_scale")
+"""The fields a dormant row leaves empty and every other row fills."""
 
 
-def build_row(field_values: Mapping[str, object]) -> Row:
-    """Build a row from the values of its fields, checked.
+def check_row(row: Row) -> None:
+    """Refuse a row that breaks a rule a row keeps (see :class:`Row`).
 
-    Parameters
-    ----------
-    field_values : Mapping of str to object
-        Every field of the row, by name, with its value.
-
-    Returns
-    -------
-    Row
-        The row the values make.
-
-    Raises
-    ------
-    FilterError
-        If the values break any rule of :class:`Row`, miss a field, or name
-        a field a row does not have.
-
-    Examples
-    --------
-    >>> from datetime import UTC, datetime
-    >>> build_row({
-    ...     "interpolated_datetime": datetime(2025, 9, 23, 6, 0, tzinfo=UTC),
-    ...     "innovation": None, "x_fs": None, "y": None, "d": None,
-    ...     "innovation_scale": None, "segment": 0, "step_offset": 0,
-    ...     "epochs_in_segment": 0, "epochs_since_accept": 0,
-    ...     "consecutive_rejects": 0, "rejects": (), "filter_states": 1,
-    ...     "time_constant": None, "scale_time_constant": 50.0, "flags": "PD",
-    ... }).flags
-    'PD'
-    """
-    try:
-        return Row.model_validate(dict(field_values))
-    except ValidationError as exc:
-        message = f"invalid row: {describe_error(exc)}"
-        _log.error(message)
-        raise FilterError(message) from exc
-
-
-def replace(row: Row, **changed_fields: object) -> Row:
-    """Build a row from another with some fields changed, checked again.
+    Nothing is logged: the caller says what the row was for. The kinds of
+    the values are not checked; a row read from a file has them checked
+    where it is read.
 
     Parameters
     ----------
     row : Row
-        The row to start from; it is not changed.
-    **changed_fields : object
-        The fields to change, by name, with their new values.
-
-    Returns
-    -------
-    Row
-        A new row with ``changed_fields`` made and every other field as in ``row``.
+        The row.
 
     Raises
     ------
-    FilterError
-        If the changed row breaks any rule of :class:`Row`, or ``changed_fields``
-        names a field a row does not have.
+    ValueError
+        Naming the first rule the row breaks: a float that is not finite, a
+        counter below 0, a reject buffer too long or out of order, flags
+        that are unknown, repeated, out of order or not one outcome, D with
+        A or U, a state that does not fit the flags or the model, an
+        innovation on a P row, or a time constant given for a 1-state series
+        or missing for another.
 
-    Notes
-    -----
-    Pydantic's ``model_copy(update=...)`` would build the new row without
-    checking it, so a change that broke a rule would go unnoticed.
+    Examples
+    --------
+    >>> from datetime import UTC
+    >>> row = Row(
+    ...     interpolated_datetime=datetime(2025, 9, 23, 6, 0, tzinfo=UTC),
+    ...     innovation=None, x_fs=None, y=None, d=None, innovation_scale=None,
+    ...     segment=0, step_offset=0, epochs_in_segment=0,
+    ...     epochs_since_accept=0, consecutive_rejects=0, rejects=(),
+    ...     filter_states=1, time_constant=None, scale_time_constant=50.0,
+    ...     flags="PD",
+    ... )
+    >>> check_row(row)
     """
-    return build_row({**dict(row), **changed_fields})
+    _check_numbers(row)
+    _check_rejects(row.rejects)
+    _check_flags(row.flags)
+    _check_state(row)
+
+
+def _check_numbers(row: Row) -> None:
+    """Refuse a float that is not finite, or a counter below 0.
+
+    Parameters
+    ----------
+    row : Row
+        The row.
+
+    Raises
+    ------
+    ValueError
+        If a float field is nan or infinite, or a counter or the segment
+        number is negative.
+    """
+    for field_name, number in (
+        ("innovation", row.innovation),
+        ("y", row.y),
+        ("d", row.d),
+        ("innovation_scale", row.innovation_scale),
+        ("time_constant", row.time_constant),
+        ("scale_time_constant", row.scale_time_constant),
+    ):
+        if number is not None and not math.isfinite(number):
+            message = f"{field_name} {number} is not finite"
+            raise ValueError(message)
+    for field_name, count in (
+        ("segment", row.segment),
+        ("epochs_in_segment", row.epochs_in_segment),
+        ("epochs_since_accept", row.epochs_since_accept),
+        ("consecutive_rejects", row.consecutive_rejects),
+    ):
+        if count < 0:
+            message = f"{field_name} {count} is below 0"
+            raise ValueError(message)
+
+
+def _check_rejects(reject_buffer: tuple[Reject, ...]) -> None:
+    """Refuse a reject buffer too long, out of order or not finite.
+
+    Parameters
+    ----------
+    reject_buffer : tuple of (datetime, float)
+        The buffer.
+
+    Raises
+    ------
+    ValueError
+        If a value is not finite, it holds more than three entries, or its
+        epochs do not rise from first to last.
+    """
+    for _, reject_value in reject_buffer:
+        if not math.isfinite(reject_value):
+            message = f"rejects {reject_value} is not finite"
+            raise ValueError(message)
+    if len(reject_buffer) > MAX_REJECTS:
+        message = f"the reject buffer holds at most three entries: {len(reject_buffer)}"
+        raise ValueError(message)
+    if any(
+        later_epoch <= earlier_epoch
+        for (earlier_epoch, _), (later_epoch, _) in pairwise(reject_buffer)
+    ):
+        message = "the reject buffer is held oldest first"
+        raise ValueError(message)
+
+
+def _check_flags(row_flags: str) -> None:
+    """Refuse flags that are unknown, repeated, out of order or no outcome.
+
+    Parameters
+    ----------
+    row_flags : str
+        The flags.
+
+    Raises
+    ------
+    ValueError
+        If a letter is not one of :data:`FLAG_ORDER`, appears twice or out
+        of order, the flags hold other than exactly one of A, R, X and P,
+        or D stands with A or U.
+    """
+    ordered_flags = "".join(letter for letter in FLAG_ORDER if letter in row_flags)
+    if row_flags != ordered_flags:
+        message = (
+            f"flags {row_flags!r} are not distinct letters of {FLAG_ORDER} in order"
+        )
+        raise ValueError(message)
+    if len(OUTCOMES & set(row_flags)) != 1:
+        message = f"flags {row_flags!r} hold other than exactly one of A, R, X and P"
+        raise ValueError(message)
+    if "D" in row_flags and ("A" in row_flags or "U" in row_flags):
+        message = f"flags {row_flags!r}: a dormant row is never accepted or unsettled"
+        raise ValueError(message)
+
+
+def _check_state(row: Row) -> None:
+    """Refuse a state that does not fit the row's flags or model.
+
+    Parameters
+    ----------
+    row : Row
+        The row, its flags already checked.
+
+    Raises
+    ------
+    ValueError
+        If a dormant row holds any part of a state, another row lacks one,
+        a row without a measurement holds an innovation, or the row breaks
+        a rule of its model (see :func:`_check_model`).
+    """
+    is_dormant = "D" in row.flags
+    empty_fields = [
+        field_name for field_name in _STATE_FIELDS if getattr(row, field_name) is None
+    ]
+    if empty_fields != (list(_STATE_FIELDS) if is_dormant else []):
+        message = (
+            "a dormant row has no x_fs, y, d or innovation_scale and every other"
+            f" row has all four; flags {row.flags!r}, empty {empty_fields}"
+        )
+        raise ValueError(message)
+    if "P" in row.flags and row.innovation is not None:
+        message = "a row with no measurement (P) has no innovation"
+        raise ValueError(message)
+    _check_model(row)
+
+
+def _check_model(row: Row) -> None:
+    """Refuse a time constant, rate, drift or settling the row's model does not have.
+
+    Parameters
+    ----------
+    row : Row
+        The row.
+
+    Raises
+    ------
+    ValueError
+        If the time constant is given for a 1-state series or missing for
+        another, a 2-state row has a drift other than 0.0, a 1-state row a
+        rate or drift other than 0.0, or a 1-state row carries U.
+    """
+    if (row.time_constant is None) != (row.filter_states == 1):
+        message = "a time constant is given exactly when filter_states is 2 or 3"
+        raise ValueError(message)
+    if row.filter_states < 3 and row.d not in {None, 0.0}:
+        message = f"d is 0.0 in a {row.filter_states}-state row: {row.d}"
+        raise ValueError(message)
+    if row.filter_states == 1 and row.y not in {None, 0.0}:
+        message = f"y is 0.0 in a 1-state row: {row.y}"
+        raise ValueError(message)
+    if row.filter_states == 1 and "U" in row.flags:
+        message = "U is never carried by a 1-state row"
+        raise ValueError(message)

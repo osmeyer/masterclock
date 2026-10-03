@@ -547,6 +547,35 @@ def _state_texts(row: Row) -> list[str | None]:
     return state_texts
 
 
+def _row_template(columns: tuple[Column, ...]) -> str:
+    """Give the format string that lays out a row of the given columns.
+
+    Parameters
+    ----------
+    columns : tuple of Column
+        A file's columns.
+
+    Returns
+    -------
+    str
+        Each column right-justified to its width, separated by
+        :data:`SEPARATOR`.
+
+    Examples
+    --------
+    >>> _row_template((Column("a", 3, ""), Column("b", 2, "")))
+    '{:>3}, {:>2}'
+    """
+    return SEPARATOR.join(f"{{:>{column.width}}}" for column in columns)
+
+
+_ROW_TEMPLATES: Final[dict[tuple[Column, ...], tuple[str, int]]] = {
+    columns: (_row_template(columns), _width(columns))
+    for columns in (MEAS_COLUMNS, DDIFF_COLUMNS)
+}
+"""Each file's row format string and row width."""
+
+
 def _joined(
     columns: tuple[Column, ...], column_texts: list[str | None], epoch_start: datetime
 ) -> str:
@@ -570,17 +599,27 @@ def _joined(
     ------
     DataFileError
         If a value is wider than its column.
+
+    Notes
+    -----
+    Padding never shortens a text, so the line is the row's width exactly
+    when every value fits; only a line of another width is searched for the
+    value that does not.
     """
-    padded_fields = []
-    for column, column_text in zip(columns, column_texts, strict=True):
-        field_text = EMPTY if column_text is None else column_text
-        if len(field_text) > column.width:
-            _fail(
-                f"row of {epoch_start}: {column.name} {field_text!r} does not fit"
-                f" its {column.width} characters"
-            )
-        padded_fields.append(field_text.rjust(column.width))
-    return SEPARATOR.join(padded_fields)
+    field_texts = [EMPTY if text is None else text for text in column_texts]
+    row_template, row_width = _ROW_TEMPLATES[columns]
+    row_line = row_template.format(*field_texts)
+    if len(row_line) != row_width:
+        column, field_text = next(
+            (column, field_text)
+            for column, field_text in zip(columns, field_texts, strict=True)
+            if len(field_text) > column.width
+        )
+        _fail(
+            f"row of {epoch_start}: {column.name} {field_text!r} does not fit"
+            f" its {column.width} characters"
+        )
+    return row_line
 
 
 def format_meas_row(meas_record: MeasRecord) -> str:
@@ -1465,16 +1504,17 @@ class DayBuffer:
         Raises
         ------
         DataFileError
-            If a value does not fit its column, the line does not read back
-            as written, or ``data_file`` was given another series or kind of
-            file before.
+            If a value does not fit its column, or ``data_file`` was given
+            another series or kind of file before.
 
         Notes
         -----
-        The record is formatted and read back, and the row read back is
-        kept as the series' newest: the row a later run would read from the
-        file, so the next epoch is the same whether it takes the row from
-        here or from the file (I5).
+        The row kept as the series' newest is the row a later run would read
+        from the file, so the next epoch is the same whether it takes the
+        row from here or from the file (I5). The line is not read back to
+        get it: every value is written in a form that gives it back exactly,
+        which the round-trip tests show, so the row is kept as it is, less
+        what the file does not hold: a measurement row's innovation.
         """
         file_kind: FileKind = "meas" if isinstance(file_record, MeasRecord) else "ddiff"
         if self._file_series.setdefault(data_file, (file_kind, series_key)) != (
@@ -1487,15 +1527,15 @@ class DayBuffer:
             )
         if isinstance(file_record, MeasRecord):
             row_line = format_meas_row(file_record)
-            read_back_row = parse_meas_row(row_line).row
+            kept_row = file_record.row.model_copy(update={"innovation": None})
         else:
             row_line = format_ddiff_row(file_record)
-            read_back_row = parse_ddiff_row(row_line).row
+            kept_row = file_record.row
         self.file_texts[data_file] = (
             self.file_texts.get(data_file, "") + row_line + "\n"
         )
-        self.last_rows[series_key] = read_back_row
-        self._started(read_back_row.interpolated_datetime)
+        self.last_rows[series_key] = kept_row
+        self._started(kept_row.interpolated_datetime)
 
     def _started(self, epoch_start: datetime | None) -> None:
         """Note an epoch of a buffered row, keeping the earliest.

@@ -25,7 +25,7 @@ import pytest
 
 from masterclock.app.exceptions import ConfigError
 from masterclock.das_processor import clock_config
-from masterclock.domain.series import SeriesParams
+from masterclock.domain.series import SeriesKey, SeriesParams
 
 BASE_YAML: Final = (
     "rejects_before_restart: 36\n"
@@ -373,6 +373,37 @@ def test_a_triple_takes_its_clock_s_settings_and_no_rms_limit(tmp_path: Path) ->
         100.0,
         None,
     )
+
+
+def test_every_series_gets_its_settings_with_each_clock_looked_up_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Give each series what params_for gives it, each clock's entry settled once."""
+    loaded_config = read_config_text(tmp_path)
+    series_keys: list[SeriesKey] = [
+        ("mc1", "mc1"),
+        ("mc1", "mc2"),
+        ("mc2", "nav23"),
+        ("mc1", "mc2", "nav23"),
+        ("mc2", "mc2", "nav23"),
+    ]
+    expected = {
+        series_key: loaded_config.params_for(series_key, MJD_60980_START)
+        for series_key in series_keys
+    }
+    looked_up: list[str] = []
+    entry_for = clock_config.ClockConfig.entry_for
+
+    def counting_entry_for(
+        self: clock_config.ClockConfig, clock: str, epoch_start: datetime
+    ) -> clock_config.ClockEntry:
+        """Note each clock looked up, then look it up."""
+        looked_up.append(clock)
+        return entry_for(self, clock, epoch_start)
+
+    monkeypatch.setattr(clock_config.ClockConfig, "entry_for", counting_entry_for)
+    assert loaded_config.params_for_series(series_keys, MJD_60980_START) == expected
+    assert sorted(looked_up) == ["mc1", "mc2", "nav23"]
 
 
 # ------------------------------------------------------------------ example

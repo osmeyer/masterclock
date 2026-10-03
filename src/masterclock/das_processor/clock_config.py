@@ -618,7 +618,60 @@ class ClockConfig(BaseModel):
         ConfigError
             If the configuration has no entry for the series' clock.
         """
-        clock_entry = self.entry_for(series_key[-1], epoch_start)
+        return self._series_params(
+            series_key, self.entry_for(series_key[-1], epoch_start)
+        )
+
+    def params_for_series(
+        self, series_keys: Iterable[SeriesKey], epoch_start: datetime
+    ) -> dict[SeriesKey, SeriesParams]:
+        """Give every series' settings at a mark, each clock's entry settled once.
+
+        Parameters
+        ----------
+        series_keys : iterable of series key
+            The series.
+        epoch_start : datetime
+            The epoch start; must carry a timezone.
+
+        Returns
+        -------
+        dict of series key to SeriesParams
+            What :meth:`params_for` gives each series.
+
+        Raises
+        ------
+        ConfigError
+            If the configuration has no entry for a series' clock.
+        """
+        clock_entries: dict[str, ClockEntry] = {}
+        series_params = {}
+        for series_key in series_keys:
+            clock = series_key[-1]
+            if clock not in clock_entries:
+                clock_entries[clock] = self.entry_for(clock, epoch_start)
+            series_params[series_key] = self._series_params(
+                series_key, clock_entries[clock]
+            )
+        return series_params
+
+    def _series_params(
+        self, series_key: SeriesKey, clock_entry: ClockEntry
+    ) -> SeriesParams:
+        """Give a series its settings from its clock's entry.
+
+        Parameters
+        ----------
+        series_key : (str, str) or (str, str, str)
+            The series.
+        clock_entry : ClockEntry
+            The entry of its clock side at the mark.
+
+        Returns
+        -------
+        SeriesParams
+            The entry's values, N_break and, for a pair, its RMS limit.
+        """
         rms_max = (
             self.rms_limit((series_key[0], series_key[1]))
             if len(series_key) == _PAIR

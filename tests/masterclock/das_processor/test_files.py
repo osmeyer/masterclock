@@ -933,8 +933,8 @@ def test_after_a_write_the_text_is_empty_and_the_last_rows_remain(
     }
 
 
-def test_the_newest_row_is_the_one_read_back(tmp_path: Path) -> None:
-    """Keep the row parsed back from its line, as a later run would read it (I5)."""
+def test_the_newest_row_is_the_one_a_later_run_reads(tmp_path: Path) -> None:
+    """Keep the row as the file holds it: a pair's without its innovation (I5)."""
     meas, _ = make_archives(tmp_path)
     day_buffer = files.DayBuffer("a")
     file_record = files.MeasRecord(
@@ -943,6 +943,27 @@ def test_the_newest_row_is_the_one_read_back(tmp_path: Path) -> None:
     day_buffer.add(meas / "das_a.mc2.nav23.dat", PAIR_KEY, file_record)
     assert day_buffer.last_rows[PAIR_KEY].innovation is None
     assert day_buffer.last_rows[PAIR_KEY] == worked_row()
+
+
+def test_a_triple_s_newest_row_keeps_its_innovation(tmp_path: Path) -> None:
+    """Keep a triple's innovation, which its file holds, as a later run reads it."""
+    _, ddiff = make_archives(tmp_path)
+    day_buffer = files.DayBuffer("a")
+    file_record = files.DdiffRecord(
+        measurement=TripleMeasurement(
+            z=6_666_667,
+            double_difference_sigma=3.3166247903553998,
+            components_used="111",
+            pair_cold_started=False,
+        ),
+        row=worked_row(innovation=2.62),
+    )
+    day_buffer.add(ddiff / "das_a.mc1.mc2.nav23.dat", TRIPLE_KEY, file_record)
+    assert day_buffer.last_rows[TRIPLE_KEY] == worked_row(innovation=2.62)
+    assert (
+        files.parse_ddiff_row(files.format_ddiff_row(file_record)).row
+        == day_buffer.last_rows[TRIPLE_KEY]
+    )
 
 
 def test_a_row_too_wide_is_refused_before_it_is_buffered(tmp_path: Path) -> None:

@@ -196,10 +196,7 @@ def build_epoch(
         )
         for mc in steering_refs
     }
-    series_params = {
-        series_key: clock_config.params_for(series_key, epoch_start)
-        for series_key in series_keys
-    }
+    series_params = clock_config.params_for_series(series_keys, epoch_start)
     return Epoch(
         interpolated_datetime=epoch_start,
         das_block=das_block,

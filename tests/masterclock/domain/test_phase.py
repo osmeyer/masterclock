@@ -104,6 +104,29 @@ def test_every_finite_float_is_held_exactly(number: float) -> None:
     assert phase.exact(number) == Fraction(*number.as_integer_ratio())
 
 
+@given(st.floats(allow_nan=False, allow_infinity=False))
+def test_a_float_s_ratio_is_the_fraction_it_holds(number: float) -> None:
+    """Give the numerator and denominator of the value exact gives, in lowest terms."""
+    numerator, denominator = phase.exact_ratio(number)
+    assert Fraction(numerator, denominator) == phase.exact(number)
+    assert (numerator, denominator) == (
+        phase.exact(number).numerator,
+        phase.exact(number).denominator,
+    )
+
+
+@pytest.mark.parametrize("bad_number", [float("nan"), float("inf"), float("-inf")])
+def test_a_ratio_of_a_value_that_is_not_finite_is_refused(
+    bad_number: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Refuse nan and the infinities, and log the refusal as raised."""
+    with pytest.raises(FilterError, match="not finite") as raised:
+        phase.exact_ratio(bad_number)
+    assert [log_record.getMessage() for log_record in caplog.records] == [
+        str(raised.value)
+    ]
+
+
 # -------------------------------------------------------------- round_even
 
 

@@ -6,7 +6,8 @@ column valid, or it is refused as malformed; a record
 works out its reference, instants and epoch from its columns, and none of
 them may be passed in; a file's lines that are malformed, on another day,
 late in their epoch, backwards in time or a repeated pair are logged under
-that reason and skipped, and a skipped line is not remembered; a file whose
+that reason and skipped, a line measured against a skipped reference is
+skipped with nothing logged, and a skipped line is not remembered; a file whose
 last line has no newline, or that cannot be read, ends the read; daily file
 names cover days 50000 to 99999 only and read back to the day they were made
 from; and the files of a directory are read in day order as one stream of
@@ -471,6 +472,29 @@ def test_a_skipped_line_is_not_remembered(tmp_path: Path) -> None:
         das_measurement.clock for das_measurement in reader.read_measurements(day_file)
     ]
     assert clock_names == ["clka", "clkb", "clkc"]
+
+
+def test_a_line_against_a_skipped_reference_is_skipped_silently(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Skip, logging nothing and remembering nothing, a line whose switch names mc9."""
+    day_file = write_data_file(
+        tmp_path,
+        [
+            das_line(mjd_at(60)),
+            das_line(mjd_at(120), switch="9A01"),
+            das_line(mjd_at(90), clock="clkb"),
+            das_line(mjd_at(595), switch="9A02", clock="clkc"),
+            das_line(mjd_at(100), switch="9A01"),
+        ],
+    )
+    with caplog.at_level(logging.DEBUG):
+        clock_names = [
+            das_measurement.clock
+            for das_measurement in reader.read_measurements(day_file)
+        ]
+    assert clock_names == ["clka", "clkb"]
+    assert not caplog.records
 
 
 def test_a_pair_may_be_measured_again_in_the_next_epoch(tmp_path: Path) -> None:

@@ -65,11 +65,17 @@ def test_a_large_deployment_stays_clear_of_the_epoch_s_end(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Keep the last of many measurements out of the epoch's refused last seconds."""
-    epoch_timing.build_deployment(tmp_path, 10, 200, 1)
+    references = epoch_timing.MAX_REFERENCES
+    epoch_timing.build_deployment(tmp_path, references, 200, 1)
     with caplog.at_level(logging.WARNING):
         (das_block,) = read_all_blocks(tmp_path / "das")
     assert not caplog.records
-    assert len(das_block.measurements) == 10 * 10 + 200
+    assert len(das_block.measurements) == references * references + 200
+
+
+def test_no_reference_is_one_the_reader_skips() -> None:
+    """Name the references from the digits das_processor reads, mc9 left out."""
+    assert tuple(f"mc{digit}" for digit in range(9)) == epoch_timing.REFERENCE_NAMES
 
 
 def data_file_rows(timing_folder: Path) -> dict[str, int]:
@@ -145,7 +151,7 @@ def test_an_empty_folder_is_taken(tmp_path: Path) -> None:
     "cli_arguments",
     [
         ["--references", "0"],
-        ["--references", "11"],
+        ["--references", str(epoch_timing.MAX_REFERENCES + 1)],
         ["--clocks", "-1"],
         ["--clocks", "many"],
         ["--epochs", "145"],

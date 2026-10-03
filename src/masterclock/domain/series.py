@@ -15,9 +15,10 @@ back from a file.
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from fractions import Fraction
 from itertools import pairwise
 from typing import Final, Literal
+
+from gmpy2 import mpq
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import FilterError
@@ -60,7 +61,7 @@ class State:
 
     Parameters
     ----------
-    x : Fraction
+    x : mpq
         Phase, ps. Exact within the epoch; rounded once when it is stored.
     y : float
         Rate, ps/s; 0.0 for a 1-state series.
@@ -69,11 +70,11 @@ class State:
 
     Examples
     --------
-    >>> State(x=Fraction(123457438, 100), y=0.0123)
-    State(x=Fraction(61728719, 50), y=0.0123, d=0.0)
+    >>> State(x=mpq(123457438, 100), y=0.0123)
+    State(x=mpq(61728719,50), y=0.0123, d=0.0)
     """
 
-    x: Fraction
+    x: mpq
     y: float
     d: float = 0.0
 

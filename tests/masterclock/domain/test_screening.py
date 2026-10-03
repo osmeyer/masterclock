@@ -19,11 +19,11 @@ Each limit holds exactly at its value, scales combine as the design writes
 them, and a triangle that cannot be tested does not stop the rest.
 """
 
-from fractions import Fraction
 from itertools import permutations
 from typing import Final
 
 import pytest
+from gmpy2 import mpq
 
 from masterclock.domain import screening
 from masterclock.domain.exceptions import FilterError
@@ -35,26 +35,26 @@ MC1_CLOCKS: Final = ("nav1", "nav2", "nav3", "nav4")
 
 def link_innovations(
     refs: tuple[str, ...], two_way_errors: dict[PairKey, float] | None = None
-) -> dict[PairKey, Fraction]:
+) -> dict[PairKey, mpq]:
     """Give every link of ``refs`` an innovation of 0, plus a two-way error.
 
     An error x on (a, b) puts x on (a, b) and -x on (b, a): their sum still
     cancels, so only the two-way value r̄_ab = x changes.
     """
-    innovations = {pair: Fraction(0) for pair in permutations(refs, 2)}
+    innovations = {pair: mpq(0) for pair in permutations(refs, 2)}
     for (a, b), x in (two_way_errors or {}).items():
-        innovations[(a, b)] += Fraction(x)
-        innovations[(b, a)] -= Fraction(x)
+        innovations[(a, b)] += mpq(x)
+        innovations[(b, a)] -= mpq(x)
     return innovations
 
 
-def unit_scales(innovations: dict[PairKey, Fraction]) -> dict[PairKey, float]:
+def unit_scales(innovations: dict[PairKey, mpq]) -> dict[PairKey, float]:
     """Give every pair an innovation scale of 1 ps."""
     return dict.fromkeys(innovations, 1.0)
 
 
 def run_screening(
-    innovations: dict[PairKey, Fraction],
+    innovations: dict[PairKey, mpq],
     refs: tuple[str, ...],
     scales: dict[PairKey, float] | None = None,
 ) -> screening.Screening:
@@ -67,13 +67,11 @@ def run_screening(
 # ----------------------------------------------------------- self-measurement
 
 
-def self_shift_innovations(
-    self_shift: int, sharing_count: int
-) -> dict[PairKey, Fraction]:
+def self_shift_innovations(self_shift: int, sharing_count: int) -> dict[PairKey, mpq]:
     """Give mc1's self pair ``self_shift``, and ``sharing_count`` clock pairs too."""
-    innovations = {("mc1", "mc1"): Fraction(self_shift)}
+    innovations = {("mc1", "mc1"): mpq(self_shift)}
     for clock_index, clock in enumerate(MC1_CLOCKS):
-        innovations[("mc1", clock)] = Fraction(
+        innovations[("mc1", clock)] = mpq(
             self_shift if clock_index < sharing_count else 0
         )
     return innovations
@@ -133,8 +131,8 @@ def test_a_self_innovation_inside_the_gate_passes() -> None:
 def test_sharing_the_shift_means_within_three_combined_scales() -> None:
     """Share within 3 sqrt(2) ps for scales of 1 ps, not within 5 sqrt(2)."""
     innovations = self_shift_innovations(100, 0)
-    innovations[("mc1", "nav1")] = Fraction(100 - 4)
-    innovations[("mc1", "nav2")] = Fraction(100 - 6)
+    innovations[("mc1", "nav1")] = mpq(100 - 4)
+    innovations[("mc1", "nav2")] = mpq(100 - 6)
     screening_result = run_screening(innovations, ("mc1",))
     assert screening_result.excluded == frozenset({("mc1", "nav1")})
 
@@ -142,7 +140,7 @@ def test_sharing_the_shift_means_within_three_combined_scales() -> None:
 def test_the_shared_test_uses_each_pair_s_own_scale() -> None:
     """Combine the pair's scale with the self pair's: a wide pair shares more."""
     innovations = self_shift_innovations(100, 0)
-    innovations[("mc1", "nav1")] = Fraction(100 - 20)
+    innovations[("mc1", "nav1")] = mpq(100 - 20)
     scales = {**unit_scales(innovations), ("mc1", "nav1"): 10.0}
     assert run_screening(innovations, ("mc1",), scales).excluded == frozenset(
         {("mc1", "nav1")}
@@ -351,7 +349,7 @@ def test_a_triangle_with_a_link_not_measured_both_ways_is_not_tested() -> None:
 
 def test_a_pair_exactly_at_the_shared_limit_shares_the_shift() -> None:
     """Exclude a pair exactly three combined scales from the self shift (10.1)."""
-    innovations = {("mc1", "mc1"): Fraction(100), ("mc1", "nav1"): Fraction(115)}
+    innovations = {("mc1", "mc1"): mpq(100), ("mc1", "nav1"): mpq(115)}
     scales = {("mc1", "mc1"): 4.0, ("mc1", "nav1"): 3.0}
     screening_result = run_screening(innovations, ("mc1",), scales)
     assert screening_result.excluded == frozenset({("mc1", "nav1")})
@@ -359,7 +357,7 @@ def test_a_pair_exactly_at_the_shared_limit_shares_the_shift() -> None:
 
 def test_directions_exactly_at_the_reciprocity_limit_pass() -> None:
     """Pass a link whose directions miss cancelling by exactly five scales (10.2)."""
-    innovations = {("mc1", "mc2"): Fraction(25), ("mc2", "mc1"): Fraction(0)}
+    innovations = {("mc1", "mc2"): mpq(25), ("mc2", "mc1"): mpq(0)}
     scales = {("mc1", "mc2"): 3.0, ("mc2", "mc1"): 4.0}
     screening_result = run_screening(innovations, ("mc1", "mc2"), scales)
     assert (screening_result.excluded, screening_result.events) == (frozenset(), ())
@@ -372,8 +370,8 @@ THREE_REFS: Final = ("mc1", "mc2", "mc3")
 def test_a_direction_exactly_at_its_limit_from_the_estimate_is_not_bad() -> None:
     """Find neither direction bad at exactly five combined scales: exclude both."""
     innovations = link_innovations(THREE_REFS)
-    innovations[("mc1", "mc2")] = Fraction(325)
-    innovations[("mc2", "mc1")] = Fraction(200)
+    innovations[("mc1", "mc2")] = mpq(325)
+    innovations[("mc2", "mc1")] = mpq(200)
     scales = {
         ("mc1", "mc2"): 60.0,
         ("mc2", "mc1"): 60.0,
@@ -391,8 +389,8 @@ def test_the_bad_direction_is_judged_on_the_estimate_and_both_scales() -> None:
     innovations = link_innovations(
         THREE_REFS, {("mc2", "mc3"): 40.0, ("mc3", "mc1"): -10.0}
     )
-    innovations[("mc1", "mc2")] = Fraction(70)
-    innovations[("mc2", "mc1")] = Fraction(47, 2)
+    innovations[("mc1", "mc2")] = mpq(70)
+    innovations[("mc2", "mc1")] = mpq(47, 2)
     screening_result = run_screening(innovations, THREE_REFS)
     assert screening_result.excluded == frozenset({("mc1", "mc2")})
     assert [screening_event.finding for screening_event in screening_result.events] == [
@@ -435,9 +433,7 @@ def test_a_triangle_with_a_missing_link_does_not_stop_the_others() -> None:
 def test_a_missing_scale_is_logged_as_raised(caplog: pytest.LogCaptureFixture) -> None:
     """Log the FilterError for an innovation without a scale, in its own words."""
     with pytest.raises(FilterError) as raised:
-        screening.screen_references(
-            {("mc1", "mc1"): Fraction(0)}, {}, frozenset({"mc1"})
-        )
+        screening.screen_references({("mc1", "mc1"): mpq(0)}, {}, frozenset({"mc1"}))
     assert [log_record.getMessage() for log_record in caplog.records] == [
         str(raised.value)
     ]

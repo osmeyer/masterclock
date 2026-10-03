@@ -15,10 +15,10 @@ read back from a file, and tested there (das_processor/test_files.py).
 """
 
 from datetime import UTC, datetime
-from fractions import Fraction
 from typing import Final
 
 import pytest
+from gmpy2 import mpq
 
 from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.domain.double_difference import TripleValue
@@ -44,7 +44,7 @@ PREDICTION: Final = State(x=1_234_567 + exact(0.0123) * 600, y=0.0123)
 
 
 def measure_appendix_a_reading(
-    prediction: State | None, w: Fraction, anchor: int | None
+    prediction: State | None, w: mpq, anchor: int | None
 ) -> PairMeasurement:
     """Decycle Appendix A's reading."""
     return measure_pair(
@@ -59,8 +59,8 @@ def measure_appendix_a_reading(
 
 def test_the_worked_epoch_gives_its_pair_measurement() -> None:
     """Reproduce Appendix A: delta 137.2032 s, n = 6, z_E = 1 234 577."""
-    pair_measurement = measure_appendix_a_reading(PREDICTION, Fraction(0), None)
-    assert pair_measurement.delta == Fraction(1_372_032, 10_000)
+    pair_measurement = measure_appendix_a_reading(PREDICTION, mpq(0), None)
+    assert pair_measurement.delta == mpq(1_372_032, 10_000)
     assert (
         pair_measurement.cycle_count,
         pair_measurement.z,
@@ -79,7 +79,7 @@ def test_the_worked_epoch_gives_its_pair_measurement() -> None:
 
 def test_a_pair_without_a_prediction_is_decycled_against_its_anchor() -> None:
     """Decycle against the last buffered measurement when there is no prediction."""
-    pair_measurement = measure_appendix_a_reading(None, Fraction(0), 1_234_000)
+    pair_measurement = measure_appendix_a_reading(None, mpq(0), 1_234_000)
     assert (pair_measurement.cycle_count, pair_measurement.z) == (
         6,
         34_579 + 6 * PHASE_PERIOD,
@@ -88,14 +88,14 @@ def test_a_pair_without_a_prediction_is_decycled_against_its_anchor() -> None:
 
 def test_steering_in_the_epoch_is_taken_off() -> None:
     """Refer the measurement to E with the steering since E taken off."""
-    pair_measurement = measure_appendix_a_reading(None, Fraction(7, 2), None)
+    pair_measurement = measure_appendix_a_reading(None, mpq(7, 2), None)
     assert (pair_measurement.cycle_count, pair_measurement.z) == (0, 34_576)
 
 
 def test_the_offset_comes_from_the_datetimes_not_the_mjd() -> None:
     """Give delta exactly, as whole microseconds, not from the float MJDs."""
     measured_instant = mjd_to_datetime(60941.250001)
-    expected_delta = Fraction(
+    expected_delta = mpq(
         (measured_instant - epoch_start(measured_instant)).microseconds, 10**6
     )
     pair_measurement = measure_pair(
@@ -103,7 +103,7 @@ def test_the_offset_comes_from_the_datetimes_not_the_mjd() -> None:
         measured_phase=1,
         rms=1,
         prediction=None,
-        w=Fraction(0),
+        w=mpq(0),
         anchor=None,
     )
     assert pair_measurement.delta == expected_delta
@@ -118,7 +118,7 @@ def test_what_follows_from_the_mjd_cannot_be_passed_in(derived_field: str) -> No
         PairMeasurement(
             **{  # type: ignore[arg-type]
                 **APPENDIX_A_READING,
-                derived_field: Fraction(1),
+                derived_field: mpq(1),
                 "cycle_count": 6,
                 "z": 1,
             }
@@ -127,7 +127,7 @@ def test_what_follows_from_the_mjd_cannot_be_passed_in(derived_field: str) -> No
 
 def test_a_measurement_knows_its_time_and_epoch() -> None:
     """Work out the measurement time and its epoch start from the MJD."""
-    pair_measurement = measure_appendix_a_reading(PREDICTION, Fraction(0), None)
+    pair_measurement = measure_appendix_a_reading(PREDICTION, mpq(0), None)
     assert pair_measurement.measurement_datetime == mjd_to_datetime(60941.251588)
     assert pair_measurement.interpolated_datetime == mjd_to_datetime(60941.25)
 
@@ -146,7 +146,7 @@ def test_an_epoch_starts_on_its_ten_minute_mark(
 
 def test_a_slip_correction_moves_whole_periods() -> None:
     """Add k periods to the cycle count and z, and mark the measurement."""
-    pair_measurement = measure_appendix_a_reading(PREDICTION, Fraction(0), None)
+    pair_measurement = measure_appendix_a_reading(PREDICTION, mpq(0), None)
     corrected_measurement = pair_measurement.corrected(-2)
     assert (
         corrected_measurement.cycle_count,
@@ -163,9 +163,7 @@ def test_a_slip_correction_moves_whole_periods() -> None:
 
 def test_a_pair_measurement_gives_the_filter_its_values() -> None:
     """Give z, the rms and the slip mark as a FilterInput."""
-    pair_measurement = measure_appendix_a_reading(
-        PREDICTION, Fraction(0), None
-    ).corrected(1)
+    pair_measurement = measure_appendix_a_reading(PREDICTION, mpq(0), None).corrected(1)
     assert pair_measurement.filter_input() == FilterInput(
         z=1_234_577 + PHASE_PERIOD, rms=3, slip=True
     )

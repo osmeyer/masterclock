@@ -52,10 +52,10 @@ import dataclasses
 import math
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from fractions import Fraction
 from typing import Final, Literal
 
 import pytest
+from gmpy2 import mpq
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -78,7 +78,7 @@ EPOCH_START: Final = datetime(2025, 9, 23, 5, 50, tzinfo=UTC)
 T: Final = EPOCH_SECONDS
 """One epoch, s."""
 
-NO_STEERING_INPUT: Final = (Fraction(0), 0.0)
+NO_STEERING_INPUT: Final = (mpq(0), 0.0)
 """A steering input of nothing."""
 
 
@@ -224,7 +224,7 @@ def test_exact_gains_are_the_gains_with_the_phase_gain_exact(
     """Give g as the fraction it holds, and h/T and 2k/T**2 as gains gives them."""
     g, h_over_t, two_k_over_t2 = estimator.gains(filter_states, M)
     phase_gain, *other_gains = estimator.exact_gains(filter_states, M)
-    assert isinstance(phase_gain, Fraction)
+    assert isinstance(phase_gain, mpq)
     assert (phase_gain, *other_gains) == (exact(g), h_over_t, two_k_over_t2)
 
 
@@ -268,7 +268,7 @@ def test_two_states_move_on_with_rate_only() -> None:
     """Add y T to x and keep y; a 2-state row has no drift."""
     previous_row = last_row(filter_states=2, time_constant=30.0, y=0.25)
     assert estimator.predict(previous_row, NO_STEERING_INPUT) == State(
-        x=Fraction(1_234_567 + 150), y=0.25
+        x=mpq(1_234_567 + 150), y=0.25
     )
 
 
@@ -276,21 +276,21 @@ def test_one_state_carries_the_phase() -> None:
     """Keep x, and no rate or drift, for a 1-state row."""
     previous_row = last_row(filter_states=1, time_constant=None, y=0.0)
     assert estimator.predict(previous_row, NO_STEERING_INPUT) == State(
-        x=Fraction(1_234_567), y=0.0
+        x=mpq(1_234_567), y=0.0
     )
 
 
 @pytest.mark.parametrize(
     ("field_changes", "expected_prediction"),
     [
-        ({}, State(x=1_234_567 + exact(0.0123) * 600 + Fraction(7, 2), y=0.0123 + 0.5)),
+        ({}, State(x=1_234_567 + exact(0.0123) * 600 + mpq(7, 2), y=0.0123 + 0.5)),
         (
             {"filter_states": 2, "time_constant": 30.0},
-            State(x=1_234_567 + exact(0.0123) * 600 + Fraction(7, 2), y=0.0123 + 0.5),
+            State(x=1_234_567 + exact(0.0123) * 600 + mpq(7, 2), y=0.0123 + 0.5),
         ),
         (
             {"filter_states": 1, "time_constant": None, "y": 0.0},
-            State(x=1_234_567 + Fraction(7, 2), y=0.0),
+            State(x=1_234_567 + mpq(7, 2), y=0.0),
         ),
     ],
 )
@@ -298,7 +298,7 @@ def test_the_steering_input_is_added(
     field_changes: dict[str, object], expected_prediction: State
 ) -> None:
     """Add u_x to the phase, and u_y to the rate where there is one."""
-    steering_input = (Fraction(7, 2), 0.5)
+    steering_input = (mpq(7, 2), 0.5)
     assert (
         estimator.predict(last_row(**field_changes), steering_input)
         == expected_prediction
@@ -330,27 +330,25 @@ def test_the_worked_epoch_updates_to_its_state() -> None:
 
 
 def test_the_update_is_exact_in_phase() -> None:
-    """Add g times the innovation to x as an exact Fraction."""
-    prediction = State(x=Fraction(2**60) + Fraction(1, 3), y=0.0)
+    """Add g times the innovation to x as an exact mpq."""
+    prediction = State(x=mpq(2**60) + mpq(1, 3), y=0.0)
     g, _, _ = estimator.gains(2, 30.0)
-    updated_state = estimator.update(prediction, Fraction(10), 2, 30.0)
-    assert updated_state.x == Fraction(2**60) + Fraction(1, 3) + exact(g) * 10
+    updated_state = estimator.update(prediction, mpq(10), 2, 30.0)
+    assert updated_state.x == mpq(2**60) + mpq(1, 3) + exact(g) * 10
     assert updated_state.d == 0.0
 
 
 def test_one_state_takes_the_measurement_exactly() -> None:
     """Make x the measurement for a 1-state series, with no rate."""
-    prediction = State(x=Fraction(2**62 + 5), y=0.0)
-    updated_state = estimator.update(prediction, Fraction(-7), 1, None)
-    assert updated_state == State(x=Fraction(2**62 - 2), y=0.0)
+    prediction = State(x=mpq(2**62 + 5), y=0.0)
+    updated_state = estimator.update(prediction, mpq(-7), 1, None)
+    assert updated_state == State(x=mpq(2**62 - 2), y=0.0)
 
 
 # ----------------------------------------------------- following a signal
 
 
-def follow_rows(
-    filter_states: int, M: float, true_phases: list[Fraction]
-) -> list[Fraction]:
+def follow_rows(filter_states: int, M: float, true_phases: list[mpq]) -> list[mpq]:
     """Run the estimator over noise-free measurements, as the rows would.
 
     The measurements are the truth rounded to whole picoseconds. The series
@@ -367,7 +365,7 @@ def follow_rows(
         time_constant=M,
         epochs_in_segment=0,
     )
-    innovations: list[Fraction] = []
+    innovations: list[mpq] = []
     for epoch_number, z in enumerate(measurements[1:], start=1):
         prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
         assert prediction is not None
@@ -385,14 +383,14 @@ def follow_rows(
     return innovations
 
 
-def follow_exactly(M: float, true_phases: list[Fraction]) -> list[Fraction]:
+def follow_exactly(M: float, true_phases: list[mpq]) -> list[mpq]:
     """Run the 3-state loop over exact measurements, with x never rounded.
 
     The transition is written out here, as Phi of design 8.2, so the loop
-    can carry x as an exact Fraction from epoch to epoch.
+    can carry x as an exact mpq from epoch to epoch.
     """
     estimator_state = State(x=true_phases[0], y=0.0, d=0.0)
-    innovations: list[Fraction] = []
+    innovations: list[mpq] = []
     for z in true_phases[1:]:
         prediction = State(
             x=estimator_state.x
@@ -407,16 +405,16 @@ def follow_exactly(M: float, true_phases: list[Fraction]) -> list[Fraction]:
     return innovations
 
 
-def parabola_phases(M: float) -> list[Fraction]:
+def parabola_phases(M: float) -> list[mpq]:
     """Give a noise-free phase with rate and drift over 40 M epochs."""
-    rate, drift = Fraction(1, 20), Fraction(1, 10**7)
+    rate, drift = mpq(1, 20), mpq(1, 10**7)
     return [1_000 + rate * T * k + drift * (T * k) ** 2 / 2 for k in range(int(40 * M))]
 
 
 @pytest.mark.parametrize("M", [10.0, 30.0])
 def test_a_ramp_is_followed_within_a_picosecond(M: float) -> None:
     """Bring a 2-state innovation within 1 ps of a ramp after 20 M epochs (U7)."""
-    rate = Fraction(1, 20)
+    rate = mpq(1, 20)
     true_phases = [1_000 + rate * T * k for k in range(int(40 * M))]
     innovations = follow_rows(2, M, true_phases)
     assert max(abs(innovation) for innovation in innovations[int(20 * M) :]) <= 1
@@ -613,7 +611,7 @@ def test_an_accept_clears_the_counters_and_the_buffer() -> None:
     )
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
-    row = estimator.accept(moved_on(previous_row), prediction, Fraction(1), 3)
+    row = estimator.accept(moved_on(previous_row), prediction, mpq(1), 3)
     assert (row.consecutive_rejects, row.rejects, row.epochs_since_accept) == (0, (), 0)
     assert row.flags == "A"
 
@@ -633,9 +631,9 @@ def test_an_accept_moves_the_innovation_scale_but_not_below_its_floor(
 ) -> None:
     """Average the squared innovation in with w = 1/M_sigma, kept above the floor."""
     previous_row = last_row(innovation_scale=innovation_scale)
-    prediction = State(x=Fraction(1_234_574), y=0.0123)
+    prediction = State(x=mpq(1_234_574), y=0.0123)
     row = estimator.accept(
-        moved_on(previous_row), prediction, Fraction(innovation), scale_floor
+        moved_on(previous_row), prediction, mpq(innovation), scale_floor
     )
     assert row.innovation_scale == expected_scale
 
@@ -643,8 +641,8 @@ def test_an_accept_moves_the_innovation_scale_but_not_below_its_floor(
 def test_an_accept_takes_the_innovation_before_the_update() -> None:
     """Write the innovation given, and move the scale by it, not the residual."""
     previous_row = last_row(innovation_scale=4.0)
-    prediction = State(x=Fraction(1_000), y=0.0)
-    row = estimator.accept(moved_on(previous_row), prediction, Fraction(21, 2), 1)
+    prediction = State(x=mpq(1_000), y=0.0)
+    row = estimator.accept(moved_on(previous_row), prediction, mpq(21, 2), 1)
     assert row.innovation == 10.5
     assert row.innovation_scale == math.sqrt(0.98 * 16 + 0.02 * 10.5**2)
 
@@ -666,7 +664,7 @@ def test_an_accept_needs_a_series_with_an_innovation_scale() -> None:
     """Raise FilterError for an accept on a draft that has no scale."""
     draft = moved_on(last_row(), innovation_scale=None)
     with pytest.raises(FilterError, match="no innovation scale"):
-        estimator.accept(draft, State(x=Fraction(0), y=0.0), Fraction(0), 3)
+        estimator.accept(draft, State(x=mpq(0), y=0.0), mpq(0), 3)
 
 
 @pytest.mark.parametrize("outcome", ["P", "X", "R"])
@@ -866,9 +864,9 @@ def test_a_frequency_step_starts_a_warm_segment_and_accepts() -> None:
     assert prediction is not None
     draft = moved_on(previous_row)
     estimator.start_segment(draft, make_series_params(), keep_offset=True)
-    row = estimator.accept(draft, prediction, Fraction(2), 3)
+    row = estimator.accept(draft, prediction, mpq(2), 3)
     assert (row.flags, row.segment, row.step_offset) == ("ANU", 5, 25)
-    assert row.x_fs == to_fs(estimator.update(prediction, Fraction(2), 3, 100.0).x)
+    assert row.x_fs == to_fs(estimator.update(prediction, mpq(2), 3, 100.0).x)
 
 
 def test_a_phase_step_keeps_the_segment() -> None:
@@ -877,7 +875,7 @@ def test_a_phase_step_keeps_the_segment() -> None:
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
     row = estimator.accept(
-        moved_on(previous_row, step_offset=525), prediction, Fraction(2), 3
+        moved_on(previous_row, step_offset=525), prediction, mpq(2), 3
     )
     assert (row.flags, row.segment, row.step_offset) == ("A", 4, 525)
 
@@ -904,7 +902,7 @@ def test_a_row_is_unsettled_until_five_time_constants(
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
     draft = moved_on(previous_row, epochs_in_segment=epochs_in_segment)
-    assert estimator.accept(draft, prediction, Fraction(0), 3).flags == flags
+    assert estimator.accept(draft, prediction, mpq(0), 3).flags == flags
 
 
 def test_a_dormant_row_is_never_unsettled() -> None:
@@ -923,7 +921,7 @@ def test_flags_are_written_in_their_order() -> None:
     )
     estimator.start_segment(draft, make_series_params(), keep_offset=True)
     assert draft.flags == "SN"
-    assert estimator.accept(draft, prediction, Fraction(0), 3).flags == "ASNU"
+    assert estimator.accept(draft, prediction, mpq(0), 3).flags == "ASNU"
 
 
 def test_finish_refuses_a_row_that_breaks_a_rule() -> None:
@@ -1024,14 +1022,14 @@ def test_classify_needs_three_rejects(reject_count: int) -> None:
 @pytest.mark.parametrize(
     ("innovation", "innovation_scale", "in_gate"),
     [
-        (Fraction(15), 3.0, True),
-        (Fraction(-15), 3.0, True),
-        (Fraction(15) + Fraction(1, 10**9), 3.0, False),
-        (Fraction(-15) - Fraction(1, 10**9), 3.0, False),
+        (mpq(15), 3.0, True),
+        (mpq(-15), 3.0, True),
+        (mpq(15) + mpq(1, 10**9), 3.0, False),
+        (mpq(-15) - mpq(1, 10**9), 3.0, False),
     ],
 )
 def test_the_gate_is_five_innovation_scales_wide(
-    innovation: Fraction, innovation_scale: float, in_gate: bool
+    innovation: mpq, innovation_scale: float, in_gate: bool
 ) -> None:
     """Pass an innovation of at most 5 sigma either way, compared exactly (U8)."""
     assert estimator.within_gate(innovation, innovation_scale) is in_gate
@@ -1042,26 +1040,26 @@ def test_the_gate_is_five_innovation_scales_wide(
     innovation_scale=st.floats(min_value=0.0, max_value=1e12),
 )
 def test_the_gate_compares_as_exact_fractions_do(
-    innovation: Fraction, innovation_scale: float
+    innovation: mpq, innovation_scale: float
 ) -> None:
     """Pass exactly what a comparison of exact fractions passes (U8)."""
     assert estimator.within_gate(innovation, innovation_scale) is (
-        abs(innovation) <= Fraction(estimator.K_OUT * innovation_scale)
+        abs(innovation) <= mpq(estimator.K_OUT * innovation_scale)
     )
 
 
 def test_the_gate_holds_exactly_at_its_edge() -> None:
     """Pass an innovation exactly five scales out, refuse one a hair past it."""
-    edge = Fraction(estimator.K_OUT * 0.1)
+    edge = mpq(estimator.K_OUT * 0.1)
     assert estimator.within_gate(edge, 0.1)
     assert estimator.within_gate(-edge, 0.1)
-    assert not estimator.within_gate(edge + Fraction(1, 2**80), 0.1)
+    assert not estimator.within_gate(edge + mpq(1, 2**80), 0.1)
 
 
 def test_the_gate_refuses_a_scale_that_is_not_finite() -> None:
     """Raise FilterError when five scales are not a finite number."""
     with pytest.raises(FilterError, match="not finite"):
-        estimator.within_gate(Fraction(1), float("inf"))
+        estimator.within_gate(mpq(1), float("inf"))
 
 
 @pytest.mark.parametrize(
@@ -1084,7 +1082,7 @@ def test_a_counted_reject_enters_the_buffer() -> None:
         flags="R",
     )
     draft = moved_on(previous_row)
-    estimator.count_reject(draft, Fraction(81, 2))
+    estimator.count_reject(draft, mpq(81, 2))
     assert draft.consecutive_rejects == 4
     assert draft.rejects == (
         *reject_buffer(10.0, 20.0, 31.0)[1:],
@@ -1206,14 +1204,14 @@ def test_a_frequency_step_starts_a_new_segment(filter_states: Literal[2, 3]) -> 
 def test_a_frequency_step_moves_the_phase_to_the_line_at_the_third_reject() -> None:
     """Add a + s t3, exactly, with t3 the time from the first reject to the third."""
     previous_row = last_row()
-    prediction = State(x=Fraction(1_000), y=0.0123)
+    prediction = State(x=mpq(1_000), y=0.0123)
     draft = moved_on(
         previous_row, rejects=reject_buffer(30.0, 60.0, 90.0), consecutive_rejects=3
     )
     row = estimator.frequency_step(
         draft, prediction, 30.0, 0.05, 1_090, 3, make_series_params()
     )
-    line_phase = Fraction(1_000) + exact(30.0) + exact(0.05) * 2 * T
+    line_phase = mpq(1_000) + exact(30.0) + exact(0.05) * 2 * T
     assert row.innovation == float(1_090 - line_phase)
     assert row.flags == "ANU"
 
@@ -1228,7 +1226,7 @@ def test_a_one_state_series_takes_no_frequency_step() -> None:
     draft = moved_on(
         previous_row, rejects=reject_buffer(30.0, 60.0, 90.0), consecutive_rejects=3
     )
-    prediction = State(x=Fraction(1_234_567), y=0.0)
+    prediction = State(x=mpq(1_234_567), y=0.0)
     assert estimator.accept_step(draft, prediction, 1_234_657, 3, series_params) is None
 
 
@@ -1268,7 +1266,7 @@ def test_a_step_needs_a_series_with_an_innovation_scale() -> None:
         consecutive_rejects=3,
         innovation_scale=None,
     )
-    prediction = State(x=Fraction(0), y=0.0)
+    prediction = State(x=mpq(0), y=0.0)
     with pytest.raises(FilterError, match="no innovation scale"):
         estimator.accept_step(draft, prediction, 150, 3, make_series_params())
 
@@ -1316,7 +1314,7 @@ def test_three_consistent_measurements_cold_start_the_series(
     previous_row = dormant_row(
         1_000.0, 51_000.0, filter_states=filter_states, time_constant=M
     )
-    limit_z = round_even(Fraction(101_000) + Fraction(5) * Fraction(math.sqrt(6) * 5))
+    limit_z = round_even(mpq(101_000) + mpq(5) * mpq(math.sqrt(6) * 5))
     row = estimator.acquire(moved_on(previous_row), limit_z, series_params)
     assert row.flags == ("AN" if filter_states == 1 else "ANU")
     assert (row.x_fs, row.segment, row.innovation_scale) == (limit_z * 1000, 5, 5.0)
@@ -1407,7 +1405,7 @@ def test_a_dormant_series_acquires_across_a_wrap() -> None:
         """Decycle ``phi`` against the anchor and buffer it, as a dormant pair does."""
         nonlocal previous_row
         anchor = estimator.anchor_of(previous_row)
-        z = decycle(phi, Fraction(0), Fraction(0), None, anchor).z
+        z = decycle(phi, mpq(0), mpq(0), None, anchor).z
         previous_row = estimator.acquire(moved_on(previous_row), z, series_params)
         step_rows.append(previous_row)
 
@@ -1550,7 +1548,7 @@ def test_an_excluded_measurement_within_the_gate_is_held() -> None:
     assert (step_result.row.flags, step_result.row.consecutive_rejects) == ("X", 0)
     assert step_result.row.rejects == ()
     assert step_result.row.innovation == float(
-        WORKED_Z - Fraction(1_234_567) - exact(0.0123) * T
+        WORKED_Z - mpq(1_234_567) - exact(0.0123) * T
     )
 
 
@@ -1757,7 +1755,7 @@ def test_a_measurement_gives_its_floor(
 def test_a_prediction_for_a_series_with_no_scale_is_refused() -> None:
     """Raise FilterError when a dormant last row is given a prediction anyway."""
     previous_row = last_row(flags="PD", **DORMANT_FIELDS)
-    prediction = State(x=Fraction(WORKED_Z), y=0.0)
+    prediction = State(x=mpq(WORKED_Z), y=0.0)
     with pytest.raises(FilterError, match="no scale"):
         estimator.filter_step(
             NEXT_EPOCH_START,
@@ -1913,9 +1911,9 @@ def test_every_filter_error_is_logged_as_raised(
 ) -> None:
     """Log each FilterError at ERROR in the words it is raised with."""
     no_scale_draft = moved_on(last_row(), innovation_scale=None)
-    prediction = State(x=Fraction(0), y=0.0)
+    prediction = State(x=mpq(0), y=0.0)
     failing_calls: list[Callable[[], object]] = [
-        lambda: estimator.accept(no_scale_draft, prediction, Fraction(0), 3),
+        lambda: estimator.accept(no_scale_draft, prediction, mpq(0), 3),
         lambda: estimator.accept_step(
             dataclasses.replace(no_scale_draft, consecutive_rejects=3),
             prediction,

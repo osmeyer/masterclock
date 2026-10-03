@@ -18,11 +18,11 @@ every undecided clock's pairs are excluded. A reference measured as a
 clock by the other references is checked as any clock is.
 """
 
-from fractions import Fraction
 from itertools import permutations
 from typing import Final
 
 import pytest
+from gmpy2 import mpq
 
 from masterclock.domain import slips
 from masterclock.domain.exceptions import FilterError
@@ -40,18 +40,18 @@ def epoch_innovations(
     refs: tuple[str, ...],
     clock_innovations: dict[str, int],
     link_errors: dict[PairKey, int] | None = None,
-) -> dict[PairKey, Fraction]:
+) -> dict[PairKey, mpq]:
     """Give the innovations of ``refs``' links and of nav1 against each.
 
     ``clock_innovations`` gives each reference's (r, nav1) innovation; a link error x
     on (a, b) puts x on (a, b) and -x on (b, a), changing its two-way value.
     """
-    innovations = {pair: Fraction(0) for pair in permutations(refs, 2)}
+    innovations = {pair: mpq(0) for pair in permutations(refs, 2)}
     for (a, b), x in (link_errors or {}).items():
         innovations[(a, b)] += x
         innovations[(b, a)] -= x
     for r, clock_innovation in clock_innovations.items():
-        innovations[(r, "nav1")] = Fraction(clock_innovation)
+        innovations[(r, "nav1")] = mpq(clock_innovation)
     return innovations
 
 
@@ -73,7 +73,7 @@ def of_nav1(slip_result: slips.Slips) -> slips.Slips:
 
 
 def run_slip_check(
-    innovations: dict[PairKey, Fraction],
+    innovations: dict[PairKey, mpq],
     refs: tuple[str, ...],
     last_flags: dict[PairKey, str] | None = None,
     excluded: frozenset[PairKey] = frozenset(),
@@ -363,7 +363,7 @@ def test_a_link_that_gives_no_d_does_not_stop_the_others() -> None:
 def test_every_undecided_clock_s_pairs_are_excluded() -> None:
     """Exclude the clock pairs of each undecided slip, every clock's together."""
     innovations = epoch_innovations(TWO_REFS, {"mc1": P, "mc2": 0})
-    innovations |= {("mc1", "nav2"): Fraction(P), ("mc2", "nav2"): Fraction(0)}
+    innovations |= {("mc1", "nav2"): mpq(P), ("mc2", "nav2"): mpq(0)}
     slip_result = run_slip_check(innovations, TWO_REFS)
     assert slip_result.excluded == frozenset(
         {("mc1", "nav1"), ("mc2", "nav1"), ("mc1", "nav2"), ("mc2", "nav2")}
@@ -374,7 +374,7 @@ def test_a_missing_scale_is_logged_as_raised(caplog: pytest.LogCaptureFixture) -
     """Log the FilterError for an innovation without a scale, in its own words."""
     with pytest.raises(FilterError) as raised:
         slips.slip_check(
-            {("mc1", "nav1"): Fraction(0)}, {}, {}, frozenset({"mc1"}), frozenset()
+            {("mc1", "nav1"): mpq(0)}, {}, {}, frozenset({"mc1"}), frozenset()
         )
     assert [log_record.getMessage() for log_record in caplog.records] == [
         str(raised.value)

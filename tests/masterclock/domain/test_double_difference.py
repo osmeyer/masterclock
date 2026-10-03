@@ -17,10 +17,10 @@ collapse says so in full.
 """
 
 import math
-from fractions import Fraction
 from typing import Final
 
 import pytest
+from gmpy2 import mpq
 
 from masterclock.domain.double_difference import (
     Component,
@@ -28,6 +28,7 @@ from masterclock.domain.double_difference import (
     double_difference,
 )
 from masterclock.domain.exceptions import PhaseError
+from masterclock.domain.phase import round_even
 
 REMOTE_TRIPLE: Final = ("mc1", "mc2", "nav23")
 """Appendix A's remote triple."""
@@ -44,7 +45,7 @@ def link_component(
     rms: int = 2,
     *,
     accepted: bool = True,
-    predicted_phase: Fraction | None = None,
+    predicted_phase: mpq | None = None,
     cold_started: bool = False,
 ) -> Component:
     """Give a link pair's component."""
@@ -57,7 +58,7 @@ def link_component(
     )
 
 
-def unaccepted_link(predicted_phase: Fraction | None = None) -> Component:
+def unaccepted_link(predicted_phase: mpq | None = None) -> Component:
     """Give a link direction that was not accepted at the epoch."""
     return Component(accepted=False, predicted_phase=predicted_phase)
 
@@ -94,10 +95,10 @@ def test_a_half_period_sum_rounds_to_even() -> None:
 
 # ----------------------------------------------------------- one direction
 
-PREDICTED_RS: Final = Fraction(54_321_005, 10)
+PREDICTED_RS: Final = mpq(54_321_005, 10)
 """A link prediction x-(r,s), ps."""
 
-PREDICTED_SR: Final = Fraction(-54_320_795, 10)
+PREDICTED_SR: Final = mpq(-54_320_795, 10)
 """A link prediction x-(s,r), ps."""
 
 
@@ -111,7 +112,7 @@ def test_a_missing_back_direction_uses_the_round_trip() -> None:
     )
     rho = PREDICTED_RS + PREDICTED_SR
     assert triple_value == TripleValue(
-        z=round(1_234_577 + 5_432_100 - rho / 2),
+        z=round_even(1_234_577 + 5_432_100 - rho / 2),
         sigma=math.sqrt(9 + 4),
         components_used="110",
         pair_cold_started=False,
@@ -128,7 +129,7 @@ def test_a_missing_forward_direction_uses_the_round_trip() -> None:
     )
     rho = PREDICTED_RS + PREDICTED_SR
     assert triple_value == TripleValue(
-        z=round(1_234_577 + 5_432_080 + rho / 2),
+        z=round_even(1_234_577 + 5_432_080 + rho / 2),
         sigma=math.sqrt(9 + 25),
         components_used="101",
         pair_cold_started=False,
@@ -163,7 +164,7 @@ def test_no_value_without_either_direction() -> None:
 
 def test_no_value_without_the_clock_pair() -> None:
     """Give no value when (s, c) is not accepted."""
-    sc = Component(accepted=False, predicted_phase=Fraction(1_234_574))
+    sc = Component(accepted=False, predicted_phase=mpq(1_234_574))
     assert (
         double_difference(
             REMOTE_TRIPLE, sc, link_component(5_432_100), link_component(-5_432_080)
@@ -179,8 +180,8 @@ def test_a_constant_link_offset_keeps_the_value_continuous() -> None:
     z_sc = x_s - x_c
     z_rs = x_r - x_s + delay_rs
     z_sr = x_s - x_r + delay_sr
-    predicted_rs = Fraction(z_rs) + Fraction(3, 10)
-    predicted_sr = Fraction(z_sr) - Fraction(7, 10)
+    predicted_rs = mpq(z_rs) + mpq(3, 10)
+    predicted_sr = mpq(z_sr) - mpq(7, 10)
     sc = Component(accepted=True, z=z_sc, rms=3)
     both_links = double_difference(
         REMOTE_TRIPLE,

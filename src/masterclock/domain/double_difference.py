@@ -16,8 +16,9 @@ a fault. Every value is summed exactly and rounded once, a tie to even.
 
 import math
 from dataclasses import dataclass
-from fractions import Fraction
 from typing import Final, Literal
+
+from gmpy2 import mpq
 
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.domain.exceptions import PhaseError
@@ -41,7 +42,7 @@ class Component:
         The accepted measurement z_E, ps; ``None`` when not accepted.
     rms : int or None, optional
         Its rms, ps, at least 0; ``None`` when not accepted.
-    predicted_phase : Fraction or None, optional
+    predicted_phase : mpq or None, optional
         The pair's predicted phase x- at the epoch, ps; ``None`` when it
         has no valid prediction.
     cold_started : bool, optional
@@ -56,7 +57,7 @@ class Component:
     accepted: bool
     z: int | None = None
     rms: int | None = None
-    predicted_phase: Fraction | None = None
+    predicted_phase: mpq | None = None
     cold_started: bool = False
 
     def __post_init__(self) -> None:
@@ -193,7 +194,7 @@ def _remote(
     """
     forward_link, back_link = _measured(rs), _measured(sr)
     if forward_link is not None and back_link is not None:
-        dd = z + Fraction(forward_link[0] - back_link[0], 2)
+        dd = z + mpq(forward_link[0] - back_link[0], 2)
         variance = rms**2 + 0.25 * (forward_link[1] ** 2 + back_link[1] ** 2)
         return _triple_value(dd, variance, "111", pair_cold_started=pair_cold_started)
     if rs.predicted_phase is None or sr.predicted_phase is None:
@@ -253,7 +254,7 @@ def _local(
     """
     forward_z = rs.z if rs.z is not None else 0
     back_z = sr.z if sr.z is not None else 0
-    dd = round_even(z + Fraction(forward_z - back_z, 2))
+    dd = round_even(z + mpq(forward_z - back_z, 2))
     if dd != z:
         message = f"local triple {triple} does not collapse to its pair: {dd} != {z}"
         _log.error(message)
@@ -267,7 +268,7 @@ def _local(
 
 
 def _triple_value(
-    dd: Fraction,
+    dd: mpq,
     variance: float,
     components_used: Literal["111", "110", "101"],
     *,
@@ -277,7 +278,7 @@ def _triple_value(
 
     Parameters
     ----------
-    dd : Fraction
+    dd : mpq
         The exact double difference, ps.
     variance : float
         Its variance, ps**2.

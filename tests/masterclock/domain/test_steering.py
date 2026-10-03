@@ -14,10 +14,10 @@ w adds up every event inside the epoch.
 
 import dataclasses
 from datetime import UTC, datetime, timedelta
-from fractions import Fraction
 from typing import Final
 
 import pytest
+from gmpy2 import mpq
 
 from masterclock.domain import phase, steering
 from masterclock.domain.series import State
@@ -86,7 +86,7 @@ def test_u_moves_each_event_on_to_the_epoch_start() -> None:
     applied_at = EPOCH_START - timedelta(seconds=100)
     steering_events = {"mc2": (steer_event(applied_at, dx=3.0, dy=0.25),)}
     ux, uy = steering.steer_u(("mc2", "nav23"), EPOCH_START, steering_events)
-    assert ux == 3 + Fraction(1, 4) * 100
+    assert ux == 3 + mpq(1, 4) * 100
     assert uy == 0.25
 
 
@@ -97,11 +97,11 @@ def test_u_takes_each_reference_with_its_sign() -> None:
         "mc2": (steer_event(EPOCH_START, dx=2.0, dy=0.125),),
     }
     assert steering.steer_u(("mc1", "mc2"), EPOCH_START, steering_events) == (
-        Fraction(3),
+        mpq(3),
         0.375,
     )
     assert steering.steer_u(("mc1", "mc1"), EPOCH_START, steering_events) == (
-        Fraction(0),
+        mpq(0),
         0.0,
     )
 
@@ -111,7 +111,7 @@ def test_u_is_exact() -> None:
     steering_events = {"mc1": (steer_event(EPOCH_START, dx=0.1),)}
     ux, _ = steering.steer_u(("mc1", "c"), EPOCH_START, steering_events)
     assert ux == phase.exact(0.1)
-    assert isinstance(ux, Fraction)
+    assert isinstance(ux, mpq)
 
 
 @pytest.mark.parametrize(
@@ -134,7 +134,7 @@ def test_u_counts_the_events_after_one_epoch_ago_through_the_start(
 
 def test_a_reference_with_no_events_adds_nothing() -> None:
     """Give no input for a series whose references were never steered."""
-    assert steering.steer_u(("mc1", "mc2"), EPOCH_START, {}) == (Fraction(0), 0.0)
+    assert steering.steer_u(("mc1", "mc2"), EPOCH_START, {}) == (mpq(0), 0.0)
 
 
 # ----------------------------------------------------------------------- w
@@ -147,7 +147,7 @@ def test_w_moves_each_event_on_to_the_measurement() -> None:
     steering_events = {"mc1": (steer_event(applied_at, dx=-1.0, dy=0.5),)}
     assert steering.steer_w(
         ("mc1", "c"), EPOCH_START, steering_events, measured_at
-    ) == Fraction(49)
+    ) == mpq(49)
 
 
 @pytest.mark.parametrize(
@@ -185,11 +185,11 @@ def test_an_event_inside_the_epoch_is_taken_off_and_counted_next_epoch() -> None
     steering_events = {"mc2": (steer_event(steered_at, dx=40.0, dy=0.002),)}
     true_at_mark = 1_000_000
     true_at_measurement = true_at_mark + 40 + phase.exact(0.002) * 200
-    reading = round(true_at_measurement) % phase.PHASE_PERIOD
+    reading = phase.round_even(true_at_measurement) % phase.PHASE_PERIOD
 
     w = steering.steer_w(series_key, EPOCH_START, steering_events, measured_at)
-    prediction = State(x=Fraction(true_at_mark), y=0.0)
-    decycled = phase.decycle(reading, Fraction(300), w, prediction, None)
+    prediction = State(x=mpq(true_at_mark), y=0.0)
+    decycled = phase.decycle(reading, mpq(300), w, prediction, None)
     assert decycled.z == true_at_mark
 
     next_epoch_start = EPOCH_START + T

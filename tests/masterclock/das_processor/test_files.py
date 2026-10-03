@@ -49,12 +49,12 @@ import os
 import shutil
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Final, Literal
 
 import pytest
+from gmpy2 import mpq
 from hypothesis import given
 from hypothesis import strategies as st
 from pydantic import BaseModel, ValidationError
@@ -96,7 +96,7 @@ APPENDIX_A_MEASUREMENT: Final = measure_pair(
     measured_phase=34579,
     rms=3,
     prediction=State(x=1_234_567 + exact(0.0123) * 600, y=0.0123),
-    w=Fraction(0),
+    w=mpq(0),
     anchor=None,
 )
 """Appendix A's pair measurement."""
@@ -1806,8 +1806,8 @@ def test_a_measurement_time_on_a_whole_second_keeps_its_microseconds() -> None:
         measurement_mjd=60941.25,
         measured_phase=34579,
         rms=3,
-        prediction=State(x=Fraction(1_234_567), y=0.0),
-        w=Fraction(0),
+        prediction=State(x=mpq(1_234_567), y=0.0),
+        w=mpq(0),
         anchor=None,
     )
     row_line = files.format_meas_row(

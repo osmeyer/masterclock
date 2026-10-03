@@ -4,9 +4,11 @@ The rules covered: building an epoch resolves everything it needs: its
 references from its block; every pair and triple, the existing ones kept;
 the steering of every reference that steers a series, read over
 (E - T, E + T]; and each series' settings, a pair taking its second
-clock's entry and RMS limit and a triple its clock c's entry; an epoch
-with no block has no references and the existing series only; and the
-epoch is checked to hold settings for exactly its series.
+clock's entry and RMS limit and a triple its clock c's entry, kept from
+the last epoch of the run while its series and every clock's settings are
+unchanged; an epoch with no block has no references and the existing
+series only; and the epoch is checked to hold settings for exactly its
+series.
 
 The pairs of an epoch are predicted, decycled against the prediction or the
 anchor with the steering inside the epoch taken off, screened, checked for
@@ -1901,3 +1903,159 @@ def test_a_pair_the_epoch_does_not_hold_takes_part_unaccepted(tmp_path: Path) ->
     """Give a pair missing from the epoch the part _component would give it."""
     epoch_done, _ = worked_epoch_done(tmp_path)
     assert run._component(epoch_done.pair_step, ("mc9", "nav99")) == (run._NO_COMPONENT)
+
+
+DATED_CLOCK_CONFIG_YAML: Final = CLOCK_CONFIG_YAML.replace(
+    "  nav23: [{type: maser}]\n",
+    "  nav23: [{type: maser},"
+    f" {{effective_mjd: {datetime_to_mjd(E + T)}, time_constant: 150.0}}]\n",
+)
+"""The clock configuration, with nav23's time constant changing at E + T."""
+
+
+def dated_deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
+    """Give a deployment whose nav23 takes a new time constant at E + T."""
+    config, _ = make_deployment(tmp_path)
+    dated_file = tmp_path / "dated.yaml"
+    dated_file.write_text(DATED_CLOCK_CONFIG_YAML, encoding="utf-8")
+    return config, read_clock_config(dated_file)
+
+
+def counted_settings(monkeypatch: pytest.MonkeyPatch) -> list[datetime]:
+    """Record the mark of every epoch whose settings are worked out afresh."""
+    worked_out: list[datetime] = []
+    real_params_for_series = ClockConfig.params_for_series
+
+    def count_params_for_series(
+        self: ClockConfig, series_keys: list[SeriesKey], epoch_start: datetime
+    ) -> object:
+        """Note the mark, then work the settings out."""
+        worked_out.append(epoch_start)
+        return real_params_for_series(self, series_keys, epoch_start)
+
+    monkeypatch.setattr(ClockConfig, "params_for_series", count_params_for_series)
+    return worked_out
+
+
+KEPT_SERIES: Final = ExistingSeries(
+    pairs=frozenset(MEASURED_PAIRS),
+    triples=frozenset({("mc1", "mc2", "nav23"), ("mc2", "mc2", "nav23")}),
+)
+"""Series that exist before the epochs whose settings are kept."""
+
+
+def test_the_last_epoch_s_settings_are_kept_while_they_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep a copy of the last epoch's settings, as they would be worked out."""
+    config, clock_config = dated_deployment(tmp_path)
+    first_epoch = run.build_epoch(E + T, None, KEPT_SERIES, config, clock_config)
+    worked_out = counted_settings(monkeypatch)
+    kept_epoch = run.build_epoch(
+        E + 2 * T, None, KEPT_SERIES, config, clock_config, first_epoch
+    )
+    assert worked_out == []
+    assert kept_epoch.series_params == clock_config.params_for_series(
+        [*kept_epoch.pairs, *kept_epoch.triples], E + 2 * T
+    )
+    assert kept_epoch.series_params is not first_epoch.series_params
+
+
+def test_settings_are_worked_out_again_when_a_clock_s_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Work out an epoch's settings when an entry takes effect since the last."""
+    config, clock_config = dated_deployment(tmp_path)
+    das_block = das_block_of(MEASURED_PAIRS)
+    first_epoch = run.build_epoch(E, das_block, NO_SERIES, config, clock_config)
+    assert first_epoch.series_params[("mc2", "nav23")].M == 100.0
+    earlier_series = ExistingSeries(
+        pairs=frozenset(first_epoch.pairs), triples=frozenset(first_epoch.triples)
+    )
+    worked_out = counted_settings(monkeypatch)
+    changed_epoch = run.build_epoch(
+        E + T, None, earlier_series, config, clock_config, first_epoch
+    )
+    assert (changed_epoch.pairs, changed_epoch.triples) == (
+        first_epoch.pairs,
+        first_epoch.triples,
+    )
+    assert worked_out == [E + T]
+    assert changed_epoch.series_params[("mc2", "nav23")].M == 150.0
+
+
+def test_settings_are_worked_out_again_for_other_series(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Work out an epoch's settings when its pairs or triples are not the last's."""
+    config, clock_config = make_deployment(tmp_path)
+    first_epoch = run.build_epoch(
+        E, das_block_of(MEASURED_PAIRS[:4]), NO_SERIES, config, clock_config
+    )
+    earlier_series = ExistingSeries(
+        pairs=frozenset(first_epoch.pairs), triples=frozenset(first_epoch.triples)
+    )
+    worked_out = counted_settings(monkeypatch)
+    grown_epoch = run.build_epoch(
+        E + T,
+        None,
+        ExistingSeries(
+            pairs=earlier_series.pairs | {("mc2", "nav23")},
+            triples=earlier_series.triples | {("mc2", "mc2", "nav23")},
+        ),
+        config,
+        clock_config,
+        first_epoch,
+    )
+    assert worked_out == [E + T]
+    assert grown_epoch.series_params[("mc2", "nav23")].M == 100.0
+
+
+def test_settings_are_kept_only_from_an_earlier_epoch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Work out an epoch's settings when the epoch given is not earlier."""
+    config, clock_config = dated_deployment(tmp_path)
+    later_epoch = run.build_epoch(E + T, None, KEPT_SERIES, config, clock_config)
+    assert later_epoch.series_params[("mc2", "nav23")].M == 150.0
+    worked_out = counted_settings(monkeypatch)
+    epochs = [
+        run.build_epoch(
+            epoch_start, None, KEPT_SERIES, config, clock_config, later_epoch
+        )
+        for epoch_start in (E, E + T)
+    ]
+    assert worked_out == [E, E + T]
+    assert epochs[0].series_params[("mc2", "nav23")].M == 100.0
+
+
+def test_a_run_keeps_each_epoch_s_settings_for_the_next(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Work settings out at a run's first epoch and at a change, and keep them else."""
+    config, _ = make_loop_deployment(tmp_path)
+    change_mjd = datetime_to_mjd(LATE_START + 2 * T)
+    dated_file = tmp_path / "dated.yaml"
+    dated_file.write_text(
+        CLOCK_CONFIG_YAML.replace(
+            "  nav23: [{type: maser}]\n",
+            f"  nav23: [{{type: maser}}, {{effective_mjd: {change_mjd},"
+            " time_constant: 150.0}]\n",
+        ),
+        encoding="utf-8",
+    )
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(6)])
+    worked_out = counted_settings(monkeypatch)
+    time_constants: list[float | None] = []
+    real_process_epoch = run.process_epoch
+
+    def record_time_constant(*args: object) -> run.EpochDone:
+        """Process the epoch, noting the time constant nav23's pair takes."""
+        epoch_done = real_process_epoch(*args)  # type: ignore[arg-type]
+        time_constants.append(epoch_done.epoch.series_params[("mc1", "nav23")].M)
+        return epoch_done
+
+    monkeypatch.setattr(run, "process_epoch", record_time_constant)
+    run.run(config, read_clock_config(dated_file), None, ShutdownHandler())
+    assert time_constants == [100.0, 100.0, 150.0, 150.0, 150.0, 150.0]
+    assert worked_out == [LATE_START, LATE_START + 2 * T]

@@ -3,8 +3,9 @@
 Only the run functions take the configuration. :func:`build_epoch` resolves
 everything one epoch needs into an :class:`Epoch` of plain values: its
 references, every pair and triple, the steering of every reference that
-steers a series, and each series' settings. Everything below it receives
-that epoch or plain values.
+steers a series, and each series' settings, kept from the last epoch while
+they cannot have changed. Everything below it receives that epoch or plain
+values.
 """
 
 import logging
@@ -151,6 +152,7 @@ def build_epoch(
     earlier_series: ExistingSeries,
     config: AppConfig,
     clock_config: ClockConfig,
+    last_epoch: Epoch | None = None,
 ) -> Epoch:
     """Resolve everything an epoch needs (design 6.3).
 
@@ -166,6 +168,9 @@ def build_epoch(
         The run's settings, for the steering directory.
     clock_config : ClockConfig
         The clock configuration.
+    last_epoch : Epoch or None, optional
+        The epoch processed before this one in the run, whose settings are
+        kept when they still hold; ``None`` for the run's first.
 
     Returns
     -------
@@ -173,7 +178,11 @@ def build_epoch(
         The epoch: its references, every pair and triple (see
         :func:`~masterclock.das_processor.registry.build_registry`), the
         steering of every reference any series is steered by, read over
-        (E - T, E + T] (I4), and each series' settings at E.
+        (E - T, E + T] (I4), and each series' settings at E. The settings
+        are a copy of ``last_epoch``'s when it is earlier, had the same
+        pairs and triples, and no clock's settings change after it up to E
+        (see :meth:`ClockConfig.changes_between`); otherwise they are worked
+        out from the clock configuration.
 
     Raises
     ------
@@ -194,7 +203,17 @@ def build_epoch(
         )
         for mc in steering_refs
     }
-    series_params = clock_config.params_for_series(series_keys, epoch_start)
+    if (
+        last_epoch is not None
+        and last_epoch.interpolated_datetime < epoch_start
+        and (last_epoch.pairs, last_epoch.triples) == (pairs, triples)
+        and not clock_config.changes_between(
+            last_epoch.interpolated_datetime, epoch_start
+        )
+    ):
+        series_params = dict(last_epoch.series_params)
+    else:
+        series_params = clock_config.params_for_series(series_keys, epoch_start)
     return Epoch(
         interpolated_datetime=epoch_start,
         das_block=das_block,
@@ -774,6 +793,7 @@ def process_epoch(
     day_buffer: DayBuffer,
     config: AppConfig,
     clock_config: ClockConfig,
+    last_epoch: Epoch | None = None,
 ) -> EpochDone:
     """Process one epoch and add its rows to the day buffer (design 6.3).
 
@@ -790,6 +810,9 @@ def process_epoch(
         The run's settings.
     clock_config : ClockConfig
         The clock configuration.
+    last_epoch : Epoch or None, optional
+        The epoch processed before this one in the run, whose settings
+        :func:`build_epoch` may keep; ``None`` for the run's first.
 
     Returns
     -------
@@ -817,7 +840,9 @@ def process_epoch(
             if len(series_key) == _TRIPLE
         ),
     )
-    epoch = build_epoch(epoch_start, das_block, earlier_series, config, clock_config)
+    epoch = build_epoch(
+        epoch_start, das_block, earlier_series, config, clock_config, last_epoch
+    )
     pair_step = process_pairs(epoch, last_rows)
     triple_step = process_triples(epoch, last_rows, pair_step)
     series_records: list[tuple[SeriesKey, MeasRecord | DdiffRecord]] = [
@@ -902,6 +927,7 @@ def run(
         epoch_start = max(epoch_start, next_das_block.interpolated_datetime)
     journal = processed_path / JOURNAL_FILE_TEMPLATE.format(rf=channel)
     day_buffer = DayBuffer(channel, journal)
+    last_epoch: Epoch | None = None
     epochs_done = 0
     while (
         next_das_block is not None
@@ -912,7 +938,9 @@ def run(
         if next_das_block.interpolated_datetime == epoch_start:
             das_block = next_das_block
             next_das_block = _next_block(das_blocks, epoch_start + _EPOCH)
-        process_epoch(epoch_start, das_block, day_buffer, config, clock_config)
+        last_epoch = process_epoch(
+            epoch_start, das_block, day_buffer, config, clock_config, last_epoch
+        ).epoch
         if (epoch_start + _EPOCH).date() != epoch_start.date():
             write_buffer(day_buffer)
         epoch_start += _EPOCH

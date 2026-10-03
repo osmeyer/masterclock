@@ -8,7 +8,9 @@ or not, and every reference r whose link with s is measured both ways, the
 self pair standing for both ways when r = s, so every clock local to r gets
 (r, r, c); the
 keys come out sorted; a series' file is named for its channel and key, in
-the measurement or double-difference directory; and the existing series are
+the measurement or double-difference directory, built once and then given
+again, and a name that cannot name a file is refused every time; and the
+existing series are
 read back from the names of a channel's files, other names ignored.
 
 An archive refusal is logged as raised.
@@ -185,6 +187,23 @@ def test_a_clock_name_that_cannot_name_a_file_is_refused(
     """Raise DataFileError for a name with a dot or slash, or none."""
     with pytest.raises(DataFileError, match="cannot name"):
         registry.series_file(tmp_path, "a", ("mc2", clock))
+
+
+def test_a_series_file_is_built_once(tmp_path: Path) -> None:
+    """Give the very path built the first time, so it is not built or hashed again."""
+    first_path = registry.series_file(tmp_path, "a", ("mc2", "ox23"))
+    assert registry.series_file(tmp_path, "a", ("mc2", "ox23")) is first_path
+    assert registry.series_file(tmp_path, "b", ("mc2", "ox23")) != first_path
+
+
+def test_a_refused_name_is_refused_every_time(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Refuse and log a name that cannot name a file each time it is asked for."""
+    for _ in range(2):
+        with pytest.raises(DataFileError, match="cannot name"):
+            registry.series_file(tmp_path, "a", ("mc2", "ox.23"))
+    assert len(caplog.records) == 2
 
 
 @pytest.mark.parametrize(

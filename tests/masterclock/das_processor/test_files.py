@@ -102,6 +102,14 @@ APPENDIX_A_MEASUREMENT: Final = measure_pair(
 """Appendix A's pair measurement."""
 
 
+def buffered_lines(day_buffer: files.DayBuffer) -> dict[Path, list[str]]:
+    """Copy each file's buffered lines, so a later change to the buffer shows."""
+    return {
+        data_file: list(file_lines)
+        for data_file, file_lines in day_buffer.file_lines.items()
+    }
+
+
 def worked_row(**changed_fields: object) -> Row:
     """Build the worked epoch's accepted row, with ``changed_fields`` applied."""
     row_fields: dict[str, object] = {
@@ -946,7 +954,7 @@ def test_after_a_write_the_text_is_empty_and_the_last_rows_remain(
     """Empty the buffer's text and keep each series' newest row (5.8)."""
     day_buffer, _, _ = filled_buffer(tmp_path)
     files.write_buffer(day_buffer)
-    assert day_buffer.file_texts == {}
+    assert day_buffer.file_lines == {}
     assert day_buffer.last_rows == {
         PAIR_KEY: predicted_record(1).row,
         TRIPLE_KEY: predicted_triple_record(1).row,
@@ -995,7 +1003,7 @@ def test_a_row_too_wide_is_refused_before_it_is_buffered(tmp_path: Path) -> None
     )
     with pytest.raises(DataFileError, match="does not fit"):
         day_buffer.add(meas / "das_a.mc2.ox23.dat", PAIR_KEY, file_record)
-    assert day_buffer.file_texts == {}
+    assert day_buffer.file_lines == {}
 
 
 def test_a_file_keeps_one_series(tmp_path: Path) -> None:
@@ -1149,7 +1157,7 @@ def test_a_failed_check_changes_no_file(
     elif check_problem == "no_space":
         monkeypatch.setattr(shutil, "disk_usage", lambda _: SimpleNamespace(free=10))
     else:
-        day_buffer.file_texts[pair_path] += "é\n"
+        day_buffer.file_lines[pair_path].append("é\n")
     bytes_before = {
         data_file: data_file.read_bytes()
         for data_file in (pair_path, triple_path)
@@ -1442,7 +1450,7 @@ def test_a_buffer_takes_another_s_rows(tmp_path: Path) -> None:
     epoch_buffer.add(pair_path, PAIR_KEY, predicted_record(2))
     epoch_buffer.add(triple_path, TRIPLE_KEY, predicted_triple_record(2))
     day_buffer.take(epoch_buffer)
-    assert day_buffer.file_texts[pair_path].count("\n") == 3
+    assert len(day_buffer.file_lines[pair_path]) == 3
     assert day_buffer.last_rows[PAIR_KEY] == predicted_record(2).row
     assert day_buffer.series_of(triple_path) == ("ddiff", TRIPLE_KEY)
 
@@ -1450,7 +1458,7 @@ def test_a_buffer_takes_another_s_rows(tmp_path: Path) -> None:
 def test_a_buffer_takes_nothing_from_a_clashing_one(tmp_path: Path) -> None:
     """Refuse rows of another series for a path, leaving the buffer as it was."""
     day_buffer, pair_path, _ = filled_buffer(tmp_path)
-    buffer_before = dict(day_buffer.file_texts), dict(day_buffer.last_rows)
+    buffer_before = buffered_lines(day_buffer), dict(day_buffer.last_rows)
     epoch_buffer = files.DayBuffer("a")
     epoch_buffer.add(
         pair_path.parent / "das_a.mc2.cs7.dat", ("mc2", "cs7"), predicted_record(2)
@@ -1458,7 +1466,7 @@ def test_a_buffer_takes_nothing_from_a_clashing_one(tmp_path: Path) -> None:
     epoch_buffer.add(pair_path, ("mc2", "hm1"), predicted_record(2))
     with pytest.raises(DataFileError, match="series"):
         day_buffer.take(epoch_buffer)
-    assert (dict(day_buffer.file_texts), dict(day_buffer.last_rows)) == buffer_before
+    assert (buffered_lines(day_buffer), dict(day_buffer.last_rows)) == buffer_before
 
 
 # ---------------------------------------------------------- the write journal
@@ -1697,7 +1705,7 @@ def test_a_failed_check_says_which_file_and_why(
     elif check_problem == "no_directory":
         day_buffer.add(gone_file, ("mc2", "cs7"), predicted_record(3))
     else:
-        day_buffer.file_texts[pair_path] += "é\n"
+        day_buffer.file_lines[pair_path].append("é\n")
     expected_message = message_template.format(
         pair=pair_path,
         triple=triple_path,
@@ -1729,9 +1737,11 @@ def test_free_space_just_enough_is_enough(
 ) -> None:
     """Write when the free space is exactly the bytes to write, refuse one less."""
     day_buffer, pair_path, triple_path = filled_buffer(tmp_path)
-    pair_text = files.header("meas", "a", PAIR_KEY) + day_buffer.file_texts[pair_path]
-    triple_text = (
-        files.header("ddiff", "a", TRIPLE_KEY) + day_buffer.file_texts[triple_path]
+    pair_text = files.header("meas", "a", PAIR_KEY) + "".join(
+        day_buffer.file_lines[pair_path]
+    )
+    triple_text = files.header("ddiff", "a", TRIPLE_KEY) + "".join(
+        day_buffer.file_lines[triple_path]
     )
     byte_total = len(pair_text) + len(triple_text)
     monkeypatch.setattr(
@@ -1757,10 +1767,12 @@ def test_free_space_is_counted_per_device(
     day_buffer, pair_path, triple_path = filled_buffer(tmp_path)
     bytes_by_directory = {
         pair_path.parent: len(
-            files.header("meas", "a", PAIR_KEY) + day_buffer.file_texts[pair_path]
+            files.header("meas", "a", PAIR_KEY)
+            + "".join(day_buffer.file_lines[pair_path])
         ),
         triple_path.parent: len(
-            files.header("ddiff", "a", TRIPLE_KEY) + day_buffer.file_texts[triple_path]
+            files.header("ddiff", "a", TRIPLE_KEY)
+            + "".join(day_buffer.file_lines[triple_path])
         ),
     }
     device_by_directory = {pair_path.parent: 1, triple_path.parent: 2}

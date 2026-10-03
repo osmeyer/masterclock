@@ -91,6 +91,14 @@ CLOCK_CONFIG_YAML: Final = (
 """An invented clock configuration: three references and a maser."""
 
 
+def buffered_lines(day_buffer: files.DayBuffer) -> dict[Path, list[str]]:
+    """Copy each file's buffered lines, so a later change to the buffer shows."""
+    return {
+        data_file: list(file_lines)
+        for data_file, file_lines in day_buffer.file_lines.items()
+    }
+
+
 def make_deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
     """Make an invented deployment's directories and give its configuration."""
     for directory_name in ("das", "steering", "processed"):
@@ -838,7 +846,7 @@ def recorded_writes(monkeypatch: pytest.MonkeyPatch) -> list[datetime | None]:
                 day_buffer.last_rows[series_key].interpolated_datetime
                 for series_key in day_buffer.last_rows
             ]
-            if day_buffer.file_texts
+            if day_buffer.file_lines
             else []
         )
         newest_epochs.append(max(buffered_epochs, default=None))
@@ -1073,7 +1081,7 @@ def test_an_epoch_that_fails_adds_none_of_its_rows(
     das_blocks = list(read_all_blocks(tmp_path / "das", datetime_to_mjd(LATE_START)))
     files.ensure_archives(config.processed.processed_path)
     run.process_epoch(LATE_START, das_blocks[0], day_buffer, config, clock_config)
-    buffer_before = dict(day_buffer.file_texts), dict(day_buffer.last_rows)
+    buffer_before = buffered_lines(day_buffer), dict(day_buffer.last_rows)
     real_add = files.DayBuffer.add
     added_series: list[SeriesKey] = []
 
@@ -1095,7 +1103,7 @@ def test_an_epoch_that_fails_adds_none_of_its_rows(
         run.process_epoch(
             LATE_START + T, das_blocks[1], day_buffer, config, clock_config
         )
-    assert (dict(day_buffer.file_texts), dict(day_buffer.last_rows)) == buffer_before
+    assert (buffered_lines(day_buffer), dict(day_buffer.last_rows)) == buffer_before
 
 
 # --------------------------------------------------------------- log events

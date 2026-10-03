@@ -1585,8 +1585,9 @@ class DayBuffer:
     """The rows computed since the last write, for every file (design 5.8).
 
     Rows are written a UTC day at a time. Until then each file's rows are
-    held here as text, and each series' newest row as a row, which the next
-    epoch takes as the series' last row.
+    held here as a list of lines, joined only when they are written, and
+    each series' newest row as a row, which the next epoch takes as the
+    series' last row.
 
     Parameters
     ----------
@@ -1595,8 +1596,9 @@ class DayBuffer:
 
     Attributes
     ----------
-    file_texts : dict of Path to str
-        Each file's lines since the last write, newlines included.
+    file_lines : dict of Path to list of str
+        Each file's lines since the last write, in order, each with its
+        newline.
     last_rows : dict of series key to Row
         Each series' newest row, as a later run would read it back.
     earliest_epoch : datetime or None
@@ -1618,7 +1620,7 @@ class DayBuffer:
         self.channel: RfChannel = channel
         self.journal = journal
         self.earliest_epoch: datetime | None = None
-        self.file_texts: dict[Path, str] = {}
+        self.file_lines: dict[Path, list[str]] = {}
         self.last_rows: dict[SeriesKey, Row] = {}
         self._file_series: dict[Path, tuple[FileKind, SeriesKey]] = {}
 
@@ -1669,9 +1671,7 @@ class DayBuffer:
         else:
             row_line = format_ddiff_row(file_record)
             kept_row = file_record.row
-        self.file_texts[data_file] = (
-            self.file_texts.get(data_file, "") + row_line + "\n"
-        )
+        self.file_lines.setdefault(data_file, []).append(row_line + "\n")
         self.last_rows[series_key] = kept_row
         self._started(kept_row.interpolated_datetime)
 
@@ -1702,16 +1702,16 @@ class DayBuffer:
             If a path of ``newer_buffer`` is another series' or kind's in this
             buffer; this buffer is then unchanged.
         """
-        for data_file in newer_buffer.file_texts:
+        for data_file in newer_buffer.file_lines:
             file_series = newer_buffer.series_of(data_file)
             if self._file_series.get(data_file, file_series) != file_series:
                 _fail(
                     f"{data_file} holds the {self._file_series[data_file]} series,"
                     f" not {file_series}"
                 )
-        for data_file, file_text in newer_buffer.file_texts.items():
+        for data_file, new_lines in newer_buffer.file_lines.items():
             self._file_series[data_file] = newer_buffer.series_of(data_file)
-            self.file_texts[data_file] = self.file_texts.get(data_file, "") + file_text
+            self.file_lines.setdefault(data_file, []).extend(new_lines)
         self.last_rows.update(newer_buffer.last_rows)
         self._started(newer_buffer.earliest_epoch)
 
@@ -1783,7 +1783,7 @@ def write_buffer(day_buffer: DayBuffer) -> None:
         _sync_directory(new_directory)
     if day_buffer.journal is not None:
         _delete(day_buffer.journal)
-    day_buffer.file_texts.clear()
+    day_buffer.file_lines.clear()
     day_buffer.earliest_epoch = None
 
 
@@ -1826,7 +1826,7 @@ def _prepared(day_buffer: DayBuffer) -> dict[Path, bytes]:
         If any check of the prepare step fails; no file is opened.
     """
     file_bytes: dict[Path, bytes] = {}
-    for data_file, file_text in day_buffer.file_texts.items():
+    for data_file, file_lines in day_buffer.file_lines.items():
         file_kind, series_key = day_buffer.series_of(data_file)
         if os.path.lexists(data_file):
             _check_existing(data_file, file_kind)
@@ -1835,7 +1835,7 @@ def _prepared(day_buffer: DayBuffer) -> dict[Path, bytes]:
             _check_new(data_file)
             header_text = header(file_kind, day_buffer.channel, series_key)
         try:
-            file_bytes[data_file] = (header_text + file_text).encode("ascii")
+            file_bytes[data_file] = (header_text + "".join(file_lines)).encode("ascii")
         except UnicodeEncodeError as exc:
             _fail(f"the rows for {data_file} are not ASCII", exc)
     if day_buffer.journal is not None and file_bytes:

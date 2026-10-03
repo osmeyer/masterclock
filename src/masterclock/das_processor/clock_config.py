@@ -17,7 +17,6 @@ A series takes the settings of its clock side: a pair (a, b) those of b, a
 triple (r, s, c) those of c (:meth:`ClockConfig.params_for`).
 """
 
-import re
 from collections.abc import Hashable, Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -39,7 +38,7 @@ from masterclock.app.exceptions import ConfigError, describe_error
 from masterclock.app.log import MasterClockLogger, get_logger
 from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.das_processor.cli import DataMjd
-from masterclock.domain.references import REFERENCE_PATTERN, REFERENCE_PREFIX
+from masterclock.domain.references import is_reference
 from masterclock.domain.series import FilterStates, PairKey, SeriesKey, SeriesParams
 
 REFERENCE_TYPE: Final[str] = "mc"
@@ -290,33 +289,17 @@ class RmsLimits(BaseModel):
             pair is not a reference, a dot and a clock.
         """
         for reference_name in self.references:
-            if not _is_reference(reference_name):
+            if not is_reference(reference_name):
                 message = (
                     f"rms_limit reference {reference_name} is not a reference name"
                 )
                 raise ValueError(message)
         for pair_name in self.pairs:
             reference, dot, clock = pair_name.partition(".")
-            if not (dot and clock and _is_reference(reference)):
+            if not (dot and clock and is_reference(reference)):
                 message = f"rms_limit pair {pair_name} is not written reference.clock"
                 raise ValueError(message)
         return self
-
-
-def _is_reference(clock_name: str) -> bool:
-    """Tell whether a name is a reference clock's.
-
-    Parameters
-    ----------
-    clock_name : str
-        A clock name.
-
-    Returns
-    -------
-    bool
-        Whether the whole name matches the reference name pattern.
-    """
-    return re.fullmatch(REFERENCE_PATTERN, clock_name) is not None
 
 
 def _in_order(clock_entries: Iterable[Entry]) -> list[Entry]:
@@ -474,7 +457,7 @@ class ClockConfig(BaseModel):
         if any(clock_entry.type is not None for clock_entry in clock_entries[1:]):
             message = f"the type of {clock_name} is given by its first entry only"
             raise ValueError(message)
-        if clock_name.startswith(REFERENCE_PREFIX) and clock_type != REFERENCE_TYPE:
+        if is_reference(clock_name) and clock_type != REFERENCE_TYPE:
             message = f"clock {clock_name} is a reference, so of type {REFERENCE_TYPE}"
             raise ValueError(f"{message}, not {clock_type}")
         type_default = self._default_of(clock_name, clock_entries[0])

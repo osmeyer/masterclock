@@ -24,7 +24,7 @@ from masterclock.das_processor.channels import RfChannel
 from masterclock.das_processor.config import DDIFF_SUBDIRECTORY, MEAS_SUBDIRECTORY
 from masterclock.das_processor.exceptions import DataFileError
 from masterclock.das_processor.read_cd5m5m import DASData
-from masterclock.domain.references import REFERENCE_PREFIX
+from masterclock.domain.references import is_reference
 from masterclock.domain.series import PairKey, SeriesKey, TripleKey
 
 _PREFIX: Final[str] = "das_"
@@ -96,15 +96,15 @@ def refs_of(das_block: DASData | None) -> frozenset[str]:
     Returns
     -------
     frozenset of str
-        Every clock of the block whose name starts with the reference
-        prefix; none without a block.
+        Every clock of the block whose name is a reference's, the prefix
+        and one digit; none without a block.
     """
     if das_block is None:
         return frozenset()
     return frozenset(
         das_measurement.clock
         for das_measurement in das_block.measurements
-        if das_measurement.clock.startswith(REFERENCE_PREFIX)
+        if is_reference(das_measurement.clock)
     )
 
 

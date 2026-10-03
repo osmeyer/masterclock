@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Annotated, Final
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from masterclock.domain.phase import EPOCH_SECONDS, exact, seconds
-from masterclock.domain.references import REFERENCE_PREFIX
+from masterclock.domain.references import is_reference
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
@@ -99,7 +99,7 @@ def signs(series_key: Sequence[str]) -> dict[str, int]:
     return {
         clock_name: sign
         for clock_name, sign in ((first_clock, 1), (second_clock, -1))
-        if clock_name.startswith(REFERENCE_PREFIX)
+        if is_reference(clock_name)
     }
 
 

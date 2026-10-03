@@ -98,6 +98,8 @@ def test_an_event_is_frozen() -> None:
         (("mc2", "nav23"), {"mc2": 1}),
         (("mc1", "mc2", "nav23"), {"mc1": 1}),
         (("mc2", "mc2", "nav23"), {"mc2": 1}),
+        (("mc2", "mcq"), {"mc2": 1}),
+        (("mc12", "mc2"), {"mc2": -1}),
     ],
 )
 def test_each_series_is_steered_with_the_signs_of_its_difference(

@@ -1,7 +1,7 @@
 """Tests for src/masterclock/das_processor/registry.py.
 
 The rules covered: the references of an epoch are the clocks of its block
-whose names start with the reference prefix; a pair exists for every
+named as references, the prefix and one digit; a pair exists for every
 reference and clock measured together, and is never removed once it
 exists; a triple (r, s, c) exists for every pair (s, c), its c a reference
 or not, and every reference r whose link with s is measured both ways, the
@@ -62,9 +62,15 @@ def design_example() -> DASData:
 
 
 def test_the_references_are_the_clocks_named_as_references() -> None:
-    """Take every clock of the block whose name starts with the prefix."""
+    """Take every clock of the block named as a reference: mc and one digit."""
     assert registry.refs_of(design_example()) == frozenset(REFS)
     assert registry.refs_of(None) == frozenset()
+
+
+def test_a_clock_whose_name_only_starts_like_a_reference_is_not_one() -> None:
+    """Leave out a clock named mc and more than one digit."""
+    das_block = das_block_measuring([("mc1", "mc1"), ("mc1", "mcq"), ("mc1", "mc12")])
+    assert registry.refs_of(das_block) == frozenset({"mc1"})
 
 
 def test_the_design_example_gives_29_pairs_and_87_triples() -> None:

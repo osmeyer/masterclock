@@ -147,8 +147,8 @@ class Row:
     epochs_in_segment : int
         Rows since the segment started, at least 0; 0 on its first row.
     epochs_since_accept : int
-        Rows since the last accepted measurement, at least 0; 0 on an
-        accepted row.
+        Rows since the last accepted measurement, not counting dormant rows
+        that buffer a measurement, at least 0; 0 on an accepted row.
     consecutive_rejects : int
         Consecutive counted rejects, at least 0.
     rejects : tuple of (datetime, float)

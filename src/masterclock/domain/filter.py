@@ -996,7 +996,7 @@ def acquire(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
         measurements from consecutive epochs whose second difference
         z3 - 2 z2 + z1 is at most 5 sqrt(6) sigma0 either way (design 13.3).
         Otherwise a dormant R row keeping that buffer, with no counted
-        rejects.
+        rejects and epochs since an accept as they were.
 
     Raises
     ------

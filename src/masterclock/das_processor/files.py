@@ -108,7 +108,12 @@ _STATE_COLUMNS: Final[tuple[Column, ...]] = (
     Column("segment", 9, "segment number"),
     Column("step_offset", 16, "sum of phase steps in this segment, ps"),
     Column("epochs_in_segment", 9, "rows since the segment started"),
-    Column("epochs_since_accept", 9, "rows since the last accepted measurement"),
+    Column(
+        "epochs_since_accept",
+        9,
+        "rows since the last accepted measurement, not counting dormant rows"
+        " that buffer a measurement",
+    ),
     Column("consecutive_rejects", 9, "consecutive counted rejects"),
     Column("reject1_mjd", 13, "reject buffer, oldest: epoch start, MJD"),
     Column("reject1_innovation", 23, "reject buffer, oldest: innovation, ps"),

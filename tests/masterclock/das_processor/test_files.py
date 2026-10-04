@@ -1029,10 +1029,10 @@ class Recorder:
         self.most_open = 0
 
 
-def test_files_are_written_one_at_a_time_in_order(
+def test_files_are_written_then_flushed_one_at_a_time_in_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Write measurement files, then double-difference files, one open at a time."""
+    """Write, then at the final write flush, measurement files first, one at a time."""
     meas_directory, ddiff_directory = make_archives(tmp_path)
     day_buffer = files.DayBuffer("a")
     pair_keys: list[PairKey] = [("mc2", "ox23"), ("mc1", "mc2"), ("mc1", "mc1")]
@@ -1074,10 +1074,6 @@ def test_files_are_written_one_at_a_time_in_order(
             """Write to the wrapped file."""
             return self.inner.write(chunk)  # type: ignore[attr-defined, no-any-return]
 
-        def flush(self) -> None:
-            """Flush the wrapped file."""
-            self.inner.flush()  # type: ignore[attr-defined]
-
         def fileno(self) -> int:
             """Give the wrapped file's descriptor."""
             fd: int = self.inner.fileno()  # type: ignore[attr-defined]
@@ -1103,7 +1099,14 @@ def test_files_are_written_one_at_a_time_in_order(
         f"das_a.{'.'.join(series_key)}.dat"
         for series_key in sorted(pair_keys) + sorted(triple_keys)
     ]
-    expected_events = [
+    write_events = [
+        file_event
+        for file_name in file_names
+        for file_event in (("open", file_name), ("close", file_name))
+    ]
+    assert recorder.events == write_events
+    files.write_final(day_buffer)
+    flush_events = [
         file_event
         for file_name in file_names
         for file_event in (
@@ -1112,8 +1115,11 @@ def test_files_are_written_one_at_a_time_in_order(
             ("close", file_name),
         )
     ]
-    assert recorder.events[: len(expected_events)] == expected_events
-    assert recorder.events[len(expected_events) :] == [("fsync", "directory")] * 2
+    assert recorder.events == [
+        *write_events,
+        *flush_events,
+        *[("fsync", "directory")] * 2,
+    ]
     assert recorder.most_open == 1
 
 
@@ -1184,13 +1190,17 @@ def test_an_error_while_writing_is_a_data_file_error(
     """Raise DataFileError for a device fault in the write step."""
     day_buffer, _, _ = filled_buffer(tmp_path)
 
-    def failing(_fd: int) -> None:
+    def failing(*_args: object, **_kwargs: object) -> None:
         """Fail as a device would."""
         raise OSError(5, "Input/output error")
 
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "open", failing)
+        with pytest.raises(DataFileError, match="Input/output error"):
+            files.write_buffer(day_buffer)
     monkeypatch.setattr(os, "fsync", failing)
     with pytest.raises(DataFileError, match="Input/output error"):
-        files.write_buffer(day_buffer)
+        files.write_final(day_buffer)
 
 
 def test_an_error_flushing_a_directory_is_a_data_file_error(
@@ -1205,13 +1215,85 @@ def test_an_error_flushing_a_directory_is_a_data_file_error(
 
     monkeypatch.setattr(os, "open", failing)
     with pytest.raises(DataFileError, match="cannot flush directory"):
-        files.write_buffer(day_buffer)
+        files.write_final(day_buffer)
 
 
-def test_an_empty_buffer_writes_nothing(tmp_path: Path) -> None:
-    """Change nothing when no rows are buffered."""
+def test_an_empty_buffer_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Change and flush nothing when no rows were ever buffered."""
+    synced = recorded_fsyncs(monkeypatch)
     files.write_buffer(files.DayBuffer("a"))
+    files.write_final(files.DayBuffer("a", tmp_path / "das_processor_a.writing"))
     assert list(tmp_path.iterdir()) == []
+    assert synced == []
+
+
+def recorded_fsyncs(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Record the path of every file and directory flushed, in order."""
+    synced: list[Path] = []
+    real_fsync = os.fsync
+
+    def recording(fd: int) -> None:
+        """Note what ``fd`` is open on, then flush it."""
+        synced.append(Path(f"/proc/self/fd/{fd}").readlink())
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", recording)
+    return synced
+
+
+def test_a_day_s_write_flushes_only_a_new_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flush the journal and its directory at the first write, and nothing after."""
+    day_buffer, journal, pair_path = journaled_buffer(tmp_path)
+    synced = recorded_fsyncs(monkeypatch)
+    files.write_buffer(day_buffer)
+    assert synced == [journal.resolve(), tmp_path.resolve()]
+    day_buffer.add(pair_path, PAIR_KEY, predicted_record(2))
+    files.write_buffer(day_buffer)
+    assert synced == [journal.resolve(), tmp_path.resolve()]
+    assert files.good_through(pair_path, "meas") == E + 2 * ONE_EPOCH
+
+
+def test_the_final_write_flushes_every_file_written_since_the_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flush each file and new file's directory once, then delete the journal."""
+    day_buffer, journal, pair_path = journaled_buffer(tmp_path)
+    triple_path = tmp_path / "ddiff" / "das_a.mc1.mc2.ox23.dat"
+    files.write_buffer(day_buffer)
+    day_buffer.add(pair_path, PAIR_KEY, predicted_record(2))
+    files.write_buffer(day_buffer)
+    day_buffer.add(pair_path, PAIR_KEY, predicted_record(3))
+    synced = recorded_fsyncs(monkeypatch)
+    files.write_final(day_buffer)
+    assert synced == [
+        pair_path.resolve(),
+        triple_path.resolve(),
+        (tmp_path / "ddiff").resolve(),
+        (tmp_path / "meas").resolve(),
+        tmp_path.resolve(),
+    ]
+    assert files.good_through(pair_path, "meas") == E + 3 * ONE_EPOCH
+    assert not journal.exists()
+    synced.clear()
+    files.write_final(day_buffer)
+    assert synced == []
+
+
+def test_a_final_write_with_nothing_new_still_flushes_the_run_s_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flush the files of the day's write when the run ends right after it."""
+    day_buffer, journal, pair_path = journaled_buffer(tmp_path)
+    files.write_buffer(day_buffer)
+    synced = recorded_fsyncs(monkeypatch)
+    files.write_final(day_buffer)
+    assert pair_path.resolve() in synced
+    assert len(synced) == 5
+    assert not journal.exists()
 
 
 # ---------------------------------------------------------- roll-back, redo
@@ -1538,11 +1620,11 @@ def test_a_buffer_knows_its_first_epoch(tmp_path: Path) -> None:
     assert day_buffer.earliest_epoch == E + 3 * ONE_EPOCH
 
 
-def test_the_journal_is_there_exactly_while_the_files_are_written(
+def test_the_journal_is_there_from_the_first_write_to_the_final_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Flush the first epoch to the journal before any file opens; delete it after."""
-    day_buffer, journal, _ = journaled_buffer(tmp_path)
+    """Flush the first epoch to the journal before any file opens; delete it last."""
+    day_buffer, journal, pair_path = journaled_buffer(tmp_path)
     real_open = Path.open
     journal_texts: list[tuple[str, str | None]] = []
 
@@ -1556,7 +1638,12 @@ def test_the_journal_is_there_exactly_while_the_files_are_written(
 
     monkeypatch.setattr(Path, "open", watching)
     files.write_buffer(day_buffer)
-    assert len(journal_texts) == 2
+    day_buffer.add(pair_path, PAIR_KEY, predicted_record(2))
+    files.write_buffer(day_buffer)
+    assert journal.read_text() == f"{E.isoformat()}\n"
+    day_buffer.add(pair_path, PAIR_KEY, predicted_record(3))
+    files.write_final(day_buffer)
+    assert len(journal_texts) == 6
     assert all(
         journal_text == f"{E.isoformat()}\n" for _, journal_text in journal_texts
     )
@@ -1567,6 +1654,7 @@ def test_a_buffer_without_a_journal_keeps_none(tmp_path: Path) -> None:
     """Write no journal for a buffer given none."""
     day_buffer, _, _ = filled_buffer(tmp_path)
     files.write_buffer(day_buffer)
+    files.write_final(day_buffer)
     assert sorted(directory_entry.name for directory_entry in tmp_path.iterdir()) == [
         "ddiff",
         "meas",
@@ -1587,6 +1675,7 @@ def test_an_empty_buffer_writes_no_journal(tmp_path: Path) -> None:
     """Write no journal when no rows are buffered."""
     journal = tmp_path / "das_processor_a.writing"
     files.write_buffer(files.DayBuffer("a", journal))
+    files.write_final(files.DayBuffer("a", journal))
     assert not journal.exists()
 
 
@@ -1996,11 +2085,19 @@ def test_a_device_fault_names_the_file_and_what_was_done(
     (tmp_path / "write").mkdir()
     day_buffer, pair_path, _ = filled_buffer(tmp_path / "write")
     with monkeypatch.context() as patched:
-        patched.setattr(os, "fsync", device_error)
+        patched.setattr(Path, "open", device_error)
         with pytest.raises(DataFileError) as refusal:
             files.write_buffer(day_buffer)
     assert str(refusal.value) == (
         f"cannot write data file {pair_path}: [Errno 5] Input/output error"
+    )
+    files.write_buffer(day_buffer)
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "fsync", device_error)
+        with pytest.raises(DataFileError) as refusal:
+            files.write_final(day_buffer)
+    assert str(refusal.value) == (
+        f"cannot flush data file {pair_path}: [Errno 5] Input/output error"
     )
 
 

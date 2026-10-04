@@ -38,6 +38,7 @@ from masterclock.das_processor.files import (
     read_last_row,
     roll_back,
     write_buffer,
+    write_final,
 )
 from masterclock.das_processor.read_cd5m5m import DASData, read_all_blocks
 from masterclock.das_processor.read_steering import SteeringFiles
@@ -1347,8 +1348,10 @@ def run(
     Raises
     ------
     MasterClockError
-        If an epoch cannot be processed or a write fails; the rows of the
-        day so far are then lost, and the next run computes them again.
+        If an epoch cannot be processed or a write fails. When the run had
+        written its journal, the journal is left, so the next run cuts
+        every file back to before this run's first epoch and computes its
+        rows again; otherwise no file was changed.
 
     Notes
     -----
@@ -1359,7 +1362,8 @@ def run(
     before the data resume is processed with no measurements. The run stops
     when no block remains, after ``steps`` epochs, or on a shutdown
     request, always between epochs. Rows are written after each day's
-    23:50 UTC epoch and when the run stops.
+    23:50 UTC epoch and when the run stops, and flushed to the device only
+    when the run stops (:func:`write_final`).
     """
     ensure_archives(config.processed.processed_path)
     epoch_start = next_epoch(config)
@@ -1409,7 +1413,7 @@ def run(
             write_buffer(day_buffer)
         epoch_start += _EPOCH
         epochs_done += 1
-    write_buffer(day_buffer)
+    write_final(day_buffer)
 
 
 def _next_block(das_blocks: Iterator[DASData], epoch_start: datetime) -> DASData | None:

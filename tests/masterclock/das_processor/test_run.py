@@ -49,6 +49,7 @@ files does nothing; and a gap at the start of a run is predicted.
 import dataclasses
 import logging
 import math
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
@@ -841,26 +842,44 @@ LOOP_SERIES: Final[tuple[SeriesKey, ...]] = (
 """The series of the loop's deployment."""
 
 
-def recorded_writes(monkeypatch: pytest.MonkeyPatch) -> list[datetime | None]:
-    """Record, at every write, the newest epoch the buffer holds text for."""
-    newest_epochs: list[datetime | None] = []
-    real_write_buffer = files.write_buffer
+def recorded_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[tuple[str, datetime | None]]:
+    """Record, at every write, which write it is and the newest epoch buffered."""
+    newest_epochs: list[tuple[str, datetime | None]] = []
 
-    def record_and_write(day_buffer: files.DayBuffer) -> None:
-        """Record the newest buffered epoch, then write."""
-        buffered_epochs = (
-            [
-                day_buffer.last_rows[series_key].interpolated_datetime
-                for series_key in day_buffer.last_rows
-            ]
-            if day_buffer.file_lines
-            else []
-        )
-        newest_epochs.append(max(buffered_epochs, default=None))
-        real_write_buffer(day_buffer)
+    def recording(
+        write_name: str, real_write: Callable[[files.DayBuffer], None]
+    ) -> Callable[[files.DayBuffer], None]:
+        """Give ``real_write`` recording the newest buffered epoch first."""
 
-    monkeypatch.setattr(run, "write_buffer", record_and_write)
+        def record_and_write(day_buffer: files.DayBuffer) -> None:
+            """Record the newest buffered epoch, then write."""
+            buffered_epochs = (
+                [
+                    day_buffer.last_rows[series_key].interpolated_datetime
+                    for series_key in day_buffer.last_rows
+                ]
+                if day_buffer.file_lines
+                else []
+            )
+            newest_epochs.append((write_name, max(buffered_epochs, default=None)))
+            real_write(day_buffer)
+
+        return record_and_write
+
+    monkeypatch.setattr(
+        run, "write_buffer", recording("write_buffer", files.write_buffer)
+    )
+    monkeypatch.setattr(run, "write_final", recording("write_final", files.write_final))
     return newest_epochs
+
+
+DAY_THEN_FINAL_WRITES: Final = [
+    ("write_buffer", LATE_START + 3 * T),
+    ("write_final", LATE_START + 5 * T),
+]
+"""The writes of a run from three epochs before midnight to two after it."""
 
 
 def test_a_day_is_written_after_its_last_epoch_and_at_the_end(
@@ -871,7 +890,7 @@ def test_a_day_is_written_after_its_last_epoch_and_at_the_end(
     write_das_files(tmp_path, [LATE_START + i * T for i in range(6)])
     write_epochs = recorded_writes(monkeypatch)
     run.run(config, clock_config, None, ShutdownHandler())
-    assert write_epochs == [LATE_START + 3 * T, LATE_START + 5 * T]
+    assert write_epochs == DAY_THEN_FINAL_WRITES
     for series_key in LOOP_SERIES:
         assert [row.interpolated_datetime for row in rows_of(config, series_key)] == [
             LATE_START + i * T for i in range(6)
@@ -886,7 +905,7 @@ def test_a_day_without_a_block_at_23_50_is_still_written_after_it(
     write_das_files(tmp_path, [LATE_START + i * T for i in (0, 1, 2, 4, 5)])
     write_epochs = recorded_writes(monkeypatch)
     run.run(config, clock_config, None, ShutdownHandler())
-    assert write_epochs == [LATE_START + 3 * T, LATE_START + 5 * T]
+    assert write_epochs == DAY_THEN_FINAL_WRITES
     assert rows_of(config, ("mc1", "mc1"))[3].flags == "P"
 
 

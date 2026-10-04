@@ -23,9 +23,11 @@ reads back without one.
 
 Rows are buffered and written a day at a time (:func:`write_buffer`), every
 check made before the first byte, under a write journal that names the
-first epoch being written. A run that starts checks every file, cuts a
-damaged one back to its last good row, and cuts every file back to before
-the epoch a journal names (:func:`roll_back`, :func:`read_journal`). Files
+first epoch the run writes. The files are flushed to the device only by the
+run's final write (:func:`write_final`), which then deletes the journal. A
+run that starts checks every file, cuts a damaged one back to its last good
+row, and cuts every file back to before the epoch a journal names
+(:func:`roll_back`, :func:`read_journal`). Files
 may end at different epochs: a series writes no row for an epoch it is not
 in.
 """
@@ -1634,6 +1636,14 @@ class DayBuffer:
     earliest_epoch : datetime or None
         The earliest epoch of the rows since the last write; ``None`` when
         there are none.
+    journal_written : bool
+        Whether the journal was written by a write not yet followed by the
+        final write.
+    unflushed_files : set of Path
+        The files written since the last final write, which a power
+        failure could still undo.
+    unflushed_directories : set of Path
+        The directories of the files among them that the writes created.
     """
 
     def __init__(self, channel: RfChannel, journal: Path | None = None) -> None:
@@ -1644,14 +1654,17 @@ class DayBuffer:
         channel : {'a', 'b'}
             The RF channel.
         journal : Path or None, optional
-            The write journal :func:`write_buffer` keeps while it writes; no
-            journal is kept when ``None``.
+            The write journal kept from the first write to the final one
+            (see :func:`write_buffer`); no journal is kept when ``None``.
         """
         self.channel: RfChannel = channel
         self.journal = journal
         self.earliest_epoch: datetime | None = None
         self.file_lines: dict[Path, list[str]] = {}
         self.last_rows: dict[SeriesKey, Row] = {}
+        self.journal_written = False
+        self.unflushed_files: set[Path] = set()
+        self.unflushed_directories: set[Path] = set()
         self._file_series: dict[Path, tuple[FileKind, SeriesKey]] = {}
 
     def add(
@@ -1819,7 +1832,7 @@ def write_buffer(day_buffer: DayBuffer) -> None:
     ----------
     day_buffer : DayBuffer
         The buffer; its texts are emptied after the write, its newest rows
-        kept.
+        kept, and the files written noted as not yet flushed.
 
     Raises
     ------
@@ -1828,44 +1841,87 @@ def write_buffer(day_buffer: DayBuffer) -> None:
         existing file is not a regular file this process can write or its
         length is not its header plus whole rows, a new file's directory is
         not one this process can write into or a file of that name is
-        already there, a write journal is already there, or the free space
-        does not cover every byte to be written; nothing is changed then.
-        While writing, if the device fails.
+        already there, a write journal is already there at the first write,
+        or the free space does not cover every byte to be written; nothing
+        is changed then. While writing, if the device fails.
 
     Notes
     -----
-    When the buffer has a journal, the first epoch of its rows is written
-    to it and flushed before any data file is opened, and the journal is
-    deleted after the last flush. A run that finds the journal knows this
-    write stopped part way, whichever files it reached or created, and
-    rolls every file back to before that epoch (see :func:`read_journal`).
+    The data files are written but not flushed to the device; only
+    :func:`write_final` flushes them, once, at the end of the run. When the
+    buffer has a journal, the first write writes the first epoch of its
+    rows to it and flushes it before any data file is opened, and the
+    journal stays until :func:`write_final` has flushed every file. A run
+    that finds the journal knows a run stopped before its files were all
+    flushed, whichever files it reached or created, and rolls every file
+    back to before that epoch (see :func:`read_journal`).
     """
     file_bytes = _prepared(day_buffer)
     if not file_bytes:
         return
-    if day_buffer.journal is not None and day_buffer.earliest_epoch is not None:
+    if (
+        day_buffer.journal is not None
+        and not day_buffer.journal_written
+        and day_buffer.earliest_epoch is not None
+    ):
         _write_journal(day_buffer.journal, day_buffer.earliest_epoch)
+        day_buffer.journal_written = True
     write_order = sorted(
         file_bytes, key=lambda data_file: _write_order(day_buffer, data_file)
     )
-    new_directories: set[Path] = set()
     for data_file in write_order:
         is_new = not os.path.lexists(data_file)
         try:
             with data_file.open("xb" if is_new else "ab") as open_file:
                 open_file.write(file_bytes[data_file])
-                open_file.flush()
-                os.fsync(open_file.fileno())
         except OSError as exc:
             _fail(f"cannot write data file {data_file}: {exc}", exc)
+        day_buffer.unflushed_files.add(data_file)
         if is_new:
-            new_directories.add(data_file.parent)
-    for new_directory in sorted(new_directories):
-        _sync_directory(new_directory)
-    if day_buffer.journal is not None:
-        _delete(day_buffer.journal)
+            day_buffer.unflushed_directories.add(data_file.parent)
     day_buffer.file_lines.clear()
     day_buffer.earliest_epoch = None
+
+
+def write_final(day_buffer: DayBuffer) -> None:
+    """Write the last rows, flush every file written since, and end the journal.
+
+    Parameters
+    ----------
+    day_buffer : DayBuffer
+        The buffer; written as by :func:`write_buffer`, then every file the
+        writes reached is flushed.
+
+    Raises
+    ------
+    DataFileError
+        As :func:`write_buffer` does, or if a file or directory cannot be
+        flushed; the journal is then left, so the next run rolls back.
+
+    Notes
+    -----
+    Each file is flushed once, measurement files first, then the
+    directories of the files the writes created, and the journal is deleted
+    last, so it is there until every row it covers is on the device.
+    """
+    write_buffer(day_buffer)
+    flush_order = sorted(
+        day_buffer.unflushed_files,
+        key=lambda data_file: _write_order(day_buffer, data_file),
+    )
+    for data_file in flush_order:
+        try:
+            with data_file.open("rb") as open_file:
+                os.fsync(open_file.fileno())
+        except OSError as exc:
+            _fail(f"cannot flush data file {data_file}: {exc}", exc)
+    for new_directory in sorted(day_buffer.unflushed_directories):
+        _sync_directory(new_directory)
+    day_buffer.unflushed_files.clear()
+    day_buffer.unflushed_directories.clear()
+    if day_buffer.journal is not None and day_buffer.journal_written:
+        _delete(day_buffer.journal)
+        day_buffer.journal_written = False
 
 
 def _write_order(day_buffer: DayBuffer, data_file: Path) -> tuple[int, SeriesKey]:
@@ -1919,7 +1975,7 @@ def _prepared(day_buffer: DayBuffer) -> dict[Path, bytes]:
             file_bytes[data_file] = (header_text + "".join(file_lines)).encode("ascii")
         except UnicodeEncodeError as exc:
             _fail(f"the rows for {data_file} are not ASCII", exc)
-    if day_buffer.journal is not None and file_bytes:
+    if day_buffer.journal is not None and file_bytes and not day_buffer.journal_written:
         if os.path.lexists(day_buffer.journal):
             _fail(f"write journal {day_buffer.journal} is there: a write is still open")
         _check_new(day_buffer.journal)
@@ -2316,14 +2372,14 @@ def ensure_archives(processed_path: Path) -> None:
 
 
 def _write_journal(journal: Path, first_epoch: datetime) -> None:
-    """Write the journal of a write about to start, and flush it.
+    """Write the journal of a run's first write, about to start, and flush it.
 
     Parameters
     ----------
     journal : Path
         The journal, which is not there yet.
     first_epoch : datetime
-        The first epoch of the rows to write.
+        The first epoch of the rows the run writes.
 
     Raises
     ------

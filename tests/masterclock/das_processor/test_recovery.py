@@ -4,7 +4,9 @@ The rules covered: an error at any point of computing an epoch or
 preparing a write changes no file; a stop at any point of the write, before
 or after any write or fsync, a torn line included, is undone by the next
 run, whose data files end byte-identical to those of a run that never
-stopped; and a file whose end is torn, with a line damaged by hand in its
+stopped; rows a power failure loses from one file before the final write,
+which alone flushes the data files, are made again from the run's first
+epoch; and a file whose end is torn, with a line damaged by hand in its
 middle, is cut back before that line while every other file is left, and
 its series starts cold at its next epoch, in the segment after its last
 kept row's. A file of
@@ -325,14 +327,14 @@ def test_counting_the_write_step(
     assert write_events.event_count == WRITE_EVENTS
 
 
-WRITE_EVENTS: Final = 71
+WRITE_EVENTS: Final = 52
 """How many writes and fsyncs a run of the invented data makes.
 
-The archives' directories are flushed once when made. Each of the two
-writes, one per day, writes and flushes the journal and its directory,
-writes and flushes every data file, flushes the directories of the files it
-created (both, the first day), and flushes the journal's directory after
-deleting it.
+The archives' directories are flushed once when made. The first of the two
+writes, one per day, writes and flushes the journal and its directory, and
+each writes every data file. The final write then flushes every data file
+the run wrote and the directories of the files it created, and flushes the
+journal's directory after deleting it.
 """
 
 
@@ -363,6 +365,37 @@ def test_a_stop_while_writing_is_undone_by_the_next_run(
         )
         with pytest.raises(Stop):
             run_once(config)
+    run_once(config)
+    assert archived_files(config) == uninterrupted_files
+
+
+def test_rows_a_power_failure_loses_before_the_final_write_are_made_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    uninterrupted_files: dict[str, bytes],
+) -> None:
+    """Cut every file back to the run's first epoch when a file lost its last rows.
+
+    The day's write is not flushed, so a power failure before the final
+    write can leave one file without rows the others kept; the journal,
+    flushed at the run's first write, makes the next run redo the whole run.
+    """
+    config = make_deployment(tmp_path)
+    run_once(config, steps=2)
+    synced_files = archived_files(config)
+    with monkeypatch.context() as scoped_monkeypatch:
+
+        def stop(_day_buffer: files.DayBuffer) -> None:
+            """Stop as a power failure would, before anything is flushed."""
+            raise Stop
+
+        scoped_monkeypatch.setattr(run, "write_final", stop)
+        with pytest.raises(Stop):
+            run_once(config)
+    lost_file = config.processed.processed_path / "meas" / "das_a.mc1.hm1.dat"
+    lost_key = "meas/das_a.mc1.hm1.dat"
+    assert archived_files(config)[lost_key] != synced_files[lost_key]
+    lost_file.write_bytes(synced_files[lost_key])
     run_once(config)
     assert archived_files(config) == uninterrupted_files
 

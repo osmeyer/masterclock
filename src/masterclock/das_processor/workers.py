@@ -73,7 +73,7 @@ from masterclock.das_processor.registry import (
     series_file,
 )
 from masterclock.domain.double_difference import Component
-from masterclock.domain.filter import StepResult
+from masterclock.domain.filter import StepResult, writes_row
 from masterclock.domain.series import (
     PairKey,
     Row,
@@ -175,7 +175,8 @@ class SeriesDone(NamedTuple):
     Parameters
     ----------
     lines : list of (series key, str)
-        Each series' line, with its newline, in key order.
+        Each line written, with its newline, and its series, in key order;
+        a series whose row is not written has none.
     components : dict of (str, str) to Component
         Each pair's part in the triples; empty for triples.
     accepted_count : int
@@ -352,6 +353,7 @@ class SeriesShard:
             {
                 pair: MeasRecord(measurements.get(pair), step_result.row)
                 for pair, step_result in step_results.items()
+                if writes_row(step_result.row)
             },
             components,
         )
@@ -398,6 +400,7 @@ class SeriesShard:
                     triple_step.measurements.get(triple), step_result.row
                 )
                 for triple, step_result in triple_step.step_results.items()
+                if writes_row(step_result.row)
             },
             {},
         )
@@ -462,7 +465,7 @@ class SeriesShard:
         predictions : Mapping of series key to State or None
             Each series' prediction.
         file_records : Mapping of series key to MeasRecord or DdiffRecord
-            Each series' record for its file, in key order.
+            The record of each series whose row is written, in key order.
         components : dict of (str, str) to Component
             The pairs' parts in the triples, passed on.
 
@@ -703,19 +706,39 @@ class WorkerPool:
             self._send(worker, component_bytes)
         triples_done = self._answers(SeriesDone)
         epoch_buffer = self._buffered(epoch_start, [*pairs_done, *triples_done])
+        written_pairs, written_triples = _written(pairs_done), _written(triples_done)
         if logging_on:
             _write_records(pairs_done)
             _write_records(triples_done)
             run.log_counts(
                 epoch_start,
-                len(epoch.pairs),
-                len(epoch.triples),
+                len(written_pairs),
+                len(written_triples),
                 sum(done.accepted_count for done in (*pairs_done, *triples_done)),
             )
         day_buffer.take(epoch_buffer)
-        pair_keys.update(epoch.pairs)
-        triple_keys.update(epoch.triples)
+        self._note_written([*written_pairs, *written_triples])
         return epoch
+
+    def _note_written(self, series_keys: list[SeriesKey]) -> None:
+        """Add the series that wrote a row to the series known so far.
+
+        Parameters
+        ----------
+        series_keys : list of series key
+            The series that wrote a row at the epoch.
+
+        Raises
+        ------
+        DataFileError
+            If an archive cannot be listed, the first time.
+        """
+        pair_keys, triple_keys = self._known_series()
+        for series_key in series_keys:
+            if len(series_key) == _PAIR:
+                pair_keys.add((series_key[0], series_key[1]))
+            else:
+                triple_keys.add((series_key[0], series_key[1], series_key[-1]))
 
     def _finish_pairs(
         self, corrections: Mapping[PairKey, int], excluded: frozenset[PairKey]
@@ -793,12 +816,14 @@ class WorkerPool:
         return epoch_buffer
 
     def _known_series(self) -> tuple[set[PairKey], set[TripleKey]]:
-        """Give the series known so far, read from the files' names the first time.
+        """Give the series with a row so far, read from the files' names the first time.
 
         Returns
         -------
         tuple of (set, set)
-            The pairs and the triples, which the caller adds to.
+            The pairs and the triples, which the caller adds each series to
+            once it writes a row, as a run without workers knows a series by
+            its newest row.
 
         Raises
         ------
@@ -952,6 +977,22 @@ def _joined[ValueT](parts: list[dict[PairKey, ValueT]]) -> dict[PairKey, ValueT]
     for part in parts:
         joined.update(part)
     return joined
+
+
+def _written(workers_done: list[SeriesDone]) -> list[SeriesKey]:
+    """Give the series whose lines the workers sent back.
+
+    Parameters
+    ----------
+    workers_done : list of SeriesDone
+        Each worker's answer.
+
+    Returns
+    -------
+    list of series key
+        Every series that wrote a row at the epoch.
+    """
+    return [series_key for done in workers_done for series_key, _ in done.lines]
 
 
 def _write_records(workers_done: list[SeriesDone]) -> None:

@@ -3,8 +3,9 @@
 The rules covered: every series has one owner among the workers, from its
 name alone; a run with worker processes writes byte-identical data files to
 a run without them, with one worker or several, in one batch or one epoch
-per run, and logs the same records in the same order; the command line's
-num_workers starts them.
+per run, a series that stops included, and logs the same records in the
+same order; the pool knows a series once it writes a row; the command
+line's num_workers starts them.
 
 A worker answers each exchange of an epoch, reading a series' file the
 first time it meets the series, and logs with its records kept, each with
@@ -37,7 +38,12 @@ from masterclock.das_processor import main, run, workers
 from masterclock.das_processor.clock_config import ClockConfig, read_clock_config
 from masterclock.das_processor.config import AppConfig
 from masterclock.das_processor.exceptions import DataFileError, WorkerError
-from masterclock.das_processor.files import DayBuffer, ensure_archives
+from masterclock.das_processor.files import (
+    DayBuffer,
+    ensure_archives,
+    parse_meas_row,
+    read_last_row,
+)
 from masterclock.das_processor.read_cd5m5m import DASMeasurement, read_all_blocks
 from masterclock.das_processor.read_steering import STEERING_FILE_TEMPLATE
 from masterclock.das_processor.registry import ExistingSeries, series_file
@@ -88,6 +94,9 @@ PHASE_JUMP: Final = (8, ("mc1", "hm1"), 90_000)
 MISSING_READING: Final = (5, ("mc2", "cs1"))
 """This pair is not measured at this epoch."""
 
+STOPPED_READINGS: Final = (3, ("mc2", "hm1"))
+"""This pair is not measured from this epoch on, so its file stops."""
+
 
 def write_deployment(deployment_directory: Path) -> AppConfig:
     """Write the invented deployment's inputs in a new directory; give its config."""
@@ -100,7 +109,9 @@ def write_deployment(deployment_directory: Path) -> AppConfig:
     for epoch_index in range(EPOCH_COUNT):
         epoch_start = FIRST_EPOCH + epoch_index * T
         for pair_index, (pair, rate) in enumerate(PAIR_RATES.items()):
-            if (epoch_index, pair) == MISSING_READING:
+            if (epoch_index, pair) == MISSING_READING or (
+                epoch_index >= STOPPED_READINGS[0] and pair == STOPPED_READINGS[1]
+            ):
                 continue
             seconds_into_epoch = 20 + 10 * pair_index
             phase = 1_000 * pair_index + rate * (epoch_index * 600 + seconds_into_epoch)
@@ -224,6 +235,11 @@ def test_workers_write_the_files_a_run_without_them_writes(
     with_files = archived_files(run_with_workers(tmp_path / "with", num_workers))
     assert sum(name.startswith("meas/") for name in without_files) == len(PAIR_RATES)
     assert sum(name.startswith("ddiff/") for name in without_files) == 12
+    stopped_file = series_file(Path(), "a", STOPPED_READINGS[1])
+    stopped_bytes = without_files[str(stopped_file)]
+    last_line = stopped_bytes.splitlines()[-1].decode()
+    last_row_epoch = parse_meas_row(last_line).row.interpolated_datetime
+    assert last_row_epoch == FIRST_EPOCH + (EPOCH_COUNT - 2) * T
     assert with_files == without_files
 
 
@@ -261,6 +277,25 @@ def test_workers_log_what_a_run_without_them_logs(
     levels = {levelno for _, levelno, _ in logged[0]}
     assert {TRACE, logging.DEBUG, logging.INFO, logging.WARNING} <= levels
     assert logged[1] == logged[0]
+
+
+def test_the_pool_knows_a_series_once_it_writes_a_row(tmp_path: Path) -> None:
+    """Know only the series that wrote, as a run without workers knows its rows."""
+    config = write_deployment(tmp_path)
+    das_block = next(
+        read_all_blocks(config.das.cd5m5m_path, datetime_to_mjd(FIRST_EPOCH))
+    )
+    day_buffer = DayBuffer("a")
+    with workers.WorkerPool(
+        1, config.processed.processed_path, config.das.rf
+    ) as worker_pool:
+        epoch = worker_pool.process_epoch(
+            FIRST_EPOCH, das_block, day_buffer, config, clock_config_of(config)
+        )
+        known_pairs, known_triples = worker_pool._known_series()
+    assert epoch.triples
+    assert (known_pairs, known_triples) == (set(epoch.pairs), set())
+    assert day_buffer.rows_added == len(epoch.pairs)
 
 
 def test_the_command_line_starts_the_workers(
@@ -380,14 +415,27 @@ def test_a_worker_answers_each_exchange_of_an_epoch(tmp_path: Path) -> None:
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
     assert [answer[0] for answer in answers] == ["ok", "ok", "ok"]
     started, pairs_done, triples_done = (answer[1] for answer in answers)
+    written_pairs = [pair for pair in task.pairs if pair != STOPPED_READINGS[1]]
     assert isinstance(started, workers.PairsStarted)
-    assert started.last_flags.keys() == set(task.pairs)
+    assert started.last_flags.keys() == set(written_pairs)
     assert isinstance(pairs_done, workers.SeriesDone)
-    assert [series_key for series_key, _ in pairs_done.lines] == list(task.pairs)
+    assert [series_key for series_key, _ in pairs_done.lines] == written_pairs
     assert [series_key for series_key, _ in pairs_done.log_records] == list(task.pairs)
-    assert all(log_records for _, log_records in pairs_done.log_records)
+    assert [
+        series_key for series_key, log_records in pairs_done.log_records if log_records
+    ] == written_pairs
     assert isinstance(triples_done, workers.SeriesDone)
-    assert [series_key for series_key, _ in triples_done.lines] == list(task.triples)
+    tracked_triples = [
+        triple
+        for triple in task.triples
+        if (
+            triple_file := series_file(config.processed.processed_path, "a", triple)
+        ).exists()
+        and "D" not in (last_row := read_last_row(triple_file, "ddiff")).flags
+        and last_row.interpolated_datetime == task.epoch_start - T
+    ]
+    assert tracked_triples
+    assert [series_key for series_key, _ in triples_done.lines] == tracked_triples
     assert triples_done.components == {}
 
 
@@ -489,7 +537,7 @@ def test_a_shard_reads_a_series_file_only_the_first_time(tmp_path: Path) -> None
         data_file.unlink()
     started = shard.start_pairs(task._replace(epoch_start=next_epoch + T, readings=()))
     assert len(data_files) == len(task.pairs) + len(task.triples)
-    assert started.last_flags.keys() == set(task.pairs)
+    assert started.last_flags.keys() == set(task.pairs) - {STOPPED_READINGS[1]}
 
 
 def test_a_shard_refuses_to_go_on_with_an_epoch_it_did_not_begin(

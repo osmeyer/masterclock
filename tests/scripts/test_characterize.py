@@ -479,13 +479,17 @@ def test_each_clock_has_a_local_triple_through_each_reference(
 
 
 def test_a_triple_s_rows_are_read_from_their_columns(processed_path: Path) -> None:
-    """Read one row per epoch, its epoch numbered, its z and flags as written."""
+    """Read each row, its epoch numbered, its z and flags as written.
+
+    The triple's first row is its first measurement, two epochs in, when
+    its pairs cold-start; its clock pair's gap gives rows with no z.
+    """
     triple_rows = characterize.read_triple_rows(
-        series_file(processed_path, "a", ("mc1", "mc1", "hm1"))
+        series_file(processed_path, "a", (GAP_PAIR[0], *GAP_PAIR))
     )
     first_epoch = characterize.epoch_number(f"{datetime_to_mjd(START):.6f}")
     assert [row.epoch for row in triple_rows] == list(
-        range(first_epoch, first_epoch + DAYS * 144)
+        range(first_epoch + 2, first_epoch + DAYS * 144)
     )
     assert "A" in triple_rows[-1].flags
     assert triple_rows[-1].z is not None

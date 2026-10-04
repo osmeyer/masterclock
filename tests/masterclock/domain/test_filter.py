@@ -17,7 +17,8 @@ clears the counters and the buffer, and moves the innovation scale by the
 innovation before the update, never below its floor; a held row (P, X or R)
 stores the prediction and keeps the scale, the counters and the buffer, one
 more epoch since an accept; a held row past the gap limit, or with no
-prediction, is dormant, with no state; a cold start begins segment + 1 at
+prediction, is dormant, with no state, and is not written when it had no
+measurement; a cold start begins segment + 1 at
 the measurement with sigma0; a warm segment start keeps the state and the
 step offset and takes the new time constants, never a new model; a row of a
 2- or 3-state series is unsettled while its segment is younger than five
@@ -784,6 +785,32 @@ def test_a_gap_past_the_gap_limit_goes_dormant(gmax: int) -> None:
     assert estimator.predict(previous_row, NO_STEERING_INPUT) is None
     later_row = run_gap(gmax + 3, gmax)
     assert (later_row.flags, later_row.epochs_since_accept) == ("PD", gmax + 3)
+
+
+@pytest.mark.parametrize(
+    ("flags", "written"),
+    [
+        ("A", True),
+        ("P", True),
+        ("R", True),
+        ("X", True),
+        ("RD", True),
+        ("XD", True),
+        ("PD", False),
+    ],
+)
+def test_only_a_dormant_row_without_a_measurement_is_not_written(
+    flags: str, written: bool
+) -> None:
+    """Write every row but a dormant one with no measurement (13.3)."""
+    state_fields = (
+        {"x_fs": None, "y": None, "d": None, "innovation_scale": None}
+        if "D" in flags
+        else {}
+    )
+    innovation = None if "P" in flags else 0.0
+    row = last_row(flags=flags, innovation=innovation, **state_fields)
+    assert estimator.writes_row(row) is written
 
 
 def test_a_held_row_without_a_prediction_is_dormant() -> None:

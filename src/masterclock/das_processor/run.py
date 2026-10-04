@@ -50,7 +50,13 @@ from masterclock.das_processor.registry import (
     series_file,
 )
 from masterclock.domain.double_difference import Component, double_difference
-from masterclock.domain.filter import StepResult, anchor_of, filter_step, predict
+from masterclock.domain.filter import (
+    StepResult,
+    anchor_of,
+    filter_step,
+    predict,
+    writes_row,
+)
 from masterclock.domain.measurements import (
     PairMeasurement,
     TripleMeasurement,
@@ -980,8 +986,8 @@ def next_epoch(config: AppConfig) -> datetime:
         One epoch after the newest epoch any file is good through; with no
         file holding a whole row, the epoch containing ``start_from_mjd``.
         A file may end earlier: its series was left out of the later
-        epochs, or a damaged end was cut off, and it starts cold when it is
-        next in an epoch.
+        epochs, or was dormant with no measurement, or a damaged end was
+        cut off, and it starts cold when it is next in an epoch.
 
     Raises
     ------
@@ -1210,7 +1216,9 @@ def process_epoch(
     Returns
     -------
     EpochDone
-        The epoch and what its pairs and triples gave.
+        The epoch and what its pairs and triples gave. Every series' row
+        is added but a dormant one with no measurement (see
+        :func:`~masterclock.domain.filter.writes_row`).
 
     Raises
     ------
@@ -1245,6 +1253,41 @@ def process_epoch(
     )
     pair_step = process_pairs(epoch, last_rows, last_segments)
     triple_step = process_triples(epoch, last_rows, pair_step, last_segments)
+    epoch_buffer = DayBuffer(day_buffer.channel)
+    processed_path = config.processed.processed_path
+    for series_key, file_record in _file_records(epoch, pair_step, triple_step):
+        epoch_buffer.add(
+            series_file(processed_path, config.das.rf, series_key),
+            series_key,
+            file_record,
+        )
+    day_buffer.take(epoch_buffer)
+    epoch_done = EpochDone(epoch=epoch, pair_step=pair_step, triple_step=triple_step)
+    log_epoch(epoch_done, last_rows, config.das.rf)
+    return epoch_done
+
+
+def _file_records(
+    epoch: Epoch, pair_step: PairStep, triple_step: TripleStep
+) -> list[tuple[SeriesKey, MeasRecord | DdiffRecord]]:
+    """Give the record of each series of an epoch whose row is written.
+
+    Parameters
+    ----------
+    epoch : Epoch
+        The epoch.
+    pair_step : PairStep
+        What its pairs gave.
+    triple_step : TripleStep
+        What its triples gave.
+
+    Returns
+    -------
+    list of (series key, MeasRecord or DdiffRecord)
+        The pairs' records, then the triples', each in key order; a series
+        dormant with no measurement has none (see
+        :func:`~masterclock.domain.filter.writes_row`).
+    """
     series_records: list[tuple[SeriesKey, MeasRecord | DdiffRecord]] = [
         (
             pair,
@@ -1254,6 +1297,7 @@ def process_epoch(
             ),
         )
         for pair in epoch.pairs
+        if writes_row(pair_step.step_results[pair].row)
     ]
     series_records += [
         (
@@ -1264,19 +1308,9 @@ def process_epoch(
             ),
         )
         for triple in epoch.triples
+        if writes_row(triple_step.step_results[triple].row)
     ]
-    epoch_buffer = DayBuffer(day_buffer.channel)
-    processed_path = config.processed.processed_path
-    for series_key, file_record in series_records:
-        epoch_buffer.add(
-            series_file(processed_path, config.das.rf, series_key),
-            series_key,
-            file_record,
-        )
-    day_buffer.take(epoch_buffer)
-    epoch_done = EpochDone(epoch=epoch, pair_step=pair_step, triple_step=triple_step)
-    log_epoch(epoch_done, last_rows, config.das.rf)
-    return epoch_done
+    return series_records
 
 
 class EpochProcessor(Protocol):
@@ -1338,7 +1372,8 @@ def run(
     clock_config : ClockConfig
         The clock configuration.
     steps : int or None
-        How many epochs to process at most; ``None`` for all the data has.
+        How many epochs that write a row to process at most; ``None`` for
+        all the data has.
     shutdown : ShutdownHandler
         Asked between epochs whether to stop.
     epoch_processor : EpochProcessor or None, optional
@@ -1359,11 +1394,14 @@ def run(
     :func:`next_epoch`); while no series exists yet, at the first block,
     since an epoch before it holds no series and writes nothing, and a run
     of one epoch would otherwise never get past it. An epoch with no block
-    before the data resume is processed with no measurements. The run stops
-    when no block remains, after ``steps`` epochs, or on a shutdown
-    request, always between epochs. Rows are written after each day's
-    23:50 UTC epoch and when the run stops, and flushed to the device only
-    when the run stops (:func:`write_final`).
+    before the data resume is processed with no measurements. An epoch
+    that writes no row is not counted as a step: once a gap epoch writes
+    none, no later epoch of the gap writes any, so a run of one step at a
+    time goes on to the next epoch that does, as a run in one go does. The
+    run stops when no block remains, after ``steps`` epochs that wrote
+    rows, or on a shutdown request, always between epochs. Rows are
+    written after each day's 23:50 UTC epoch and when the run stops, and
+    flushed to the device only when the run stops (:func:`write_final`).
     """
     ensure_archives(config.processed.processed_path)
     epoch_start = next_epoch(config)
@@ -1385,6 +1423,7 @@ def run(
         and not shutdown.shutdown_requested
         and (steps is None or epochs_done < steps)
     ):
+        rows_before_epoch = day_buffer.rows_added
         das_block = None
         if next_das_block.interpolated_datetime == epoch_start:
             das_block = next_das_block
@@ -1412,7 +1451,7 @@ def run(
         if (epoch_start + _EPOCH).date() != epoch_start.date():
             write_buffer(day_buffer)
         epoch_start += _EPOCH
-        epochs_done += 1
+        epochs_done += day_buffer.rows_added > rows_before_epoch
     write_final(day_buffer)
 
 
@@ -1634,12 +1673,12 @@ def log_epoch(
     Notes
     -----
     Screening, slip and reject events go at WARNING except
-    corrected slips; steps, cold starts, dormancy, configuration changes
-    and the epoch's counts at INFO; each series' outcome at DEBUG and its
-    prediction and update at TRACE. Series are logged in key order, pairs
-    first. Nothing is worked out for a level the log leaves out: when
-    WARNING is not logged the epoch is not looked at, and a TRACE line is
-    made only when TRACE is logged.
+    corrected slips; steps, cold starts, dormancy, a series that stops,
+    configuration changes and the epoch's counts of rows written at INFO;
+    each series' outcome at DEBUG and its prediction and update at TRACE.
+    Series are logged in key order, pairs first. Nothing is worked out for
+    a level the log leaves out: when WARNING is not logged the epoch is not
+    looked at, and a TRACE line is made only when TRACE is logged.
     """
     if not _log.isEnabledFor(logging.WARNING):
         return
@@ -1653,10 +1692,27 @@ def log_epoch(
     )
     log_counts(
         epoch_done.epoch.interpolated_datetime,
-        len(pair_step.step_results),
-        len(triple_step.step_results),
+        _written_count(pair_step.step_results),
+        _written_count(triple_step.step_results),
         accepted_count,
     )
+
+
+def _written_count[KeyT: SeriesKey](step_results: Mapping[KeyT, StepResult]) -> int:
+    """Count the rows of an epoch's series that are written.
+
+    Parameters
+    ----------
+    step_results : Mapping of series key to StepResult
+        Each series' row at the epoch.
+
+    Returns
+    -------
+    int
+        How many of the rows are written (see
+        :func:`~masterclock.domain.filter.writes_row`).
+    """
+    return sum(writes_row(step_result.row) for step_result in step_results.values())
 
 
 def log_series_results[KeyT: SeriesKey](
@@ -1685,12 +1741,18 @@ def log_series_results[KeyT: SeriesKey](
 
     Notes
     -----
-    A series' TRACE line is made only when TRACE is logged.
+    A series' TRACE line is made only when TRACE is logged. A row that is
+    not written is not logged; when the series had a row at the epoch
+    before, that it stops is logged once, at INFO.
     """
     trace_logged = _log.isEnabledFor(TRACE)
     accepted_count = 0
     for series_key, step_result in step_results.items():
         series_label = series_name(channel, series_key)
+        if not writes_row(step_result.row):
+            if series_key in last_rows:
+                _log.info("%s stops: no row until it is measured again", series_label)
+            continue
         _log_series(series_label, step_result, last_rows.get(series_key))
         if trace_logged:
             _log_trace(series_label, step_result.row, predictions[series_key])
@@ -1708,9 +1770,9 @@ def log_counts(
     epoch_start : datetime
         The epoch start E.
     pair_count : int
-        How many pairs the epoch held.
+        How many pairs wrote a row at the epoch.
     triple_count : int
-        How many triples it held.
+        How many triples did.
     accepted_count : int
         How many of their rows were accepted; the rest are held.
     """

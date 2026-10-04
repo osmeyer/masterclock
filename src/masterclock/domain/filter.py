@@ -21,7 +21,8 @@ prediction standing (:func:`hold`); a series with no valid state is dormant
 (:func:`dormant`): it buffers its measurements (:func:`acquire`, decycled
 against :func:`anchor_of`) until three agree, and starts again from the
 third alone (:func:`cold_start`). :func:`finish` builds the row from the
-draft once, and checks it.
+draft once, and checks it. Every row goes into the series' file but a
+dormant one with no measurement (:func:`writes_row`).
 
 A measurement is accepted when it passes the gate (:func:`within_gate`,
 :func:`rms_ok`). One that fails is a counted reject (:func:`count_reject`),
@@ -489,6 +490,25 @@ def dormant(draft: RowDraft, outcome: Held, *, keep_buffer: bool = False) -> Row
         draft.rejects = ()
     draft.flags += "D"
     return finish(draft, outcome)
+
+
+def writes_row(row: Row) -> bool:
+    """Tell whether a series' row at an epoch goes into its file (design 13.3).
+
+    Parameters
+    ----------
+    row : Row
+        The series' row at the epoch.
+
+    Returns
+    -------
+    bool
+        Whether the row is written: every row is, except a dormant one with
+        no measurement (flags D and P). So a series whose measurements stop
+        writes its predicted rows up to its gap limit, and then nothing until
+        it is measured again.
+    """
+    return not ("D" in row.flags and "P" in row.flags)
 
 
 def hold(

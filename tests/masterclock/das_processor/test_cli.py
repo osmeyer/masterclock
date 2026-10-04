@@ -90,10 +90,11 @@ options:
                         series, overriding the config file's [PROCESSED]
                         num_workers; pass None to work them in the main
                         process alone (default: use the config file)
-  --steps N             process exactly this many ten-minute epochs and shut
-                        down, instead of every epoch not yet processed;
-                        command line only, with no config-file entry (default:
-                        process every new epoch)
+  --steps N             process exactly this many ten-minute epochs that write
+                        rows and shut down, instead of every epoch not yet
+                        processed; an epoch of a data gap that writes no row
+                        is not counted; command line only, with no config-file
+                        entry (default: process every new epoch)
   --log-file PATH       path to the log file, overriding the config file's
                         [LOGGING] log_file; pass None to disable file logging
                         (default: use the config file)

@@ -413,9 +413,9 @@ def test_a_line_damaged_by_hand_cuts_its_file_and_its_series_starts_again(
     built on a damaged pair, which take its new measurements.
     """
     config = make_deployment(tmp_path)
-    epochs_run, damaged_row = (5, 3) if file_kind == "meas" else (4, 2)
+    epochs_run, damaged_row = (5, 3) if file_kind == "meas" else (5, 1)
     run_once(config, steps=epochs_run)
-    file_name = "das_a.mc1.hm1.dat" if file_kind == "meas" else "das_a.mc1.mc1.hm1.dat"
+    file_name = "das_a.mc1.hm1.dat" if file_kind == "meas" else "das_a.mc1.mc1.mc2.dat"
     data_file = config.processed.processed_path / file_kind / file_name
     line_size = files.WIDTHS[file_kind] + 1  # type: ignore[index]
     header_lines = files.HEADER_LINES[file_kind]  # type: ignore[index]

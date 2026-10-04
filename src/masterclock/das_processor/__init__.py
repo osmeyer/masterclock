@@ -4,7 +4,8 @@ A scheduler starts it for each RF channel every ten minutes. Each run
 processes its channel's epochs, in order, up to the end of the DAS data, or
 ``--steps`` of them, and exits: it reads the raw ten-minute comparisons,
 decycles and screens them, runs every pair's and triple's estimator, and
-appends a row to the file of each series the epoch holds.
+appends a row to the file of each series the epoch holds, but for a series
+dormant with no measurement, which writes none.
 
 :func:`main` is the entry point. Its exit status is 0 for a run that
 finished, 2 for a usage error such as a required setting given by neither

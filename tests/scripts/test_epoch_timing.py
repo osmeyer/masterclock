@@ -4,8 +4,9 @@ The rules covered: the deployment holds every reference against itself and
 every other reference, and each clock against one reference in turn; its
 DAS files hold one block per epoch with every pair once and no line the
 reader refuses, however many pairs there are, and a clock configuration
-entry for every clock; the timed runs write the deployment's files, one row
-per run of one epoch and one per epoch of the batch; a failed run is
+entry for every clock; the timed runs write the deployment's files, a
+pair's one row per run of one epoch and one per epoch of the batch, a
+triple's from its first measurement on; a failed run is
 reported with exit status 1; and a folder that is not new or empty, a
 number out of range, or more runs than epochs is a usage error.
 """
@@ -102,9 +103,18 @@ def test_the_timed_runs_write_the_deployment_s_files(
         data_file_rows(timing_folder / "batch"),
     )
     assert len(stepped_rows) == (2 * 2 + 1) + 2 * (2 * 2 + 1)
-    assert set(stepped_rows.values()) == {3}
     assert batch_rows.keys() == stepped_rows.keys()
-    assert set(batch_rows.values()) == {4}
+    triple_names = {name for name in stepped_rows if name.count(".") == 4}
+    assert len(triple_names) == 2 * (2 * 2 + 1)
+    for file_rows, epochs_run in ((stepped_rows, 3), (batch_rows, 4)):
+        assert {
+            row_count
+            for name, row_count in file_rows.items()
+            if name not in triple_names
+        } == {epochs_run}
+        assert all(1 <= file_rows[name] <= epochs_run - 2 for name in triple_names), (
+            file_rows
+        )
     printed_output = capsys.readouterr().out
     assert "5 pair files, 10 triple files" in printed_output
     assert "median of the next 2" in printed_output

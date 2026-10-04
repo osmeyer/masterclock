@@ -21,10 +21,10 @@ measurements of the same epoch, the local triple given its self pair for
 both links, marked cold when a pair cold-started, and filtered.
 
 The run's events are logged at the design's levels: each epoch with its
-counts at INFO; steps, cold starts, dormancy, configuration changes and
-corrected slips at INFO; rejects, screening failures, a missing self pair
-and undecided slips at WARNING; each series' outcome at
-DEBUG and its prediction and update at TRACE.
+counts of rows written at INFO; steps, cold starts, dormancy, a series that
+stops, configuration changes and corrected slips at INFO; rejects,
+screening failures, a missing self pair and undecided slips at WARNING;
+each series' outcome at DEBUG and its prediction and update at TRACE.
 
 The next epoch is one after the newest epoch any file is good through: a
 damaged file is cut back to its last good row and the rest left; after a
@@ -44,6 +44,12 @@ change are logged as they are; each series' last row is read from its
 file; a remote
 triple goes on when its reference is missing; a run with no data and no
 files does nothing; and a gap at the start of a run is predicted.
+
+A series dormant with no measurement writes no row: one whose measurements
+stop writes predicted rows up to its gap limit and then none, and on its
+return starts again in its next segment, in one go or epoch by epoch; and
+an epoch that writes no row is not counted as a step, so a run of one step
+at a time gets past a gap no series writes.
 """
 
 import dataclasses
@@ -841,6 +847,20 @@ LOOP_SERIES: Final[tuple[SeriesKey, ...]] = (
 )
 """The series of the loop's deployment."""
 
+LOOP_FIRST_ROWS: Final[dict[SeriesKey, int]] = {
+    ("mc1", "mc1"): 0,
+    ("mc1", "ox23"): 0,
+    ("mc1", "mc1", "mc1"): 2,
+    ("mc1", "mc1", "ox23"): 2,
+}
+"""The epoch of each loop series' first row, counted from the first epoch: a
+triple's is its first measurement, at its pairs' cold start."""
+
+
+def epoch_indexes(series_rows: list[Row], first_epoch_start: datetime) -> list[int]:
+    """Give each row's epoch as a count of epochs from the first."""
+    return [(row.interpolated_datetime - first_epoch_start) // T for row in series_rows]
+
 
 def recorded_writes(
     monkeypatch: pytest.MonkeyPatch,
@@ -892,9 +912,9 @@ def test_a_day_is_written_after_its_last_epoch_and_at_the_end(
     run.run(config, clock_config, None, ShutdownHandler())
     assert write_epochs == DAY_THEN_FINAL_WRITES
     for series_key in LOOP_SERIES:
-        assert [row.interpolated_datetime for row in rows_of(config, series_key)] == [
-            LATE_START + i * T for i in range(6)
-        ]
+        assert epoch_indexes(rows_of(config, series_key), LATE_START) == list(
+            range(LOOP_FIRST_ROWS[series_key], 6)
+        ), series_key
 
 
 def test_a_day_without_a_block_at_23_50_is_still_written_after_it(
@@ -912,15 +932,13 @@ def test_a_day_without_a_block_at_23_50_is_still_written_after_it(
 def test_a_gap_gives_predicted_rows_and_the_run_stops_at_the_end_of_the_data(
     tmp_path: Path,
 ) -> None:
-    """Give every series a row for a gap epoch, and nothing after the data (6.2)."""
+    """Give a predicted row for a gap epoch, and none after the data (6.2)."""
     config, clock_config = make_loop_deployment(tmp_path)
-    write_das_files(tmp_path, [LATE_START, LATE_START + T, LATE_START + 4 * T])
+    write_das_files(tmp_path, [LATE_START + i * T for i in (0, 1, 2, 3, 6)])
     run.run(config, clock_config, None, ShutdownHandler())
     self_rows = rows_of(config, ("mc1", "mc1"))
-    assert [row.interpolated_datetime for row in self_rows] == [
-        LATE_START + i * T for i in range(5)
-    ]
-    assert [row.flags for row in self_rows] == ["RD", "RD", "PD", "PD", "RD"]
+    assert epoch_indexes(self_rows, LATE_START) == list(range(7))
+    assert [row.flags for row in self_rows] == ["RD", "RD", "AN", "A", "P", "P", "A"]
 
 
 def test_steps_stop_the_run_after_that_many_epochs(tmp_path: Path) -> None:
@@ -952,7 +970,7 @@ def test_a_shutdown_stops_between_epochs_after_writing(
     monkeypatch.setattr(run, "process_epoch", ask_for_shutdown)
     run.run(config, clock_config, None, shutdown)
     assert len(rows_of(config, ("mc1", "mc1"))) == 2
-    assert len(rows_of(config, ("mc1", "mc1", "ox23"))) == 2
+    assert len(rows_of(config, ("mc1", "ox23"))) == 2
 
 
 def test_a_run_restarted_after_every_epoch_writes_the_same_files(
@@ -1273,15 +1291,17 @@ def test_a_cold_start_and_dormancy_are_logged_at_info(
     )
     info_messages = messages_at(logged_events(caplog, epoch, last_rows), "INFO")
     assert "das_a.mc2.ox23 cold start: segment 2" in info_messages
-    stopping_last_rows = {
+    rejecting_last_rows = {
         **REFERENCE_LAST_ROWS,
         ("mc1", "mc1"): last_row(x_fs=1_000_000, epochs_since_accept=40),
     }
     epoch = epoch_of(
-        REFERENCE_MEASUREMENTS[1:], stopping_last_rows, tmp_path / "second"
+        [das_measurement_of("mc1", "mc1", 1500, 10), *REFERENCE_MEASUREMENTS[1:]],
+        rejecting_last_rows,
+        tmp_path / "second",
     )
     info_messages = messages_at(
-        logged_events(caplog, epoch, stopping_last_rows), "INFO"
+        logged_events(caplog, epoch, rejecting_last_rows), "INFO"
     )
     assert "das_a.mc1.mc1 dormant" in info_messages
 
@@ -1672,7 +1692,7 @@ def test_an_epoch_s_log_names_the_series_of_its_channel(
 def test_each_series_last_row_is_read_from_its_file(tmp_path: Path) -> None:
     """Give each series' last row, as its file holds it, for every series."""
     config, clock_config = make_loop_deployment(tmp_path)
-    write_das_files(tmp_path, [LATE_START, LATE_START + T])
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(3)])
     run.run(config, clock_config, None, ShutdownHandler())
     last_rows = run.read_last_state(config)
     assert sorted(last_rows) == sorted(LOOP_SERIES)
@@ -1681,12 +1701,14 @@ def test_each_series_last_row_is_read_from_its_file(tmp_path: Path) -> None:
 
 
 def write_das_day(
-    tmp_path: Path, epoch_readings: list[list[tuple[str, str, int]]]
+    tmp_path: Path,
+    epoch_readings: list[list[tuple[str, str, int]]],
+    first_epoch_start: datetime = LATE_START,
 ) -> None:
-    """Write a day file of each epoch's (reference, clock, phase), from LATE_START."""
-    day_lines = []
+    """Write day files of each epoch's (reference, clock, phase), from the first."""
+    das_lines_by_day: dict[int, list[str]] = {}
     for epoch_index, epoch_measurements in enumerate(epoch_readings):
-        epoch_start_mjd = datetime_to_mjd(LATE_START + epoch_index * T)
+        epoch_start_mjd = datetime_to_mjd(first_epoch_start + epoch_index * T)
         for reading_index, (reference, clock_name, measured_phase) in enumerate(
             epoch_measurements
         ):
@@ -1697,9 +1719,11 @@ def write_das_day(
                 switch=f"{reference[-1]}A{reading_index:02d}",
                 clock=clock_name,
             )
-            day_lines.append(f"{das_measurement}\n")
-    data_day = int(datetime_to_mjd(LATE_START))
-    (tmp_path / "das" / f"cd5m5m_{data_day}.dat").write_text("".join(day_lines))
+            das_lines_by_day.setdefault(int(epoch_start_mjd), []).append(
+                f"{das_measurement}\n"
+            )
+    for data_day, das_lines in das_lines_by_day.items():
+        (tmp_path / "das" / f"cd5m5m_{data_day}.dat").write_text("".join(das_lines))
 
 
 def test_a_remote_triple_goes_on_when_its_reference_is_missing(
@@ -1716,15 +1740,13 @@ def test_a_remote_triple_goes_on_when_its_reference_is_missing(
     ]
     write_das_day(
         tmp_path,
-        [both_references, both_references, [both_references[3], both_references[4]]],
+        [both_references] * 5 + [[both_references[3], both_references[4]]],
     )
     run.run(config, clock_config, None, ShutdownHandler())
     series_rows = rows_of(config, ("mc1", "mc2", "ox23"))
-    assert [row.interpolated_datetime for row in series_rows] == [
-        LATE_START,
-        LATE_START + T,
-        LATE_START + 2 * T,
-    ]
+    assert epoch_indexes(series_rows, LATE_START) == [2, 3, 4, 5]
+    assert "A" in series_rows[-2].flags
+    assert "P" in series_rows[-1].flags
 
 
 def test_a_run_with_no_data_and_no_series_does_nothing(tmp_path: Path) -> None:
@@ -1737,15 +1759,12 @@ def test_a_run_with_no_data_and_no_series_does_nothing(tmp_path: Path) -> None:
 def test_a_gap_at_the_start_of_a_run_is_predicted_not_skipped(tmp_path: Path) -> None:
     """Give the epoch after the files' end a row, though the DAS skipped it (6.2)."""
     config, clock_config = make_loop_deployment(tmp_path)
-    write_das_files(tmp_path, [LATE_START, LATE_START + 2 * T])
-    run.run(config, clock_config, 1, ShutdownHandler())
+    write_das_files(tmp_path, [LATE_START + i * T for i in (0, 1, 2, 4)])
+    run.run(config, clock_config, 3, ShutdownHandler())
     run.run(config, clock_config, 1, ShutdownHandler())
     series_rows = rows_of(config, ("mc1", "mc1"))
-    assert [row.interpolated_datetime for row in series_rows] == [
-        LATE_START,
-        LATE_START + T,
-    ]
-    assert "P" in series_rows[1].flags
+    assert epoch_indexes(series_rows, LATE_START) == [0, 1, 2, 3]
+    assert "P" in series_rows[3].flags
 
 
 def test_a_clock_measured_with_an_rms_of_zero_gives_its_triple_a_row(
@@ -2220,11 +2239,9 @@ def test_a_triple_stops_while_its_clock_is_away_and_starts_cold_on_its_return(
     batch_config, clock_config = moving_deployment(tmp_path / "batch")
     run.run(batch_config, clock_config, None, ShutdownHandler())
     triple_rows = rows_of(batch_config, ("mc1", "mc1", "ox23"))
-    assert [row.interpolated_datetime for row in triple_rows] == [
-        LATE_START + epoch_index * T for epoch_index in (0, 1, 2, 3, 4, 7, 8, 9)
-    ]
+    assert epoch_indexes(triple_rows, LATE_START) == [2, 3, 4, 7, 8, 9]
     assert len(rows_of(batch_config, ("mc1", "ox23"))) == 10
-    assert [(row.flags, row.segment) for row in triple_rows[3:]] == [
+    assert [(row.flags, row.segment) for row in triple_rows[1:]] == [
         ("RD", 0),
         ("ANU", 1),
         ("RD", 2),
@@ -2242,3 +2259,110 @@ def test_a_triple_stops_while_its_clock_is_away_and_starts_cold_on_its_return(
             stepped_config.processed.processed_path, "a", series_key
         )
         assert batch_file.read_bytes() == stepped_file.read_bytes(), series_key
+
+
+# ------------------------------------------------------------ series that stop
+
+SHORT_GAP_CLOCK_CONFIG_YAML: Final = CLOCK_CONFIG_YAML.replace(
+    "gap_limit: 40", "gap_limit: 6"
+)
+"""The clock configuration, with every gap limit at N_break, 6 epochs."""
+
+STOPPING_READINGS: Final = [("mc1", "mc1", 1000), ("mc1", "ox23", 50_000)]
+"""mc1 measured against itself, and ox23 against mc1."""
+
+
+def stopping_deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
+    """Give 14 epochs from E, ox23 measured at the first 3 and the last 2."""
+    config, _ = make_loop_deployment(tmp_path, E)
+    short_gap_file = tmp_path / "short_gap.yaml"
+    short_gap_file.write_text(SHORT_GAP_CLOCK_CONFIG_YAML, encoding="utf-8")
+    write_das_day(
+        tmp_path,
+        [STOPPING_READINGS] * 3 + [STOPPING_READINGS[:1]] * 9 + [STOPPING_READINGS] * 2,
+        E,
+    )
+    return config, read_clock_config(short_gap_file)
+
+
+def test_a_series_whose_measurements_stop_writes_no_more_rows(tmp_path: Path) -> None:
+    """Predict for the gap limit, then write nothing until a measurement (13.3)."""
+    config, clock_config = stopping_deployment(tmp_path)
+    run.run(config, clock_config, None, ShutdownHandler())
+    pair_rows = rows_of(config, ("mc1", "ox23"))
+    assert epoch_indexes(pair_rows, E) == [*range(9), 12, 13]
+    assert all("P" in row.flags and "D" not in row.flags for row in pair_rows[3:9]), (
+        pair_rows[3:9]
+    )
+    assert [row.segment for row in pair_rows[8:]] == [1, 2, 2]
+    assert epoch_indexes(rows_of(config, ("mc1", "mc1")), E) == list(range(14))
+    assert epoch_indexes(rows_of(config, ("mc1", "mc1", "ox23")), E) == [2]
+    for _, file_kind, series_key in run.data_series(config):
+        assert not any(
+            "D" in row.flags and "P" in row.flags for row in rows_of(config, series_key)
+        ), (file_kind, series_key)
+
+
+def test_a_series_that_stops_writes_the_same_files_stepped(tmp_path: Path) -> None:
+    """Give the same files when a series stops, in one go or epoch by epoch (I5)."""
+    batch_config, clock_config = stopping_deployment(tmp_path / "batch")
+    run.run(batch_config, clock_config, None, ShutdownHandler())
+    stepped_config, clock_config = stopping_deployment(tmp_path / "stepped")
+    for _ in range(15):
+        run.run(stepped_config, clock_config, 1, ShutdownHandler())
+    batch_files = run.data_series(batch_config)
+    assert len(batch_files) == 4
+    assert [series_key for _, _, series_key in run.data_series(stepped_config)] == [
+        series_key for _, _, series_key in batch_files
+    ]
+    for batch_file, _, series_key in batch_files:
+        stepped_file = registry.series_file(
+            stepped_config.processed.processed_path, "a", series_key
+        )
+        assert batch_file.read_bytes() == stepped_file.read_bytes(), series_key
+
+
+def test_an_epoch_that_writes_no_row_is_not_counted_as_a_step(tmp_path: Path) -> None:
+    """Pass over gap epochs no series writes, so a stepped run gets past them."""
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START, LATE_START + T, LATE_START + 4 * T])
+    run.run(config, clock_config, 2, ShutdownHandler())
+    assert epoch_indexes(rows_of(config, ("mc1", "mc1")), LATE_START) == [0, 1]
+    run.run(config, clock_config, 1, ShutdownHandler())
+    self_rows = rows_of(config, ("mc1", "mc1"))
+    assert epoch_indexes(self_rows, LATE_START) == [0, 1, 4]
+    assert [(row.flags, row.segment) for row in self_rows] == [
+        ("RD", 0),
+        ("RD", 0),
+        ("RD", 1),
+    ]
+
+
+def test_a_series_that_stops_is_logged_once_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a series that writes no row at INFO, and count only rows written (16.2)."""
+    stopping_last_rows = {
+        **REFERENCE_LAST_ROWS,
+        ("mc1", "mc1"): last_row(x_fs=1_000_000, epochs_since_accept=40),
+    }
+    epoch = epoch_of(REFERENCE_MEASUREMENTS[1:], stopping_last_rows, tmp_path)
+    log_entries = logged_events(caplog, epoch, stopping_last_rows)
+    info_messages = messages_at(log_entries, "INFO")
+    assert "das_a.mc1.mc1 stops: no row until it is measured again" in info_messages
+    assert "das_a.mc1.mc1 dormant" not in info_messages
+    assert not any(
+        message.startswith("das_a.mc1.mc1:")
+        for message in messages_at(log_entries, "DEBUG")
+    )
+    assert info_messages[-1].startswith("epoch 2025-09-23 06:00:00+00:00: 3 pairs, ")
+    stopped_last_rows = {
+        series_key: row
+        for series_key, row in REFERENCE_LAST_ROWS.items()
+        if series_key != ("mc1", "mc1")
+    }
+    restarted_entries = logged_events(caplog, epoch, stopped_last_rows)
+    assert not any(
+        message.startswith("das_a.mc1.mc1")
+        for message in messages_at(restarted_entries, "INFO")
+    )

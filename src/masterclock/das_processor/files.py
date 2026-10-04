@@ -29,7 +29,7 @@ run that starts checks every file, cuts a damaged one back to its last good
 row, and cuts every file back to before the epoch a journal names
 (:func:`roll_back`, :func:`read_journal`). Files
 may end at different epochs: a series writes no row for an epoch it is not
-in.
+in, nor while it is dormant with no measurement.
 """
 
 import dataclasses
@@ -1641,6 +1641,8 @@ class DayBuffer:
     earliest_epoch : datetime or None
         The earliest epoch of the rows since the last write; ``None`` when
         there are none.
+    rows_added : int
+        How many rows were added since the buffer was made, written or not.
     journal_written : bool
         Whether the journal was written by a write not yet followed by the
         final write.
@@ -1665,6 +1667,7 @@ class DayBuffer:
         self.channel: RfChannel = channel
         self.journal = journal
         self.earliest_epoch: datetime | None = None
+        self.rows_added = 0
         self.file_lines: dict[Path, list[str]] = {}
         self.last_rows: dict[SeriesKey, Row] = {}
         self.journal_written = False
@@ -1774,14 +1777,17 @@ class DayBuffer:
                 f" not {(file_kind, series_key)}"
             )
 
-    def _started(self, epoch_start: datetime | None) -> None:
-        """Note an epoch of a buffered row, keeping the earliest.
+    def _started(self, epoch_start: datetime | None, row_count: int = 1) -> None:
+        """Note rows added and the epoch of one, keeping the earliest epoch.
 
         Parameters
         ----------
         epoch_start : datetime or None
-            The epoch; ``None`` changes nothing.
+            The epoch; ``None`` leaves the earliest epoch as it is.
+        row_count : int, optional
+            How many rows were added.
         """
+        self.rows_added += row_count
         if epoch_start is not None and (
             self.earliest_epoch is None or epoch_start < self.earliest_epoch
         ):
@@ -1812,7 +1818,7 @@ class DayBuffer:
             self._file_series[data_file] = newer_buffer.series_of(data_file)
             self.file_lines.setdefault(data_file, []).extend(new_lines)
         self.last_rows.update(newer_buffer.last_rows)
-        self._started(newer_buffer.earliest_epoch)
+        self._started(newer_buffer.earliest_epoch, newer_buffer.rows_added)
 
     def series_of(self, data_file: Path) -> tuple[FileKind, SeriesKey]:
         """Give the kind of file and the series a buffered path is for.
@@ -2126,7 +2132,8 @@ def _keep_through(
     Notes
     -----
     A file's rows are in time order, though an epoch may have none: a
-    series writes no row while it is left out of the epochs. The rows kept
+    series writes no row while it is left out of the epochs, nor while it
+    is dormant with no measurement. The rows kept
     are found by a binary search over the line slots, a slot that is not a
     good row counting as after ``last_kept_epoch``: every row up to it is
     good, so the damage lies after it.

@@ -148,8 +148,10 @@ class CliOptions(BaseModel):
         file is kept, or :data:`UNSET` when the option was omitted (defer to
         the config file).
     steps : PositiveInt or None, optional
-        Number of ten-minute epochs to process before shutting down
-        (``--steps``); ``None`` (the default) processes every new epoch.
+        Number of ten-minute epochs that write rows to process before
+        shutting down (``--steps``); an epoch of a data gap that writes no
+        row is not counted. ``None`` (the default) processes every new
+        epoch.
         No config entry backs it, so it has no :data:`UNSET` state: there is
         nothing to defer to, and no ``"None"`` token to accept.
     """
@@ -294,8 +296,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help=(
-            "process exactly this many ten-minute epochs and shut "
-            "down, instead of every epoch not yet processed; command line only, "
+            "process exactly this many ten-minute epochs that write rows and "
+            "shut down, instead of every epoch not yet processed; an epoch of a "
+            "data gap that writes no row is not counted; command line only, "
             "with no config-file entry (default: process every new epoch)"
         ),
     )

@@ -6,9 +6,11 @@ for every clock measured against a reference, prepares the z of each local
 triple (r, r, c) in the design's steps, fits the clock's noise model and the
 measurement's white phase noise to their Allan variances, and works out the
 settings: the time constant M, the initial innovation scale sigma0 (the
-measurement noise) and the gap limit G_max. The measurement noise comes
-from the fit, never from the rms the DAS reports. Days when the phase holds
-no clock signal are left out. It prints one line per clock::
+size of a one-epoch innovation) and the gap limit G_max. The measurement
+noise comes from the fit, never from the rms the DAS reports. Days when the
+phase holds no clock signal, or the clock runs far off frequency, are left
+out, and a clock with too few days of rows gets no settings. It prints one
+line per clock::
 
     uv run --frozen python scripts/characterize.py RUN --rf a --three-state ox
 
@@ -53,6 +55,14 @@ EPOCHS_PER_DAY: Final[int] = 86_400 // EPOCH_SECONDS
 NO_SIGNAL_PS: Final[float] = 10_000.0
 """The typical one-epoch change, less the day's median change, above which a
 day holds no clock signal, ps (step 3)."""
+
+FAR_OFF_FREQUENCY_PS: Final[float] = 25_000.0
+"""The median one-epoch change above which a day's clock runs too far off
+frequency to be decycled reliably, ps (step 3)."""
+
+MIN_DAYS: Final[int] = 30
+"""The fewest days of prepared rows a clock needs for its settings, unless the
+command line says otherwise."""
 
 OUTLIER_SPREADS: Final[float] = 5.0
 """How many robust spreads a change may stray from its day's median (steps 5, 6)."""
@@ -371,12 +381,14 @@ def _typical_departure(changes: Sequence[float]) -> tuple[float, float]:
     return median_change, statistics.median(abs(c - median_change) for c in changes)
 
 
-def drop_no_signal_days(stretch: Stretch) -> tuple[Stretch, int]:
-    """Drop every day whose phase holds no clock signal (step 3).
+def drop_unusable_days(stretch: Stretch) -> tuple[Stretch, int]:
+    """Drop every day with no clock signal, or far off frequency (step 3).
 
     A DAS channel whose clock is off or disconnected still gives readings,
     but their phase is spread over the whole period, so their one-epoch
-    changes are tens of nanoseconds; a clock's are far smaller.
+    changes are tens of nanoseconds apart; a clock's are far closer. A clock
+    whose one-epoch change nears half the period is decycled with the wrong
+    cycle now and then.
 
     Parameters
     ----------
@@ -386,28 +398,30 @@ def drop_no_signal_days(stretch: Stretch) -> tuple[Stretch, int]:
     Returns
     -------
     (Stretch, int)
-        The values less every row of each day whose one-epoch changes, less
-        their median, typically depart from it by more than
-        :data:`NO_SIGNAL_PS`; and how many days were dropped. A day with no
-        two rows one epoch apart cannot be judged, and is kept.
+        The values less every row of each day whose one-epoch changes
+        typically depart from their median by more than
+        :data:`NO_SIGNAL_PS`, or whose median is beyond
+        :data:`FAR_OFF_FREQUENCY_PS` either way; and how many days were
+        dropped. A day with no two rows one epoch apart cannot be judged,
+        and is kept.
 
     Examples
     --------
     >>> quiet = {epoch: 5.0 * epoch for epoch in range(144)}
     >>> random_phase = {144 + k: (7_919.0 * k * k) % 200_000 for k in range(144)}
-    >>> kept, dropped = drop_no_signal_days({**quiet, **random_phase})
+    >>> kept, dropped = drop_unusable_days({**quiet, **random_phase})
     >>> sorted(kept) == list(range(144)), dropped
     (True, 1)
     """
-    no_signal = {
-        day
-        for day, changes in _changes_by_day(one_epoch_changes(stretch)).items()
-        if _typical_departure(changes)[1] > NO_SIGNAL_PS
-    }
+    unusable = set()
+    for day, changes in _changes_by_day(one_epoch_changes(stretch)).items():
+        median_change, departure = _typical_departure(changes)
+        if departure > NO_SIGNAL_PS or abs(median_change) > FAR_OFF_FREQUENCY_PS:
+            unusable.add(day)
     kept = {
-        epoch: value for epoch, value in stretch.items() if _day(epoch) not in no_signal
+        epoch: value for epoch, value in stretch.items() if _day(epoch) not in unusable
     }
-    return kept, len(no_signal)
+    return kept, len(unusable)
 
 
 def to_epoch_start(stretch: Stretch, deltas: dict[int, float]) -> Stretch:
@@ -975,6 +989,31 @@ def measurement_noise(coefficients: Coefficients) -> float:
     return math.sqrt(coefficients[0] / 3.0) / PS
 
 
+def initial_innovation_scale(coefficients: Coefficients) -> float:
+    """Give sigma0: the size of a one-epoch innovation, ps.
+
+    Parameters
+    ----------
+    coefficients : (float, float, float, float)
+        a_-2, a_-1, a_0, a_1.
+
+    Returns
+    -------
+    float
+        sqrt(sigma_meas**2 + (T sigma_y,c(T))**2): the measurement noise and
+        the clock's own wander over one epoch together, so a clock whose
+        noise the measurement's cannot be told apart from still has one.
+
+    Examples
+    --------
+    >>> white_frequency = (4e-12 / 600) ** 2 * 600
+    >>> round(initial_innovation_scale((3e-24 * 9, white_frequency, 0.0, 0.0)), 9)
+    5.0
+    """
+    clock_wander = T * math.sqrt(clock_variance(coefficients, T)) / PS
+    return math.hypot(measurement_noise(coefficients), clock_wander)
+
+
 def _basis(tau: float) -> tuple[float, float, float, float]:
     """Give the model's four terms at tau, each with coefficient one.
 
@@ -1308,11 +1347,14 @@ class ClockResult(NamedTuple):
     rows : int
         The prepared rows used, over every reference.
     days_dropped : int
-        The days left out for holding no clock signal, over every reference.
-    sigma_meas : float
-        The measurement noise the fit found, ps: sigma0.
-    coefficients : (float, float, float, float)
-        The fitted model.
+        The days left out (see :func:`drop_unusable_days`), over every
+        reference.
+    sigma_meas : float or None
+        The measurement noise the fit found, ps; ``None`` with too few rows.
+    sigma0 : float or None
+        The initial innovation scale, ps; ``None`` with too few rows.
+    coefficients : (float, float, float, float) or None
+        The fitted model; ``None`` with too few rows.
     tau_c : float or None
         The crossover, s.
     M : int or None
@@ -1327,8 +1369,9 @@ class ClockResult(NamedTuple):
     references: tuple[str, ...]
     rows: int
     days_dropped: int
-    sigma_meas: float
-    coefficients: Coefficients
+    sigma_meas: float | None
+    sigma0: float | None
+    coefficients: Coefficients | None
     tau_c: float | None
     M: int | None
     gap: int | None
@@ -1353,15 +1396,15 @@ def prepare(
     -------
     (list of Stretch, int)
         The prepared values of the rows from each cold start up to the
-        next, split at every jump; and how many days were left out for
-        holding no clock signal.
+        next, split at every jump; and how many days were left out (see
+        :func:`drop_unusable_days`).
     """
     prepared = []
     days_dropped = 0
     for stretch in split_at_cold_starts(triple_rows):
-        with_signal, dropped = drop_no_signal_days(stretch)
+        usable, dropped = drop_unusable_days(stretch)
         days_dropped += dropped
-        cleaned = drop_outliers(to_epoch_start(with_signal, deltas))
+        cleaned = drop_outliers(to_epoch_start(usable, deltas))
         prepared += [
             remove_drift(piece) if drift else piece for piece in split_at_jumps(cleaned)
         ]
@@ -1374,6 +1417,7 @@ def characterize_clock(
     clock: str,
     references: Sequence[str],
     drift: bool,
+    min_rows: int,
 ) -> ClockResult:
     """Characterize one clock from its local triples against each reference.
 
@@ -1389,11 +1433,15 @@ def characterize_clock(
         The references with a local triple for it.
     drift : bool
         Whether its drift is taken off.
+    min_rows : int
+        The fewest prepared rows, over every reference, it needs for its
+        settings.
 
     Returns
     -------
     ClockResult
-        The clock's settings and the variances they came from.
+        The clock's settings and the variances they came from; with fewer
+        than ``min_rows`` prepared rows, its rows and days dropped alone.
     """
     per_reference = []
     rows = 0
@@ -1409,6 +1457,10 @@ def characterize_clock(
         rows += sum(len(stretch) for stretch in stretches)
         days_dropped += dropped
         per_reference.append(reference_variances(stretches))
+    if rows < min_rows:
+        return ClockResult(
+            clock, tuple(references), rows, days_dropped, *(None,) * 6, ()
+        )
     variances = clock_variances(per_reference)
     coefficients = fit_noise_model(variances)
     tau_c = crossover(coefficients)
@@ -1420,6 +1472,7 @@ def characterize_clock(
         rows=rows,
         days_dropped=days_dropped,
         sigma_meas=measurement_noise(coefficients),
+        sigma0=initial_innovation_scale(coefficients),
         coefficients=coefficients,
         tau_c=tau_c,
         M=M,
@@ -1466,24 +1519,30 @@ def format_result(result: ClockResult) -> str:
     Returns
     -------
     str
-        The clock, its references, rows, days dropped, sigma_meas, the four
-        coefficients, tau_c, M and G_max, separated by spaces; '-' for what
-        is missing.
+        The clock, its references, rows, days dropped, sigma_meas, sigma0,
+        the four coefficients, tau_c, M and G_max, separated by spaces; '-'
+        for what is missing.
 
     Examples
     --------
-    >>> print(format_result(ClockResult("hm1", ("mc1",), 10, 2, 3.0,
+    >>> print(format_result(ClockResult("hm1", ("mc1",), 10, 2, 3.0, 4.0,
     ...                                  (2.7e-23, 1e-22, 0.0, 1e-33),
     ...                                  1200.0, 2, 50, ())))
-    hm1 mc1 10 2 3.0 2.700e-23 1.000e-22 0.000e+00 1.000e-33 1200 2 50
+    hm1 mc1 10 2 3.0 4.0 2.700e-23 1.000e-22 0.000e+00 1.000e-33 1200 2 50
     """
+    coefficient_fields = (
+        ["-"] * 4
+        if result.coefficients is None
+        else [f"{coefficient:.3e}" for coefficient in result.coefficients]
+    )
     fields = [
         result.clock,
         ",".join(result.references),
         str(result.rows),
         str(result.days_dropped),
-        f"{result.sigma_meas:.1f}",
-        *(f"{coefficient:.3e}" for coefficient in result.coefficients),
+        "-" if result.sigma_meas is None else f"{result.sigma_meas:.1f}",
+        "-" if result.sigma0 is None else f"{result.sigma0:.1f}",
+        *coefficient_fields,
         "-" if result.tau_c is None else f"{result.tau_c:.0f}",
         "-" if result.M is None else str(result.M),
         "-" if result.gap is None else str(result.gap),
@@ -1492,8 +1551,8 @@ def format_result(result: ClockResult) -> str:
 
 
 REPORT_HEADER: Final[str] = (
-    "clock references rows days_dropped sigma_meas_ps a_minus_2 a_minus_1 a_0 a_1"
-    " tau_c_s time_constant gap_limit"
+    "clock references rows days_dropped sigma_meas_ps sigma0_ps a_minus_2"
+    " a_minus_1 a_0 a_1 tau_c_s time_constant gap_limit"
 )
 """The report's first line: what each field holds."""
 
@@ -1503,7 +1562,7 @@ def _characterize_one(job: ClockJob) -> ClockResult:
 
     Parameters
     ----------
-    job : (Path, str, str, tuple of str, bool)
+    job : (Path, str, str, tuple of str, bool, int)
         The arguments of :func:`characterize_clock`.
 
     Returns
@@ -1514,12 +1573,15 @@ def _characterize_one(job: ClockJob) -> ClockResult:
     return characterize_clock(*job)
 
 
-type ClockJob = tuple[Path, RfChannel, str, tuple[str, ...], bool]
+type ClockJob = tuple[Path, RfChannel, str, tuple[str, ...], bool, int]
 """The arguments of :func:`characterize_clock` for one clock."""
 
 
 def clock_jobs(
-    processed_path: Path, channel: RfChannel, three_state_prefixes: tuple[str, ...]
+    processed_path: Path,
+    channel: RfChannel,
+    three_state_prefixes: tuple[str, ...],
+    min_rows: int,
 ) -> list[ClockJob]:
     """Give the work for every clock with a local triple, in name order.
 
@@ -1531,12 +1593,15 @@ def clock_jobs(
         The RF channel.
     three_state_prefixes : tuple of str
         Name prefixes of the clocks that run with three states.
+    min_rows : int
+        The fewest prepared rows a clock needs for its settings.
 
     Returns
     -------
     list of ClockJob
         Each clock with its references, its drift taken off exactly when
-        its name starts with one of ``three_state_prefixes``.
+        its name starts with one of ``three_state_prefixes``, and
+        ``min_rows``.
     """
     return [
         (
@@ -1545,6 +1610,7 @@ def clock_jobs(
             clock,
             tuple(references),
             clock.startswith(three_state_prefixes),
+            min_rows,
         )
         for clock, references in sorted(local_triples(processed_path, channel).items())
     ]
@@ -1576,9 +1642,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--jobs", type=int, default=1, help="clocks characterized at once"
     )
+    parser.add_argument(
+        "--min-days",
+        type=int,
+        default=MIN_DAYS,
+        help="the fewest days of prepared rows a clock needs for its settings",
+    )
     cli_options = parser.parse_args(argv)
     jobs = clock_jobs(
-        cli_options.processed_path, cli_options.rf, tuple(cli_options.three_state)
+        cli_options.processed_path,
+        cli_options.rf,
+        tuple(cli_options.three_state),
+        cli_options.min_days * EPOCHS_PER_DAY,
     )
     print(REPORT_HEADER)
     if cli_options.jobs == 1:

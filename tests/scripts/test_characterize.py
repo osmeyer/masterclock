@@ -19,8 +19,11 @@ above, weighted by terms over m and the model's value squared, until it
 settles; the measurement noise comes from the fit's white phase term and
 never from the rms column; the crossover of the two noises sets M, at least
 one; the gap limit is the largest gap decycled with a five-sigma margin of
-the clock's own noise; and the script reads a characterization run's files
-and prints one line per clock, references left out.
+the clock's own noise; sigma0 is the size of a one-epoch innovation; a day
+whose median one-epoch change is above 25 ns is dropped as far off
+frequency; a clock with fewer than 30 days of prepared rows, or the number
+asked for, gets no settings; and the script reads a characterization run's
+files and prints one line per clock, references left out.
 
 The noise data are invented, from a seeded generator.
 """
@@ -104,7 +107,7 @@ def test_a_day_with_no_clock_signal_is_dropped() -> None:
             if epoch >= 2 * DAY
         }
     )
-    kept, dropped = characterize.drop_no_signal_days(stretch)
+    kept, dropped = characterize.drop_unusable_days(stretch)
     assert dropped == 1
     assert sorted(kept) == [*range(DAY), *range(2 * DAY, 3 * DAY)]
 
@@ -115,13 +118,24 @@ def test_a_noisy_clock_with_a_signal_is_kept() -> None:
     stretch = {
         epoch: 5_000.0 * epoch + generator.gauss(0.0, 5_000.0) for epoch in range(DAY)
     }
-    assert characterize.drop_no_signal_days(stretch) == (stretch, 0)
+    assert characterize.drop_unusable_days(stretch) == (stretch, 0)
+
+
+@pytest.mark.parametrize(("rate_ps", "dropped"), [(30_000.0, 1), (20_000.0, 0)])
+def test_a_day_far_off_frequency_is_dropped(rate_ps: float, dropped: int) -> None:
+    """Drop a day whose median one-epoch change is above 25 ns, and keep one below."""
+    stretch = {
+        epoch: rate_ps * epoch + value for epoch, value in noisy_ramp(DAY, 0.0).items()
+    }
+    kept, days = characterize.drop_unusable_days(stretch)
+    assert days == dropped
+    assert len(kept) == DAY * (1 - dropped)
 
 
 def test_a_day_that_cannot_be_judged_is_kept() -> None:
     """Keep a day with no two rows one epoch apart."""
     stretch = {0: 5.0, 2: 150_000.0, 4: 30.0}
-    assert characterize.drop_no_signal_days(stretch) == (stretch, 0)
+    assert characterize.drop_unusable_days(stretch) == (stretch, 0)
 
 
 # ------------------------------------------------------------------- step 4
@@ -469,6 +483,17 @@ def test_the_measurement_noise_comes_from_the_white_phase_term() -> None:
     assert characterize.measurement_noise((0.0, 1e-22, 0.0, 0.0)) == 0.0
 
 
+def test_sigma0_is_the_size_of_a_one_epoch_innovation() -> None:
+    """Give sqrt(sigma_meas**2 + (T sigma_y,c(T))**2), ps."""
+    coefficients = (3 * (10e-12) ** 2, (20e-12 / T) ** 2 * T, 0.0, 0.0)
+    assert characterize.initial_innovation_scale(coefficients) == pytest.approx(
+        math.hypot(10.0, 20.0)
+    )
+    assert characterize.initial_innovation_scale(
+        (0.0, (20e-12 / T) ** 2 * T, 0.0, 0.0)
+    ) == pytest.approx(20.0)
+
+
 def test_the_crossover_is_where_the_two_noises_meet() -> None:
     """Find tau_c with sqrt(3) sigma_meas 1e-12 / tau_c = sigma_y,c(tau_c)."""
     coefficients = (3 * (20e-12) ** 2, 1e-22, 1e-30, 1e-36)
@@ -531,6 +556,9 @@ CLOCKS: Final = ("hm1", "ox1")
 
 DAYS: Final = 2
 """How many days of data it holds."""
+
+ANY_ROWS: Final = 1
+"""A fewest prepared rows every invented clock has, so each gets its settings."""
 
 GAP_PAIR: Final = ("mc2", "hm1")
 """A pair the invented DAS does not measure for a few epochs."""
@@ -638,9 +666,9 @@ def test_the_rms_column_changes_nothing(
     assert das_processor_main(write_deployment(folder, rms=40)) == 0
     for clock, drift in (("hm1", False), ("ox1", True)):
         assert characterize.characterize_clock(
-            folder / "processed", "a", clock, REFERENCES, drift
+            folder / "processed", "a", clock, REFERENCES, drift, ANY_ROWS
         ) == characterize.characterize_clock(
-            processed_path, "a", clock, REFERENCES, drift
+            processed_path, "a", clock, REFERENCES, drift, ANY_ROWS
         )
 
 
@@ -707,15 +735,29 @@ def test_each_clock_is_characterized_from_both_references(
 ) -> None:
     """Use both local triples, sigma_meas from the fit, and give M and G_max."""
     result = characterize.characterize_clock(
-        processed_path, "a", "ox1", REFERENCES, drift=True
+        processed_path, "a", "ox1", REFERENCES, drift=True, min_rows=ANY_ROWS
     )
     assert result.references == REFERENCES
     assert result.rows > DAYS * 144
     assert result.days_dropped == 0
+    assert result.sigma_meas is not None
+    assert result.sigma0 is not None
     assert 1.0 < result.sigma_meas < 6.0
+    assert result.sigma0 > result.sigma_meas
     assert result.variances
     assert result.M is not None and result.M >= 1
     assert result.gap is not None
+
+
+def test_a_clock_with_too_few_rows_gets_no_settings(processed_path: Path) -> None:
+    """Fit nothing and give no settings below the fewest days of prepared rows."""
+    result = characterize.characterize_clock(
+        processed_path, "a", "hm1", REFERENCES, drift=False, min_rows=10**6
+    )
+    assert result.rows > 0
+    assert (result.sigma_meas, result.sigma0, result.coefficients) == (None, None, None)
+    assert (result.tau_c, result.M, result.gap) == (None, None, None)
+    assert characterize.format_result(result).split()[4:] == ["-"] * 9
 
 
 def test_the_report_has_a_line_per_clock(
@@ -724,39 +766,64 @@ def test_the_report_has_a_line_per_clock(
     """Print the header and one line per clock, in name order."""
     assert (
         characterize.main(
-            [str(processed_path), "--rf", "a", "--three-state", "ox", "--jobs", "1"]
+            [str(processed_path), "--rf", "a", "--three-state", "ox", "--jobs", "1",
+             "--min-days", "1"]
         )
         == 0
-    )
+    )  # fmt: skip
     report_lines = capsys.readouterr().out.splitlines()
     assert report_lines[0] == characterize.REPORT_HEADER
     assert [line.split()[0] for line in report_lines[1:]] == list(CLOCKS)
     assert all(line.split()[1] == "mc1,mc2" for line in report_lines[1:])
+    assert all("-" not in line.split()[4:] for line in report_lines[1:])
+
+
+def test_a_clock_needs_thirty_days_of_rows_unless_told_otherwise(
+    processed_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Give no settings to the invented clocks, two days each, by default."""
+    assert characterize.main([str(processed_path), "--rf", "a", "--jobs", "1"]) == 0
+    report_lines = capsys.readouterr().out.splitlines()[1:]
+    assert len(report_lines) == len(CLOCKS)
+    assert all(line.split()[4:] == ["-"] * 9 for line in report_lines)
 
 
 def test_clocks_are_characterized_in_parallel_alike(
     processed_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Print the same report from two processes as from one."""
-    characterize.main([str(processed_path), "--rf", "a", "--jobs", "1"])
+    characterize.main(
+        [str(processed_path), "--rf", "a", "--jobs", "1", "--min-days", "1"]
+    )
     one_process = capsys.readouterr().out
-    characterize.main([str(processed_path), "--rf", "a", "--jobs", "2"])
+    characterize.main(
+        [str(processed_path), "--rf", "a", "--jobs", "2", "--min-days", "1"]
+    )
     assert capsys.readouterr().out == one_process
 
 
 def test_drift_is_taken_off_the_three_state_clocks_only(processed_path: Path) -> None:
     """Mark a clock for drift removal exactly when its name has a given prefix."""
-    jobs = characterize.clock_jobs(processed_path, "a", ("ox",))
-    assert [(job[2], job[3], job[4]) for job in jobs] == [
-        ("hm1", REFERENCES, False),
-        ("ox1", REFERENCES, True),
+    jobs = characterize.clock_jobs(processed_path, "a", ("ox",), ANY_ROWS)
+    assert [(job[2], job[3], job[4], job[5]) for job in jobs] == [
+        ("hm1", REFERENCES, False, ANY_ROWS),
+        ("ox1", REFERENCES, True, ANY_ROWS),
     ]
-    assert not any(job[4] for job in characterize.clock_jobs(processed_path, "a", ()))
+    assert not any(
+        job[4] for job in characterize.clock_jobs(processed_path, "a", (), ANY_ROWS)
+    )
 
 
 def test_one_clock_is_characterized_from_one_argument(processed_path: Path) -> None:
     """Give a pool of processes the same result as a direct call."""
-    job: characterize.ClockJob = (processed_path, "a", "hm1", REFERENCES, False)
+    job: characterize.ClockJob = (
+        processed_path,
+        "a",
+        "hm1",
+        REFERENCES,
+        False,
+        ANY_ROWS,
+    )
     assert characterize._characterize_one(job) == characterize.characterize_clock(*job)
 
 
@@ -778,6 +845,6 @@ def test_the_script_runs_as_a_program(
 def test_a_result_with_nothing_fitted_shows_dashes() -> None:
     """Write '-' for a missing crossover, time constant and gap limit."""
     result = characterize.ClockResult(
-        "hm9", ("mc1",), 0, 0, 0.0, (0.0, 0.0, 0.0, 0.0), None, None, None, ()
+        "hm9", ("mc1",), 0, 0, 0.0, 0.0, (0.0, 0.0, 0.0, 0.0), None, None, None, ()
     )
     assert characterize.format_result(result).split()[-3:] == ["-", "-", "-"]

@@ -6,32 +6,40 @@ two, and a 1-state series passes its measurement through; the prediction
 moves the last row's state on by one epoch and adds the steering input,
 with the phase exact; a dormant or missing last row gives no prediction;
 the update adds the gains times the innovation, the phase exact, each
-model's gains worked out once and refused each time they do not exist; and a
+model's gains worked out once and refused each time they do not exist, as
+is a time constant on one state, none on two or three, or another model;
+an innovation passed as a float as well gives the same state and row; and a
 noise-free ramp or parabola is followed to within 1 ps, whether the phase
 is kept exact or each row stores it in whole femtoseconds.
 
-The row lifecycle: a row starts from the last row moved on one epoch, or
-dormant in segment 0 for a new series, or in the segment after its last
-row's for one that starts again; an accepted row holds the update,
-clears the counters and the buffer, and moves the innovation scale by the
-innovation before the update, never below its floor; a held row (P, X or R)
-stores the prediction and keeps the scale, the counters and the buffer, one
-more epoch since an accept; a held row past the gap limit, or with no
-prediction, is dormant, with no state, and is not written when it had no
-measurement; a cold start begins segment + 1 at
-the measurement with sigma0; a warm segment start keeps the state and the
-step offset and takes the new time constants, never a new model; a row of a
-2- or 3-state series is unsettled while its segment is younger than five
-time constants, a dormant or 1-state row never; flags are written in the
-order ARXPDSNU; and a 1-state series passes its measurements through.
+The row lifecycle: a draft has a row's fields, in a row's order; a row
+starts from the last row moved on one epoch, or dormant in segment 0 for a
+new series, or in the segment after its last row's for one that starts
+again; a slip-corrected measurement marks its row S; an accepted row holds
+the update, clears the counters and the buffer, and moves the innovation
+scale by the innovation before the update, never below its floor, and a
+draft with no innovation scale is refused; a held row (P, X or R) stores the
+prediction and keeps the scale, the counters and the buffer, one more epoch
+since an accept; a held row past the gap limit, or with no prediction, is
+dormant, with no state, and is not written when it had no measurement; a
+cold start begins segment + 1 at the measurement with sigma0; a warm
+segment start keeps the state and the step offset and takes the new time
+constants, never a new model; a row of a 2- or 3-state series is unsettled
+while its segment is younger than five time constants, a dormant or 1-state
+row never; flags are written in the order ARXPDSNU; a finished draft that
+is not a valid row is refused; and a 1-state series passes its
+measurements through.
 
-Steps: the gate passes an innovation of at most five innovation scales and
-an rms up to the pair's limit; a counted reject enters the buffer, which
-keeps three; three rejects that agree within three innovation scales are a
-phase step, accepted in the same segment with the step added to the step
-offset; three that lie on a line within three scales are a frequency step,
-accepted in a new warm segment with the prediction moved onto the line; a
-1-state series takes only phase steps.
+Steps: the gate passes an innovation of at most five innovation scales,
+compared as exact fractions, and an rms up to the pair's limit, and refuses
+a scale that is not finite; a counted reject enters the buffer, which keeps
+three; three rejects that agree within three innovation scales are a phase
+step, accepted in the same segment with the mean innovation, rounded half
+to even, added to the step offset; three that lie on a line within three
+scales, fitted against the rejects' own epochs, are a frequency step,
+accepted in a new warm segment with the prediction moved onto the line;
+classifying needs three rejects, and a step a series with an innovation
+scale; a 1-state series takes only phase steps.
 
 Acquisition: a series with no valid state buffers its measurements and
 cold-starts from the third of three from consecutive epochs whose second
@@ -40,9 +48,13 @@ counted rejects reaching N_break make a series dormant; and the last
 buffered measurement is what a dormant pair is decycled against.
 
 The filter step: a configuration change starts a warm segment before the
-measurement is handled, and shares the row with its outcome; then every
-path of the decision flow gives its row, a component cold start makes a
-triple dormant, and the result says whether the row cold-started.
+measurement is handled, and shares the row with its outcome, though not for
+a dormant series, and unchanged settings start none; a measurement is a
+pair's, with an rms, or a triple's, with sigma_dd and no rms test, and that
+value is the floor of the innovation scale; a prediction for a series with
+no scale is refused; then every path of the decision flow gives its row, a
+component cold start makes a triple dormant, and the result says whether
+the row cold-started.
 
 The classification and acquisition limits hold exactly at their values, the
 slope is fitted as the design writes it, gains exist for M = 1, the drift is
@@ -223,7 +235,7 @@ def test_gains_refuse_a_model_and_time_constant_that_do_not_belong(
 def test_exact_gains_are_the_gains_with_the_phase_gain_exact(
     filter_states: int, M: float | None
 ) -> None:
-    """Give g as the fraction it holds, and h/T and 2k/T**2 as gains gives them."""
+    """Give g as the fraction it holds, and h/T and 2k/T**2 as estimator.gains does."""
     g, h_over_t, two_k_over_t2 = estimator.gains(filter_states, M)
     phase_gain, *other_gains = estimator.exact_gains(filter_states, M)
     assert isinstance(phase_gain, mpq)
@@ -496,7 +508,7 @@ def moved_on(previous_row: Row, **draft_changes: object) -> estimator.RowDraft:
 
 
 def test_a_draft_has_the_fields_of_a_row() -> None:
-    """Give RowDraft exactly Row's fields, in the same order, so finish fits."""
+    """Give RowDraft exactly Row's fields, in the same order, so all reach the row."""
     field_names = [
         draft_field.name for draft_field in dataclasses.fields(estimator.RowDraft)
     ]
@@ -889,7 +901,7 @@ def test_a_cold_start_begins_a_segment_from_the_measurement(
 
 
 def test_a_configuration_change_starts_a_warm_segment() -> None:
-    """Carry X- and step_offset into segment + 1 with the new M: N U + outcome (8.7)."""
+    """Carry the state and step_offset into segment + 1, the new M, N U (8.7)."""
     previous_row = last_row(step_offset=25)
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
@@ -1414,7 +1426,7 @@ def test_the_buffer_keeps_the_newest_three_measurements() -> None:
 
 
 def test_a_missing_epoch_empties_the_acquisition_buffer() -> None:
-    """Write D P with an empty buffer for a dormant series with no measurement."""
+    """Give D P with an empty buffer for a dormant series with no measurement."""
     row = estimator.hold(
         moved_on(dormant_row(1_000.0, 2_000.0)), None, "P", make_series_params()
     )
@@ -1443,7 +1455,7 @@ def test_inconsistent_outliers_make_a_series_dormant_at_n_break() -> None:
 
 
 def test_a_dormant_series_acquires_across_a_wrap() -> None:
-    """Stay dormant through scatter, empty on a gap, cold-start on steady (U25)."""
+    """Stay dormant on scatter, empty on a gap, start on steady readings (U25)."""
     series_params = make_series_params(sigma0=5.0)
     previous_row = dormant_row()
     true_phases = [PHASE_MAX - 40_000 + 60_000 * k for k in range(4)]

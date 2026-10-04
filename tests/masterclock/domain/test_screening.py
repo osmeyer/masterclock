@@ -12,8 +12,9 @@ estimate; closure fails for a triangle whose two-way innovations do not sum
 to zero within five combined scales, and a link is excluded, both ways,
 when it is in every failing triangle and no passing one; pairs without a
 measurement and a prediction are neither tested nor excluded, nor are pairs
-an earlier test excluded tested again; and every test that fails gives an
-event.
+an earlier test excluded tested again; every test that fails gives an
+event; and a pair given an innovation but no scale is refused with a
+FilterError, logged as raised.
 
 Each limit holds exactly at its value, scales combine as the design writes
 them, and a triangle that cannot be tested does not stop the rest.

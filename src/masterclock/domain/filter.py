@@ -124,8 +124,8 @@ def gains(filter_states: int, M: float | None) -> tuple[float, float, float]:
 def exact_gains(filter_states: int, M: float | None) -> tuple[mpq, float, float]:
     """Give the gains of :func:`gains`, the phase gain as the fraction it holds.
 
-    Each model's gains are worked out once in a run and the same values
-    given after, since every accepted row of a series uses them.
+    Each model's gains are worked out once in each process and the same
+    values given after, since every accepted row of a series uses them.
 
     Parameters
     ----------
@@ -168,9 +168,9 @@ def predict(last_row: Row | None, u: tuple[mpq, float]) -> State | None:
     -------
     State or None
         Phi X + u: the phase moved on by y T + d T**2 / 2 and u_x, exactly;
-        the rate by d T and u_y; the drift kept. A 1-state row keeps its
-        phase and has no rate; a 2-state row has no drift. ``None`` when
-        there is no last row, or it is dormant.
+        the rate by d T and u_y; the drift kept. A 1-state row's phase
+        moves by u_x alone and its rate is 0; a 2-state row has no drift.
+        ``None`` when there is no last row, or it is dormant.
     """
     if last_row is None or "D" in last_row.flags:
         return None
@@ -306,9 +306,10 @@ def carry(
     RowDraft
         For a new series: dormant, with no state, in segment 0, or one
         after ``last_segment`` when it is given, every counter 0, the model
-        and time constants of ``series_params``. Otherwise the last row
-        moved on to ``epoch_start``, with no innovation, one more epoch in
-        its segment and no flags. S when ``slip``.
+        and time constants of ``series_params``. Otherwise the last row's
+        fields, its state unchanged and its datetime set to ``epoch_start``,
+        with no innovation, one more epoch in its segment and no flags. S
+        when ``slip``.
 
     Examples
     --------
@@ -584,7 +585,8 @@ def accept(
         The updated state, x in whole femtoseconds; the innovation; the
         innovation scale moved by the innovation, as
         sqrt(max((1 - w) scale**2 + w innovation**2, floor**2)) with
-        w = 1/M_sigma; the counters and the buffer cleared.
+        w = 1/M_sigma; the consecutive rejects and the epochs since an
+        accept set to 0, and the buffer emptied.
 
     Raises
     ------
@@ -658,7 +660,12 @@ K_OUT: Final[float] = 5.0
 """How many innovation scales wide the gate is, either way."""
 
 K_STEP: Final[float] = 3.0
-"""How many innovation scales three rejects may stray from a step and show it."""
+"""How many innovation scales each of three rejects may lie from a step's fit.
+
+The fit is the rejects' mean for a phase step, their fitted line for a
+frequency step. The rejects show the step only when every one of them lies
+less than this many scales from the fit.
+"""
 
 _STEP_REJECTS: Final[int] = 3
 """How many consecutive counted rejects a step is looked for in."""
@@ -940,8 +947,9 @@ def accept_step(
     Raises
     ------
     FilterError
-        If the draft has no innovation scale, or the finished row breaks a
-        rule of :class:`Row`.
+        If the draft has no innovation scale, ``series_params`` is for
+        another model than the series' (on a frequency step), or the
+        finished row breaks a rule of :class:`Row`.
     """
     if draft.consecutive_rejects < _STEP_REJECTS:
         return None
@@ -999,11 +1007,13 @@ def acquire(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     Parameters
     ----------
     draft : RowDraft
-        The row as built so far, of a series with no prediction, its buffer
-        holding the measurements it has gathered, as (epoch, z).
+        The row as built so far, of a series with no prediction or one that
+        has just reached ``n_break`` counted rejects, its buffer holding the
+        measurements it has gathered, as (epoch, z).
     z : int
-        The measurement at the epoch, ps, decycled against the last buffered
-        one (see :func:`anchor_of`).
+        The measurement at the epoch, ps. A pair's is decycled against its
+        prediction, or, with none, against the last buffered measurement
+        (see :func:`anchor_of`).
     series_params : SeriesParams
         The settings in force, whose ``sigma0`` sets the test.
 
@@ -1014,7 +1024,8 @@ def acquire(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
         with ``z`` added and the newest
         :data:`~masterclock.domain.series.MAX_REJECTS` kept, holds three
         measurements from consecutive epochs whose second difference
-        z3 - 2 z2 + z1 is at most 5 sqrt(6) sigma0 either way (design 13.3).
+        z3 - 2 z2 + z1 is at most :data:`_ACQUIRE_LIMIT` sigma0 either way
+        (design 13.3).
         Otherwise a dormant R row keeping that buffer, with no counted
         rejects and epochs since an accept as they were.
 
@@ -1284,15 +1295,17 @@ def _gate(
     Row
         Accepted when the measurement passes the gate and is not excluded.
         Held as X when it is excluded inside the gate, not counted.
-        Otherwise a counted reject, which may show a step (see
-        :func:`accept_step`), make the series dormant when the rejects
-        reach ``n_break`` (the measurement then starts its acquisition
-        buffer), or is held as R.
+        Otherwise a counted reject: accepted after a step when the rejects
+        show one (see :func:`accept_step`); else, once the rejects reach
+        ``n_break``, a dormant row whose measurement starts the acquisition
+        buffer; else held as R.
 
     Raises
     ------
     FilterError
-        If a row breaks a rule of :class:`Row`.
+        If the draft has no innovation scale, ``series_params`` is for
+        another model than the series', or a row breaks a rule of
+        :class:`Row`.
     """
     innovation = measurement.z - prediction.x
     nu = float(innovation)

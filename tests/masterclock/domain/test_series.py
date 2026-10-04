@@ -5,10 +5,10 @@ settings hold what they are given; a row's flags are letters of ARXPDSNU in
 that order, with exactly one outcome, a dormant row never accepted and an
 unsettled row never dormant or one-state; a dormant row has no state and
 every other row a whole one, with no rate or drift where its model has
-none; at most three rejects are held, oldest first; a time constant is held
-exactly when the model has more than one state; every float is finite and
-no counter below 0; a row gives its state unless it is dormant; and every
-type is frozen.
+none; a row without a measurement (P) has no innovation; at most three
+rejects are held, oldest first; a time constant is held exactly when the
+model has more than one state; every float is finite and no counter below
+0; a row gives its state unless it is dormant; and every type is frozen.
 
 A row is built unchecked, and check_row says why it refuses one, logging
 nothing.
@@ -152,7 +152,7 @@ def test_settings_hold_what_they_are_given() -> None:
 def test_a_row_of_each_flag_pattern_builds(
     flags: str, field_changes: dict[str, object]
 ) -> None:
-    """Pass every outcome the measurement table allows."""
+    """Pass every flag pattern check_row allows, unwritten D and P rows included."""
     assert checked_row(flags=flags, **field_changes).flags == flags
 
 

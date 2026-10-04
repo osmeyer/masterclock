@@ -5,9 +5,11 @@ the literal None sets no value where a setting accepts it and is text where
 it does not, and a setting neither source gives is None, or a usage error
 when it is required; a file naming anything the program does not read, a
 DEFAULT section included, is refused, and so is a value over more than one
-line; a file that cannot be read or parsed is a ConfigError; a program's
-table of settings names each setting once; and the logging settings refuse
-unknown fields, relative paths, and number text the command line refuses.
+line; a value may name another entry of its section; a file that cannot be
+read or parsed is a ConfigError; a program's table of settings names each
+setting once; and the logging settings are frozen, need every field, refuse
+unknown fields, relative paths, and number text the command line refuses,
+and take only the level names the command line takes.
 
 A refused relative path is named, and a value over several lines is judged
 as written, so the entry holding the lines is named.
@@ -40,7 +42,10 @@ PROGRAM_SETTINGS = (
     config.Setting("channel", "run", "input", "channel", "--channel", False, True),
     config.Setting("label", "run", "input", "label", "--label", False),
 )
-"""An invented program's settings: two groups, two sections, both kinds."""
+"""An invented program's settings, over more than one group and section.
+
+Some are required and some not, and some accept None and some do not.
+"""
 
 
 def cli_options(**given_options: object) -> types.SimpleNamespace:

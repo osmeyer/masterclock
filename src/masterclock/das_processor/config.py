@@ -168,9 +168,10 @@ separate files and their runs may overlap.
 JOURNAL_FILE_TEMPLATE: Final[str] = "das_processor_{rf}.writing"
 """The name of an RF channel's write journal in ``processed_path``.
 
-It is there only while the day's rows are being written, and holds the
-first epoch being written, so a run that finds it knows a write stopped
-part way and rolls every file back to before that epoch.
+It is written at the run's first write and deleted once the run's final
+write has flushed every file. It holds the first epoch the run writes, so a
+run that finds it knows an earlier run stopped before its files were all
+flushed, and rolls every file back to before that epoch.
 """
 
 
@@ -225,14 +226,16 @@ class ProcessedConfig(BaseModel):
     processed_path : Path
         Absolute path under which processed results are written: each kind
         of file in a subdirectory of its own (:attr:`meas_path`,
-        :attr:`ddiff_path`), with the run lock directly in it beside them.
+        :attr:`ddiff_path`), with the run lock and the write journal
+        directly in it beside them.
     start_from_mjd : DataMjd
         MJD to start processing from when there are no processed files to
         read a previous measurement from; once there are, it has no effect.
         ``None`` becomes :data:`~masterclock.das_processor.cli.START_FROM_MJD`.
     clock_config_file : Path
-        Absolute path of the YAML file giving each clock's estimator
-        parameters and each pair's RMS limit.
+        Absolute path of the YAML clock configuration: each clock's
+        estimator parameters and location, the pairs' RMS limits, and the
+        clocks to ignore.
     num_workers : PositiveInt or None
         How many worker processes work each epoch's series, or ``None`` to
         work them in the main process alone. Text is read as
@@ -322,8 +325,8 @@ def _check_input_file(input_file: Path, setting_place: str) -> None:
     Raises
     ------
     ConfigError
-        If ``input_file`` is not a regular file, or a link to one, or cannot be
-        opened for reading.
+        If ``input_file`` is neither a regular file nor a link to one, or
+        cannot be opened for reading.
 
     Notes
     -----
@@ -423,7 +426,8 @@ def build_logging_config(cli_options: CliOptions) -> LoggingConfig:
     ------
     ConfigError
         If the INI file cannot be read or parsed, names anything the
-        program does not read, or a logging value is invalid.
+        program does not read, or gives a value on more than one line, or
+        a logging value is invalid.
     MissingSettingsError
         If a required logging setting is given by neither source.
     """
@@ -441,7 +445,7 @@ def build_logging_config(cli_options: CliOptions) -> LoggingConfig:
 def build_config(cli_options: CliOptions) -> AppConfig:
     """Merge and validate the effective configuration.
 
-    Reads the INI file named by ``options.config_file``, if any, overlays the
+    Reads the INI file named by ``cli_options.config_file``, if any, overlays the
     command-line options (the command line wins), checks that every required
     setting was given by at least one source, and validates the result.
 
@@ -458,8 +462,9 @@ def build_config(cli_options: CliOptions) -> AppConfig:
     Raises
     ------
     ConfigError
-        If the INI file cannot be read or parsed, or a merged value is
-        invalid.
+        If the INI file cannot be read or parsed, names anything the
+        program does not read, or gives a value on more than one line, or
+        a merged value is invalid.
     MissingSettingsError
         If a required setting is given by neither source. A
         :class:`~masterclock.app.exceptions.ConfigError` itself, so an

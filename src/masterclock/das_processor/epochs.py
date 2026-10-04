@@ -113,7 +113,7 @@ def format_epoch(
     epoch_start : datetime
         The mark (naive datetimes are assumed UTC). It is written in UTC
         whatever its timezone (see
-    :func:`~masterclock.app.timeutil.ensure_utc`).
+        :func:`~masterclock.app.timeutil.ensure_utc`).
     mjd : float
         The same instant as a Modified Julian Day. Given rather than worked
         out here, so what is rendered is the value its caller holds.

@@ -7,11 +7,13 @@ options and take no None; there is no option for a time-constants file; an MJD
 falls on a day a data file can cover; the count of epochs and the MJD to
 redo from are command line only and take no None; the RF channel is one of
 the channels; the MJD to start from when none is given is 59500 and the
-help says so; no arguments,
-a bad argument and a usage error found after parsing all print the full help
-and exit with status 2; --help and --version exit with status 0, a single
-argument read from sys.argv as given; and the help reads word for word as
-written.
+help says so; the options model refuses unknown fields and cannot be
+changed once built; no arguments, a bad argument and a usage error found
+after parsing all print the full help and exit with status 2; a list given
+to parse_args is judged empty or not by itself, whatever sys.argv holds;
+--help and --version exit with status 0; a single argument on the command
+line, such as --version, is read from sys.argv as given; and the help reads
+word for word as written.
 """
 
 import sys
@@ -82,8 +84,9 @@ options:
                         config file's [PROCESSED] start_from_mjd (default: use
                         the config file, else MJD 59500)
   --clock-config-file PATH
-                        path to the YAML file giving each clock's estimator
-                        parameters and each pair's RMS limit, overriding the
+                        path to the YAML clock configuration (each clock's
+                        estimator parameters and location, the pairs' RMS
+                        limits, and the clocks to ignore), overriding the
                         config file's [PROCESSED] clock_config_file (default:
                         use the config file)
   --num-workers N       number of worker processes to work each epoch's
@@ -138,7 +141,7 @@ def test_every_option_is_read_as_given() -> None:
 
 
 def test_an_option_left_out_defers_to_the_config_file() -> None:
-    """Leave every setting left out UNSET, and the three others None."""
+    """Leave each setting not given UNSET, and those with no config-file entry None."""
     cli_options = cli.parse_args(["--rf", "a"])
     assert cli_options.model_dump() == {
         "config_file": None,

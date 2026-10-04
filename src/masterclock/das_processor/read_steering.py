@@ -13,8 +13,9 @@ file before that epoch's DAS lines are.
 A reference with no file has never been steered. A file that is there must
 be sound in every line: one that cannot be read, a line that does not
 parse, and a line earlier than the one before it are each refused, wherever
-the line lies, since the file can no longer be trusted. As in the DAS files,
-numbers are plain decimals only, and a last line with no newline makes the
+the line lies, since the file can no longer be trusted. The MJD is digits, a
+point and digits; a change is a finite decimal number, signed or not, with an
+exponent or not. As in the DAS files, a last line with no newline makes the
 file damaged. Each event read is checked by a pydantic model
 (:class:`SteerEventFields`) before the program uses it.
 
@@ -51,7 +52,7 @@ _MJD: Final[re.Pattern[str]] = re.compile(r"[0-9]+\.[0-9]+")
 _CHANGE: Final[re.Pattern[str]] = re.compile(
     r"[+-]?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
 )
-"""How a phase or rate change is written: a plain decimal, with an exponent or not."""
+"""How a phase or rate change is written: a decimal, signed or not, exponent or not."""
 
 _COLUMNS: Final[int] = 3
 """How many columns a line has."""
@@ -138,7 +139,7 @@ class SteeringFiles:
     def events(
         self, mc: str, window_start: datetime, window_end: datetime
     ) -> tuple[SteerEvent, ...]:
-        """Give a reference's steering events in (after, through] (design 5.6).
+        """Give a reference's events in (window_start, window_end] (design 5.6).
 
         The lines appended to the file since it was last read are read and
         checked first; a file replaced, or shorter than what was read, is
@@ -358,7 +359,7 @@ def _parse_steering_line(line_place: str, line: str) -> SteerEvent:
     ------
     DataFileError
         If the line is not three columns of an MJD on a data day and two
-        finite plain decimals.
+        finite decimal numbers.
     """
     line_columns = line.split()
     if len(line_columns) != _COLUMNS:
@@ -391,7 +392,8 @@ def _parse_change(line_place: str, column_text: str) -> float:
     Raises
     ------
     DataFileError
-        If the column is not a plain decimal, or its value is not finite.
+        If the column is not a decimal number as :data:`_CHANGE` spells it,
+        or its value is not finite.
     """
     change = float(column_text) if _CHANGE.fullmatch(column_text) else math.nan
     if not math.isfinite(change):

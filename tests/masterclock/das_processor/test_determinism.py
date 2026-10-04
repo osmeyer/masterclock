@@ -54,7 +54,7 @@ CLOCK_CONFIG_YAML: Final = (
 """An invented clock configuration for every clock the deployments use."""
 
 type Deployment = dict[str, object]
-"""An invented deployment: its references, clocks, epochs and readings."""
+"""An invented deployment: its references, clocks, epochs, readings and steering."""
 
 
 @st.composite

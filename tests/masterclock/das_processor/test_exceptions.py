@@ -1,9 +1,10 @@
 """Tests for src/masterclock/das_processor/exceptions.py.
 
 The rules covered: every exception the module defines descends from
-MasterClockError, so one clause catches all of them; and every reason for
+MasterClockError, so one clause catches all of them; every reason for
 refusing a line names its own kind, distinct from every other, and the base
-for them names none.
+for them names none; and each reason's word is fixed, since logs are
+searched by it.
 """
 
 import inspect

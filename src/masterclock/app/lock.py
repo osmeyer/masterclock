@@ -7,10 +7,10 @@ would be written twice. So a run holds its lock for its whole duration, and a se
 aborts at once with a :class:`~masterclock.app.exceptions.RunLockError`
 naming the lock and its holder.
 
-The name comes from the caller, and it is the name that decides who excludes
-whom: runs that would write the same files ask for the same one, and runs
-whose outputs are disjoint ask for different ones. Nothing here knows which
-program is running or how that program divides its work.
+The name comes from the caller, and the name alone sets which runs exclude
+each other: runs that would write the same files ask for the same one, and
+runs whose outputs are disjoint ask for different ones. Nothing here depends
+on which program is running or how that program divides its work.
 
 The lock is an :func:`fcntl.flock` exclusive lock on that file, which sits
 directly in the directory it is given rather than in any subdirectory of it,
@@ -59,8 +59,8 @@ class RunLock:
     Parameters
     ----------
     lock_directory : Path
-        The directory the lock file lives in, which is the parent of the
-        output subdirectories rather than one of them.
+        The directory the lock file lives in, directly rather than in any
+        subdirectory of it.
     lock_file_name : str
         What the lock file is called: a plain file name, so the file sits
         directly in ``lock_directory``. Two runs exclude each other exactly when

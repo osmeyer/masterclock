@@ -5,7 +5,7 @@ double-difference file. Each line of a file, header lines included, is the
 same width W, worked out from the file's column table, and ends with a
 newline. The header says in words what the file is and what each column
 holds, and warns that only das_processor may write the file; the program
-never reads it back.
+never reads the header back.
 
 A row is the values of one epoch, each right-justified in a column exactly
 as wide as its values need and separated by ``", "``; ``-`` marks an empty
@@ -420,6 +420,8 @@ def _named(file_kind: FileKind, series_key: SeriesKey) -> str:
     ----------
     file_kind : {'meas', 'ddiff'}
         The kind of file.
+    series_key : (str, str) or (str, str, str)
+        The series; its length must fit the kind of file.
 
     Returns
     -------
@@ -1184,6 +1186,14 @@ def _meas_record(line: str) -> MeasRecord:
     -------
     MeasRecord
         The record.
+
+    Raises
+    ------
+    ValueError
+        If a field is not of its kind, or the fields make no valid row or
+        measurement.
+    DataFileError
+        If the measurement does not belong with the row.
     """
     field_texts = _fields(line, MEAS_COLUMNS)
     row = _row(datetime.fromisoformat(_given(field_texts[0])), None, field_texts[8:])
@@ -1204,6 +1214,14 @@ def _ddiff_record(line: str) -> DdiffRecord:
     -------
     DdiffRecord
         The record.
+
+    Raises
+    ------
+    ValueError
+        If a field is not of its kind, or the fields make no valid row or
+        measurement.
+    DataFileError
+        If the measurement does not belong with the row.
     """
     field_texts = _fields(line, DDIFF_COLUMNS)
     z_text, innovation_text, sigma_text, components_used = field_texts[2:6]
@@ -1385,7 +1403,8 @@ class FileCheck(NamedTuple):
     good_through : datetime or None
         The epoch of its last good row; ``None`` when it holds none.
     damaged : bool
-        Whether it holds anything but its header and good whole rows.
+        Whether it holds no whole row, or anything but its header and good
+        whole rows.
     """
 
     good_through: datetime | None
@@ -1438,8 +1457,9 @@ def check_file(
     Returns
     -------
     FileCheck
-        For a sound file, its length its header plus whole rows and its
-        last row good, that row's epoch, from one short read. Otherwise the
+        For a sound file, one whose length is its header plus whole rows
+        and whose last row is good: that row's epoch, found with one short
+        read, and ``damaged`` false. Otherwise the
         epoch of the row before its first line that is not a good row, or
         ``None`` when it holds no whole row or, after a stopped write, when
         its first row is not good; a damaged file is logged once at ERROR,
@@ -1630,6 +1650,9 @@ class DayBuffer:
     ----------
     channel : {'a', 'b'}
         The RF channel, whose name a new file's header gives.
+    journal : Path or None, optional
+        The write journal kept from the first write to the final one (see
+        :func:`write_buffer`); no journal is kept when ``None``.
 
     Attributes
     ----------
@@ -1850,9 +1873,9 @@ def write_buffer(day_buffer: DayBuffer) -> None:
     DataFileError
         Before any file is opened, if a buffered text is not ASCII, an
         existing file is not a regular file this process can write or its
-        length is not its header plus whole rows, a new file's directory is
-        not one this process can write into or a file of that name is
-        already there, a write journal is already there at the first write,
+        length is not its header plus one or more whole rows, a new file's
+        directory is not one this process can write into, a write journal
+        is already there at the first write,
         or the free space does not cover every byte to be written; nothing
         is changed then. While writing, if the device fails.
 
@@ -2008,7 +2031,7 @@ def _check_existing(data_file: Path, file_kind: FileKind) -> None:
     ------
     DataFileError
         If it is not a regular file, this process cannot write it, or its
-        length is not its header plus whole rows.
+        length is not its header plus one or more whole rows.
     """
     if data_file.is_symlink() or not data_file.is_file():
         _fail(f"data file {data_file} is not a regular file")
@@ -2359,7 +2382,7 @@ def ensure_archives(processed_path: Path) -> None:
     ------
     DataFileError
         If a directory cannot be made, or its name is taken by something
-        that is not a directory.
+        that is not a directory, or the device fails.
 
     Notes
     -----
@@ -2396,7 +2419,7 @@ def make_processed_path(processed_path: Path) -> None:
     ------
     DataFileError
         If a directory cannot be made, or its name is taken by something
-        that is not a directory.
+        that is not a directory, or the device fails.
 
     Notes
     -----

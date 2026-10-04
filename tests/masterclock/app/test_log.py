@@ -3,11 +3,14 @@
 The rules covered: importing the module registers the TRACE level and the
 project's logger class; every record is written on one line, stamped with
 its UTC time and MJD, except for a traceback or a stack; trace and todo log
-at their levels, with no stack unless one is asked for, and name their real
-caller, a check that does not run under mutmut, whose wrapper around each
-function adds a frame; get_logger refuses a logger of the wrong class;
+at their levels, with no stack unless one is asked for, take the keywords
+the standard methods take, and name their real caller, a check that does
+not run under mutmut, whose wrapper around each function adds a frame;
+get_logger refuses a logger of the wrong class, the root logger included;
 configure_logging attaches a stream handler, and a file handler that rotates
-at midnight UTC, and replaces what its previous call attached.
+at midnight UTC in a directory it makes when missing, and replaces what its
+previous call attached; and a log file that cannot be made raises OSError
+with the new stream handler still attached.
 """
 
 import io

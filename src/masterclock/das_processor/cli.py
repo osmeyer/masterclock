@@ -4,9 +4,9 @@ It is read with :mod:`argparse` by the rules every program shares (see
 :mod:`masterclock.app.cli`) and validated into the frozen
 :class:`CliOptions`, since the command line is an external boundary.
 
-Every option but three overrides the configuration file's entry of the
-same name, and one left out is :data:`~masterclock.app.cli.UNSET`,
-deferring to the file. ``--config-file`` names that file rather than
+Each option that has a configuration-file entry of the same name overrides
+it, and one left out is :data:`~masterclock.app.cli.UNSET`, deferring to the
+file. ``--config-file`` names that file rather than
 overriding an entry in it. ``--steps`` and ``--redo-from-mjd`` back no
 entry: how many epochs to process and whether to reprocess are ways of
 running the program once, not properties of the deployment, so they have
@@ -128,9 +128,10 @@ class CliOptions(BaseModel):
         was omitted (defer to the config file, and failing that
         :data:`START_FROM_MJD`).
     clock_config_file : Path or Unset
-        Absolute path to the YAML file giving each clock's estimator
-        parameters and each pair's RMS limit, or :data:`UNSET` when the
-        option was omitted (defer to the config file).
+        Absolute path to the YAML clock configuration (each clock's
+        estimator parameters and location, the pairs' RMS limits, and the
+        clocks to ignore), or :data:`UNSET` when the option was omitted
+        (defer to the config file).
     log_file : Path, None, or Unset
         Absolute path to the log file, ``None`` when file logging is explicitly
         disabled, or :data:`UNSET` when the option was omitted (defer to the
@@ -148,10 +149,10 @@ class CliOptions(BaseModel):
         file is kept, or :data:`UNSET` when the option was omitted (defer to
         the config file).
     steps : PositiveInt or None, optional
-        Number of ten-minute epochs that write rows to process before
-        shutting down (``--steps``); an epoch of a data gap that writes no
-        row is not counted. ``None`` (the default) processes every new
-        epoch.
+        How many ten-minute epochs that write rows the run processes
+        before it shuts down (``--steps``); an epoch of a data gap that
+        writes no row is not counted. ``None`` (the default) processes every
+        new epoch.
         No config entry backs it, so it has no :data:`UNSET` state: there is
         nothing to defer to, and no ``"None"`` token to accept.
     """
@@ -273,9 +274,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=UNSET,
         metavar="PATH",
         help=(
-            "path to the YAML file giving each clock's estimator parameters "
-            "and each pair's RMS limit, overriding the config file's "
-            "[PROCESSED] clock_config_file (default: use the config file)"
+            "path to the YAML clock configuration (each clock's estimator "
+            "parameters and location, the pairs' RMS limits, and the clocks to "
+            "ignore), overriding the config file's [PROCESSED] "
+            "clock_config_file (default: use the config file)"
         ),
     )
     parser.add_argument(

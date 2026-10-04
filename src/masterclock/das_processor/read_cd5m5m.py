@@ -130,17 +130,16 @@ SWITCH_PATTERN: Final[str] = r"^[0-9][A-Z][0-9]{2}$"
 """How a switch position is spelled.
 
 The reference digit, the switch name, and the port number on that switch.
-Four characters in that order and no other, so the leading digit a reference
-is read from is there by the shape of the value rather than by hope.
+Four characters in that order and no other, so the pattern itself makes sure
+the value starts with the digit the reference is read from.
 """
 
 COLUMN_SEPARATOR: Final[str] = " "
 """What stands between two columns of a line.
 
 A separator of its own rather than padding folded into the width of the
-column before it. The RMS is not bounded above, so a value wider than its
-column would otherwise run into the phase beside it and the line would stop
-being five fields.
+column before it, so a line has five fields even when a value fills its
+whole column.
 """
 
 SKIPPED_REFERENCES: Final[frozenset[str]] = frozenset({"mc9"})
@@ -158,12 +157,12 @@ EPOCH_EDGE: Final[timedelta] = timedelta(seconds=10)
 
 A measurement's values are recorded against the mark its epoch begins at,
 so one taken at the very end of an epoch is read back nearly a whole epoch
-from where it was taken. The last of an epoch is refused rather than read
-that far back.
+from where it was taken. A measurement in the last :data:`EPOCH_EDGE` of
+its epoch is refused rather than read that far back.
 
 The bound is closed: a measurement exactly this far from the next mark is
-within the edge and is refused, so the two sides of the boundary do not
-both claim it.
+within the edge and is refused, so a measurement exactly on the bound
+belongs to one side only.
 """
 
 
@@ -174,7 +173,7 @@ def _refuse_passed_in(model_input: object, derived_fields: tuple[str, ...]) -> o
     ----------
     model_input : object
         What the model is being built from. Only a mapping can name a field,
-        so anything else is let through for pydantic to judge.
+        so anything else is passed on unchanged for pydantic to validate.
     derived_fields : tuple[str, ...]
         The names of the fields the model works out for itself.
 
@@ -343,9 +342,9 @@ class DASMeasurement(BaseModel):
             The line, without a trailing newline: the columns in file order,
             each separated by one :data:`COLUMN_SEPARATOR` and right-justified
             to its width, except the clock name, which is written as it is.
-            The MJD is rounded to :data:`MJD_DECIMALS` places, so a line read
-            with more places, or spaced differently, is not given back as it
-            was read.
+            The MJD is rounded to :data:`MJD_DECIMALS` places, so a
+            measurement built with more places is written rounded, and a line
+            spaced differently is not given back as it was read.
 
         Examples
         --------
@@ -397,8 +396,8 @@ class DASData(BaseModel):
     Notes
     -----
     The mark is the datetime and the MJD is a rendering of it, the same way
-    round as in the measurements the block holds, so a block and its own
-    members cannot disagree about which of the two is the real value.
+    round as in the measurements the block holds, so a block and the
+    measurements it holds always give the same epoch.
 
     Measurements stay in file order. Nothing here indexes them by pair: an
     epoch is processed whole, so what reads a block reads all of it.
@@ -859,7 +858,7 @@ def iter_blocks(measurements: Iterable[DASMeasurement]) -> Iterator[DASData]:
 def read_blocks(data_file: Path) -> Iterator[DASData]:
     """Read a DAS data file as one ten-minute block at a time.
 
-    Equivalent to ``iter_blocks(read_measurements(path))``: refused lines are
+    Equivalent to ``iter_blocks(read_measurements(data_file))``: refused lines are
     logged and skipped, and the valid measurements are grouped by their
     ten-minute epoch.
 
@@ -876,7 +875,8 @@ def read_blocks(data_file: Path) -> Iterator[DASData]:
     Raises
     ------
     DataFileError
-        If the file cannot be opened or read. The file is opened by
+        If the file cannot be opened or read, its name carries no MJD, or
+        its last line has no newline. The file is opened by
         :func:`read_measurements`, which is a generator, so the error
         surfaces on first iteration rather than at call time.
     """
@@ -962,7 +962,8 @@ def read_all_blocks(
     ------
     DataFileError
         At call time if the directory cannot be listed, or during iteration
-        if a data file cannot be opened or read.
+        if a data file cannot be opened or read, or its last line has no
+        newline.
     ValueError
         At call time if ``start_at_mjd`` is not a number, or is outside the
         years 1 to 9999.

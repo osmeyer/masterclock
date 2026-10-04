@@ -337,7 +337,7 @@ def test_each_parse_may_give_an_option_once() -> None:
 
 
 def test_an_option_naming_its_own_action_may_be_repeated() -> None:
-    """Leave an option that names another action, such as append, to it."""
+    """Leave an option that names another action, such as append, to that action."""
     program_parser = cli.HelpfulArgumentParser(prog="prog")
     program_parser.add_argument("--tag", action="append")
     program_parser.add_argument("--quiet", action="store_true")

@@ -9,7 +9,7 @@ on the working directory. An option is written out in full and given at most
 once, so what a command says is never decided by guessing which option was
 meant or which of two values wins.
 
-Nothing here knows which program is running or what its options are.
+Nothing here depends on which program is running or what its options are.
 """
 
 import argparse
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 type LogLevelName = Literal["TRACE", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-"""Name of a log level the log understands, including its own TRACE."""
+"""Name of a log level the log accepts, including the project's own TRACE."""
 
 LOG_LEVEL_NAMES: Final[tuple[LogLevelName, ...]] = (
     "TRACE",

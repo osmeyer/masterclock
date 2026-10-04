@@ -3,12 +3,13 @@
 A pair (a, b) exists from the first epoch reference a measured b, and is
 never removed: when its measurements stop, it goes on with predicted rows
 up to its gap limit, and then writes no row until it is measured again. A
-triple (r, s, c) is in an epoch when clock c is measured against s, the
-link between r and s is measured both ways, and s and c are in the same
-building at that epoch; for r = s the self pair (r, r) stands for both
-ways, so every clock local to r has its local triple (r, r, c). A triple
-whose s and c are not in one building, or whose clock has no location, is
-left out of the epoch, and writes no row.
+triple (r, s, c) is in an epoch when it was in an earlier one, or when the
+pair (s, c) exists, r is a reference of the epoch, and the link between r
+and s is a pair both ways; either way, only while s and c are in the same
+building at that epoch. For r = s the self pair (r, r) stands for both
+ways, so a clock local to r has its local triple (r, r, c). A triple whose
+s and c are not in one building, or whose s or c has no location, is left
+out of the epoch, and writes no row.
 
 Each series has one file, named for the RF channel and the series' key, a
 pair's in the measurement archive and a triple's in the double-difference

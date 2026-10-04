@@ -4,19 +4,20 @@ The rules covered: every series has one owner among the workers, from its
 name alone; a run with worker processes writes byte-identical data files to
 a run without them, with one worker or several, in one batch or one epoch
 per run, a series that stops and a clock with no entry included, and logs
-the same records in the same order; the pool knows a series once it writes
-a row; the command line's num_workers starts them.
+the same records in the same order; the pool counts a series as existing
+once it writes a row; the command line's num_workers starts the workers.
 
-A worker answers each exchange of an epoch, reading a series' file the
-first time it meets the series, and logs with its records kept, each with
-its series; nothing is logged when WARNING is not; a failure of the
-project's kinds is sent back as it is with its records, any other as a
-WorkerError, logged; a worker asked to go on with an epoch it did not begin
-refuses. The main process raises a failure a worker sent back after writing
-its records, and a WorkerError for a worker that stopped, whether found in
-sending or receiving, or that gave another kind of answer; on leaving, it
-asks each worker to stop, tolerates one already gone, and ends one that does
-not stop.
+A worker answers each exchange of an epoch, reading a series' file the first
+time it meets the series, and logs with its records kept, each with its
+series; nothing is logged when WARNING is not; a failure of the project's
+kinds is sent back as it is with its records, any other as a WorkerError,
+logged; a worker asked to go on with an epoch it did not begin refuses. A
+record kept by a worker holds only its formatted text, so it can be sent,
+and a series shard with nowhere to keep records logs them straight away. The
+main process raises a failure a worker sent back after writing its records,
+and a WorkerError for a worker that stopped, whether found in sending or
+receiving, or that gave another kind of answer; on leaving, it asks each
+worker to stop, tolerates one already gone, and ends one that does not stop.
 """
 
 import logging
@@ -89,7 +90,7 @@ PAIR_RATES: Final[dict[tuple[str, str], int]] = {
 """Each measured pair's rate, ps per 100 s."""
 
 PHASE_JUMP: Final = (8, ("mc1", "hm1"), 90_000)
-"""At this epoch this pair jumps by this many ps, for rejects and a step."""
+"""At this epoch this pair jumps by this many hundredths of a ps: rejects, a step."""
 
 MISSING_READING: Final = (5, ("mc2", "cs1"))
 """This pair is not measured at this epoch."""
@@ -284,7 +285,7 @@ def test_workers_log_what_a_run_without_them_logs(
 
 
 def test_the_pool_knows_a_series_once_it_writes_a_row(tmp_path: Path) -> None:
-    """Know only the series that wrote, as a run without workers knows its rows."""
+    """Count as existing only the series that wrote a row, as a run without workers."""
     config = write_deployment(tmp_path)
     das_block = next(
         read_all_blocks(config.das.cd5m5m_path, datetime_to_mjd(FIRST_EPOCH))
@@ -397,8 +398,9 @@ def serve_queued(
 ) -> list[tuple[object, ...]]:
     """Run a worker in this process on messages queued for it; give its answers.
 
-    A last None is always queued, so a worker that answers when it should
-    not ends rather than waiting for a message that never comes.
+    A last None, the stop message, is always queued, so the worker ends
+    even when the messages run out, rather than waiting for one that never
+    comes.
     """
     main_end, worker_end = Pipe()
     for message in [*messages, None]:

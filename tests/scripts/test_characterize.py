@@ -3,27 +3,30 @@
 The rules covered: a row's columns are read where the file's column table
 puts them; the accepted rows of a local triple, z less step_offset, are
 split at every cold start, a row flagged N after a dormant row; a day whose
-one-epoch changes typically depart from their median by more than 10 ns
-holds no clock signal and is dropped, and a day that cannot be judged is
-kept; each value is moved back to its epoch start by the median one-epoch
-rate times its measurement time after the start; a row whose changes from
-its neighbours both stray, in opposite directions, by more than five robust
-spreads of their own day is dropped, and with one neighbour its one change
-decides; the rows are split wherever the phase jumps and stays, across a
-gap in proportion to its length; drift is taken off as a quadratic; the
-Allan variance at tau = mT uses only whole sets of three rows, m doubling
-up to a third of the rows' time, the stretches combined by their terms and
-the references by theirs; the model, the measurement's white phase noise
-and the clock's three noises, is fitted with every coefficient zero or
-above, weighted by terms over m and the model's value squared, until it
-settles; the measurement noise comes from the fit's white phase term and
-never from the rms column; the crossover of the two noises sets M, at least
-one; the gap limit is the largest gap decycled with a five-sigma margin of
-the clock's own noise; sigma0 is the size of a one-epoch innovation; a day
-whose median one-epoch change is above 25 ns is dropped as far off
-frequency; a clock with fewer than 30 days of prepared rows, or the number
-asked for, gets no settings; and the script reads a characterization run's
-files and prints one line per clock, references left out.
+one-epoch changes typically depart from their median by more than
+NO_SIGNAL_PS holds no clock signal and is dropped, and a day that cannot be
+judged is kept; each value is moved back to its epoch start by the median
+one-epoch rate times its measurement time after the start; a row whose
+changes from its neighbours both stray, in opposite directions, by more
+than OUTLIER_SPREADS robust spreads of their own day is dropped, and with
+one neighbour its one change decides; the rows are split wherever the
+phase jumps and stays, across a gap in proportion to its length; drift is
+taken off as a quadratic; the Allan variance at tau = mT uses only whole
+sets of three rows, m doubling up to a third of the rows' time, the
+stretches combined by their terms and the references by theirs; the model,
+the measurement's white phase noise and the clock's three noises, is fitted
+with every coefficient zero or above, weighted by terms over m and the
+model's value squared, until it settles; the measurement noise comes from
+the fit's white phase term and never from the rms column; the crossover of
+the two noises sets M, at least one; the gap limit is the largest gap
+decycled with a five-sigma margin of the clock's own noise; sigma0 is the
+size of a one-epoch innovation; a day whose median one-epoch change is
+beyond FAR_OFF_FREQUENCY_PS either way is dropped as far off frequency; a
+clock with fewer than MIN_DAYS days of prepared rows, or the number asked
+for, gets no settings; drift is taken off exactly the clocks whose name
+starts with a prefix given; and the script reads a characterization run's
+files and prints one line per clock, references left out, the same report
+from several processes as from one.
 
 The noise data are invented, from a seeded generator.
 """
@@ -558,7 +561,7 @@ DAYS: Final = 2
 """How many days of data it holds."""
 
 ANY_ROWS: Final = 1
-"""A fewest prepared rows every invented clock has, so each gets its settings."""
+"""A fewest-rows limit low enough that every invented clock gets its settings."""
 
 GAP_PAIR: Final = ("mc2", "hm1")
 """A pair the invented DAS does not measure for a few epochs."""
@@ -583,7 +586,7 @@ CHARACTERIZATION_CONFIG: Final = (
 
 
 def true_phases(seed: int) -> dict[str, list[float]]:
-    """Give each clock's phase at every second-of-epoch grid point, ps.
+    """Give each clock's phase at every epoch start, ps.
 
     The references stay at zero. hm1 runs 30 ps an epoch fast with a random
     walk of frequency; ox1 also drifts.
@@ -750,7 +753,7 @@ def test_each_clock_is_characterized_from_both_references(
 
 
 def test_a_clock_with_too_few_rows_gets_no_settings(processed_path: Path) -> None:
-    """Fit nothing and give no settings below the fewest days of prepared rows."""
+    """Fit nothing and give no settings below the fewest prepared rows asked for."""
     result = characterize.characterize_clock(
         processed_path, "a", "hm1", REFERENCES, drift=False, min_rows=10**6
     )

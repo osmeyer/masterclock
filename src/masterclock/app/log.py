@@ -74,10 +74,9 @@ def one_line(message_text: str) -> str:
 
     Notes
     -----
-    Each line is stripped before joining because the text this most often
-    meets is an indented report from a validation library, where the
-    indentation is what made it readable down the page and is noise across
-    one.
+    Each line is stripped before joining because the text most often folded
+    is an indented report from a validation library: the indentation helps
+    on several lines but only adds spaces on one.
 
     Examples
     --------
@@ -136,7 +135,7 @@ class MasterClockLogger(logging.Logger):
         stack_info : bool, optional
             Whether to add the current stack to the record.
         stacklevel : int, optional
-            How many frames up the caller the record names is; 1, the
+            Which caller the record names, counted in stack frames; 1, the
             default, names the function that called this method.
         extra : Mapping[str, object] or None, optional
             Attributes to add to the record.
@@ -179,7 +178,7 @@ class MasterClockLogger(logging.Logger):
         stack_info : bool, optional
             Whether to add the current stack to the record.
         stacklevel : int, optional
-            How many frames up the caller the record names is; 1, the
+            Which caller the record names, counted in stack frames; 1, the
             default, names the function that called this method.
         extra : Mapping[str, object] or None, optional
             Attributes to add to the record.
@@ -268,9 +267,10 @@ class UtcMjdFormatter(logging.Formatter):
 
         The whole rendered line is folded rather than the message alone, which
         needs no care about which part ran long: every other part - the
-        timestamp, the level, the module - is one line already, so folding
-        them changes nothing. Nothing is mutated on the record either, so a
-        second handler formatting the same record sees what the first did.
+        timestamp, the level, the logger name - is one line already, so
+        folding them changes nothing. Nothing on the record is changed
+        either, so a second handler formatting the same record sees what the
+        first did.
         """
         return one_line(super().formatMessage(record))
 

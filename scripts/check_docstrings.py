@@ -1,8 +1,8 @@
 """Report every module, class and function that has no docstring.
 
-ruff's D rules skip some definitions: with the numpy convention they don't ask
-for a docstring on ``__init__``, and they never ask for one on private or nested
-functions or on the methods of private classes. This script reads each file's
+ruff's D rules skip some definitions: with the numpy convention they don't
+require a docstring on ``__init__``, and they never require one on private or
+nested functions or on the methods of private classes. This script reads each file's
 syntax tree and checks every module, class, method and function, whatever its
 name, nested ones included. An empty docstring counts as missing.
 

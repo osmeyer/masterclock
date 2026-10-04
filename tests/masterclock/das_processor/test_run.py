@@ -4,7 +4,8 @@ The rules covered: building an epoch resolves everything it needs: its
 references from its block; every pair, the existing ones kept, and every
 triple, existing or new, whose s and c are in one building at the epoch,
 leaving out, with one warning, every measurement and series of a clock the
-clock configuration has no entry for, and with none of a clock it ignores;
+clock configuration has no entry for, so a run writes every other file as
+without that clock, and with no warning those of a clock it ignores;
 the steering of every reference that steers a series, read over
 (E - T, E + T]; and each series' settings, a pair taking its second
 clock's entry and RMS limit and a triple its clock c's entry, kept from
@@ -13,20 +14,33 @@ unchanged, and every clock's location, kept while no clock's entry
 changes; the steering files are read once in a run, each line parsed
 once; an epoch with no block has no references and the existing series
 only; and the epoch is checked to hold settings for exactly its
-series.
+series, and a block of its own epoch only.
 
 The pairs of an epoch are predicted, decycled against the prediction or the
 anchor with the steering inside the epoch taken off, screened, checked for
 slips, corrected before filtering, and filtered with what screening and the
-slip check excluded. The triples are built from the pairs' accepted
-measurements of the same epoch, the local triple given its self pair for
-both links, marked cold when a pair cold-started, and filtered.
+slip check excluded; a new pair starts acquiring, and the pairs of a
+reference missing from the block are predicted. The triples are built from
+the pairs' accepted measurements of the same epoch, a link direction not
+measured taken from the links' predictions and an rms of 0 giving a sigma
+of 0, the local triple given its self pair for both links, marked cold when
+a pair cold-started, and filtered. Each pair's part in the triples is worked
+out once an epoch, and a pair the epoch does not hold gives no accepted part.
 
 The run's events are logged at the design's levels: each epoch with its
 counts of rows written at INFO; steps, cold starts, dormancy, a series that
 stops, configuration changes and corrected slips at INFO; rejects,
 screening failures, a missing self pair and undecided slips at WARNING;
-each series' outcome at DEBUG and its prediction and update at TRACE.
+each series' outcome at DEBUG and its prediction and update at TRACE; each
+series named by the run's RF channel. Nothing is worked out for a level the
+log leaves out, and no steering when no steering event falls near the epoch.
+
+A run writes a day's rows after its 23:50 epoch, measured or not, and at the
+end of the data, where it stops; it also stops after ``--steps`` epochs, or
+between epochs when a shutdown is asked, writing first. A run restarted
+after every epoch writes byte-identical files. A block before the run's next
+epoch is passed over, an epoch that fails adds none of its rows, and a first
+run starts at the first data.
 
 The next epoch is one after the newest epoch any file is good through: a
 damaged file is cut back to its last good row and the rest left; after a
@@ -411,7 +425,10 @@ WORKED_LAST_ROW: Final = last_row(
 def das_measurement_of(
     reference: str, clock: str, measured_phase: int, offset_us: int
 ) -> DASMeasurement:
-    """Give a measurement of the pair ``offset_us`` microdays after E."""
+    """Give a measurement of the pair ``offset_us`` microdays after E.
+
+    ``offset_us`` counts microdays, not microseconds.
+    """
     return DASMeasurement(
         measurement_mjd=round(datetime_to_mjd(E) + offset_us * 1e-6, 6),
         measured_phase=measured_phase,
@@ -544,7 +561,7 @@ def test_a_slip_correction_is_made_before_filtering(tmp_path: Path) -> None:
 def test_a_reference_missing_from_the_block_leaves_its_pairs_predicted(
     tmp_path: Path,
 ) -> None:
-    """Give mc1's pairs predicted rows and screen without it (review focus 4)."""
+    """Give mc1's pairs predicted rows and screen without it."""
     last_rows = dict(REFERENCE_LAST_ROWS)
     epoch = epoch_of([REFERENCE_MEASUREMENTS[1]], last_rows, tmp_path)
     assert epoch.refs == frozenset({"mc2"})
@@ -968,7 +985,7 @@ DAY_THEN_FINAL_WRITES: Final = [
     ("write_buffer", LATE_START + 3 * T),
     ("write_final", LATE_START + 5 * T),
 ]
-"""The writes of a run from three epochs before midnight to two after it."""
+"""The writes of a run from four epochs before midnight to two after it."""
 
 
 def test_a_day_is_written_after_its_last_epoch_and_at_the_end(
@@ -989,7 +1006,7 @@ def test_a_day_is_written_after_its_last_epoch_and_at_the_end(
 def test_a_day_without_a_block_at_23_50_is_still_written_after_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Write after 23:50 although the DAS measured nothing then (review focus 2)."""
+    """Write after 23:50 although the DAS measured nothing then (5.8)."""
     config, clock_config = make_loop_deployment(tmp_path)
     write_das_files(tmp_path, [LATE_START + i * T for i in (0, 1, 2, 4, 5)])
     write_epochs = recorded_writes(monkeypatch)
@@ -1249,7 +1266,7 @@ def messages_at(log_entries: list[tuple[str, str]], level_name: str) -> list[str
 def test_an_epoch_is_logged_with_its_counts(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Log each epoch at INFO with its series, accepted and held (16.2)."""
+    """Log each epoch at INFO with its rows written, accepted and held (16.2)."""
     last_rows = {**REFERENCE_LAST_ROWS, ("mc2", "ox23"): WORKED_LAST_ROW}
     log_entries = logged_events(
         caplog,
@@ -1424,7 +1441,7 @@ def test_a_frequency_step_is_logged_at_info(
 def test_screening_and_slip_events_are_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Log screening failures at WARNING and a corrected slip at INFO (16.2)."""
+    """Log a screening failure at WARNING with the series it excludes (16.2)."""
     maser_last_row = last_row(
         x_fs=2_000_000,
         filter_states=3,
@@ -1463,7 +1480,7 @@ def test_a_missing_self_measurement_is_logged(
 def test_a_reciprocity_and_a_closure_failure_are_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Log the link directions reciprocity excludes, and links closure excludes."""
+    """Log the link directions a reciprocity failure excludes, at WARNING."""
     last_rows = dict(REFERENCE_LAST_ROWS)
     bad_link_measurements = [
         *REFERENCE_MEASUREMENTS[:2],
@@ -1485,7 +1502,7 @@ def test_a_reciprocity_and_a_closure_failure_are_logged(
 def test_slips_corrected_and_undecided_are_logged(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Log a corrected slip at INFO, as the slip check found it."""
+    """Log a corrected slip at INFO and an undecided one at WARNING."""
     cycle_jump = PHASE_PERIOD // 2 + 2
     maser_fields = {
         "filter_states": 3,
@@ -1975,7 +1992,7 @@ def test_nothing_is_worked_out_for_a_level_not_logged(
 def test_no_steering_is_worked_out_when_no_event_falls_near(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Give each series the zero steer_u gives, without asking it, with no events."""
+    """Give each series a zero steering input, calling neither steer_u nor steer_w."""
     epoch_done, last_rows = worked_epoch_done(tmp_path)
     epoch = epoch_done.epoch
     assert not run._steered(epoch)
@@ -2015,7 +2032,7 @@ def test_each_pair_s_part_in_the_triples_is_worked_out_once(
 
 
 def test_a_pair_the_epoch_does_not_hold_takes_part_unaccepted(tmp_path: Path) -> None:
-    """Give a pair missing from the epoch the part _component would give it."""
+    """Give a pair missing from the epoch no accepted part."""
     epoch_done, _ = worked_epoch_done(tmp_path)
     assert run._component(epoch_done.pair_step, ("mc9", "ox99")) == (run._NO_COMPONENT)
 
@@ -2147,7 +2164,7 @@ def test_settings_are_kept_only_from_an_earlier_epoch(
 def test_a_run_keeps_each_epoch_s_settings_for_the_next(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Work settings out at a run's first epoch and at a change, and keep them else."""
+    """Work settings out at a run's first epoch and at a change, else keep them."""
     config, _ = make_loop_deployment(tmp_path)
     change_mjd = datetime_to_mjd(LATE_START + 2 * T)
     dated_file = tmp_path / "dated.yaml"
@@ -2285,7 +2302,7 @@ def moving_deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
 def test_locations_are_kept_until_a_clock_moves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Work locations out at the first epoch and at each move, and keep them else."""
+    """Work locations out at the first epoch and at each move, else keep them."""
     config, clock_config = moving_deployment(tmp_path)
     worked_out: list[datetime] = []
     real_locations_at = ClockConfig.locations_at
@@ -2357,7 +2374,7 @@ def test_a_triple_stops_while_its_clock_is_away_and_starts_cold_on_its_return(
 SHORT_GAP_CLOCK_CONFIG_YAML: Final = CLOCK_CONFIG_YAML.replace(
     "gap_limit: 40", "gap_limit: 6"
 )
-"""The clock configuration, with every gap limit at N_break, 6 epochs."""
+"""The clock configuration, every gap limit 6 epochs: N_break, the lowest allowed."""
 
 STOPPING_READINGS: Final = [("mc1", "mc1", 1000), ("mc1", "ox23", 50_000)]
 """mc1 measured against itself, and ox23 against mc1."""

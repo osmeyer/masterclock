@@ -15,8 +15,9 @@ measurement less the prediction, so constant hardware delays drop out.
   both ways.
 
 A pair is tested only when it has both a measurement and a prediction, and
-not after an earlier test excluded it. Nothing is logged here: what the
-tests found is returned as events, for the program to log.
+not after an earlier test excluded it. Apart from an error, logged as it
+is raised, nothing is logged here: what the tests found is returned as
+events, for the program to log.
 """
 
 import math
@@ -34,7 +35,7 @@ from masterclock.domain.filter import K_OUT, within_gate
 from masterclock.domain.series import PairKey
 
 K_SHARED: Final[float] = 3.0
-"""How many combined scales from a self pair's shift a pair may lie and share it."""
+"""How many combined scales a pair may lie from its self pair's shift and share it."""
 
 _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
@@ -348,7 +349,8 @@ def _bad_directions(
     Returns
     -------
     set of (str, str)
-        The one direction that lies outside five combined scales of the
+        The one direction that lies outside
+        :data:`~masterclock.domain.filter.K_OUT` combined scales of the
         median estimate; both directions when both or neither do, or there
         is no estimate.
     """
@@ -372,7 +374,7 @@ def _bad_directions(
 
 
 def _closure(epoch_innovations: _EpochInnovations, refs: tuple[str, ...]) -> None:
-    """Exclude the links that only failing triangles hold (design 10.3).
+    """Exclude the links in every failing triangle and no passing one (design 10.3).
 
     Parameters
     ----------
@@ -408,7 +410,8 @@ def _triangles(
     -------
     tuple of (list of frozenset of str, list of frozenset of str)
         The failing triangles, whose two-way innovations sum to more than
-        five combined scales either way, and the passing ones.
+        :data:`~masterclock.domain.filter.K_OUT` combined scales either way,
+        and the passing ones.
     """
     failing_triangles: list[frozenset[str]] = []
     passing_triangles: list[frozenset[str]] = []

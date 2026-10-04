@@ -1,9 +1,11 @@
 """What one series of the forward estimator holds: its state, settings and rows.
 
 A series is the run of rows of one pair or one triple, one row for each
-epoch it is in. Each row is the whole state of the series at its epoch: the
-estimate, the counters and the reject buffer the next epoch starts from, so
-nothing else carries between epochs.
+epoch it is in. A row dormant with no measurement (D and P) is not written,
+so a series' file can have gaps. Each row is the whole state of the series
+at its epoch: the estimate, the counters and the reject buffer the next
+epoch starts from. Across a gap only the segment number carries: the series
+starts cold, in the segment after its last written row's.
 
 Every type here is a plain frozen dataclass, built without checks: its
 values come from code or from data already checked where it entered the
@@ -37,13 +39,13 @@ type PairKey = tuple[str, str]
 """A pair (a, b): reference a measured against clock or reference b."""
 
 type TripleKey = tuple[str, str, str]
-"""A triple (r, s, c): clock c against remote reference r, through s."""
+"""A triple (r, s, c): clock c against reference r, through s; r = s when local."""
 
 type SeriesKey = PairKey | TripleKey
 """Either kind of series."""
 
 FLAG_ORDER: Final[str] = "ARXPDSNU"
-"""Every flag a row can carry, in the order a row writes them."""
+"""Every flag a row can carry, in the order they are written in a row."""
 
 OUTCOMES: Final[frozenset[str]] = frozenset("ARXP")
 """The flags of which every row carries exactly one: what the epoch did."""
@@ -300,8 +302,8 @@ def _check_rejects(reject_buffer: tuple[Reject, ...]) -> None:
     Raises
     ------
     ValueError
-        If a value is not finite, it holds more than three entries, or its
-        epochs do not rise from first to last.
+        If a value is not finite, it holds more than :data:`MAX_REJECTS`
+        entries, or its epochs do not rise from first to last.
     """
     for _, reject_value in reject_buffer:
         if not math.isfinite(reject_value):

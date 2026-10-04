@@ -30,17 +30,17 @@ class PhaseError(MasterClockError):
 class FilterError(MasterClockError):
     """Raised when the forward estimator is given values it cannot use.
 
-    Raised for a setting outside its range, such as a model that is neither
-    two nor three states, and for any two things that were built for
+    Raised for a setting outside its range, such as a model that is not one,
+    two or three states, and for any two things that were built for
     different models but are used together. The second matters most: a
-    three-state gain applied to a two-state filter would answer with a number
-    of exactly the right shape, computed from a pole that filter never had.
+    three-state gain applied to a two-state filter would give a number of
+    exactly the right shape, computed from a pole that filter never had.
 
     Examples
     --------
     >>> try:
-    ...     raise FilterError("4 is not a two or three state model")
+    ...     raise FilterError("4 is not a one, two or three state model")
     ... except MasterClockError as exc:
     ...     str(exc)
-    '4 is not a two or three state model'
+    '4 is not a one, two or three state model'
     """

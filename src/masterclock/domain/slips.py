@@ -5,8 +5,9 @@ as a mismatch of a whole number of periods between its pairs' innovations.
 Every clock measured is checked, a reference measured as a clock by the
 other references included, so a slip on a link is found as on any pair.
 For clock c and references r < s, D = nu(r, c) - nu(s, c) - two-way(r, s)
-is near zero; a D near a non-zero whole number m of periods, within five
-combined scales, is flagged. The pair that slipped is then found:
+is near zero; a D near a non-zero whole number m of periods, within
+:data:`~masterclock.domain.filter.K_OUT` combined scales, is flagged. The
+pair that slipped is then found:
 
 * with three or more references, the one pair in every flagged D and in
   no unflagged one, every flagged D giving it the same correction;
@@ -15,8 +16,9 @@ combined scales, is flagged. The pair that slipped is then found:
 Its cycle count is corrected by -m periods when it is the first pair of a
 D and by +m when it is the second. When no pair can be named, every clock
 pair in a flagged D is excluded for the epoch instead. The check runs after
-screening and before the pairs are filtered. Nothing is logged here: what
-it found is returned as events.
+screening and before the pairs are filtered. Apart from an error, logged
+as it is raised, nothing is logged here: what it found is returned as
+events.
 """
 
 import math
@@ -325,7 +327,7 @@ def _attribute_many(flagged_ds: list[_D], clean_ds: list[_D]) -> tuple[str, int]
 
     Parameters
     ----------
-    flagged, clean : list of (str, str, int)
+    flagged_ds, clean_ds : list of (str, str, int)
         The flagged and unflagged Ds of one clock.
 
     Returns

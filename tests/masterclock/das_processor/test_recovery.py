@@ -7,11 +7,11 @@ run, whose data files end byte-identical to those of a run that never
 stopped; rows a power failure loses from one file before the final write,
 which alone flushes the data files, are made again from the run's first
 epoch; and a file whose end is torn, with a line damaged by hand in its
-middle, is cut back before that line while every other file is left, and
-its series starts cold at its next epoch, in the segment after its last
-kept row's. A file of
-whole rows whose last row is good is not scanned (design 5.7), so damage in
-its middle alone is not looked for.
+middle, is cut back before that line while no other file is cut, and its
+series starts cold at the run's next epoch, leaving a gap, in the segment
+after its last kept row's; the triples built on a damaged pair take its new
+measurements. A file of whole rows whose last row is good is not scanned
+(design 5.7), so damage in its middle alone is not looked for.
 """
 
 import os
@@ -178,7 +178,7 @@ FAILURE_POINTS: Final[tuple[tuple[object, str], ...]] = (
 def failing_at(
     patched_object: object, attribute_name: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Make ``owner.name`` raise a MasterClockError when called."""
+    """Make ``patched_object.attribute_name`` raise a DataFileError when called."""
 
     def raise_injected(*_args: object, **_kwargs: object) -> None:
         """Raise as a failure there would."""
@@ -196,7 +196,11 @@ def test_an_error_while_computing_or_preparing_changes_no_file(
     patched_object: object,
     attribute_name: str,
 ) -> None:
-    """Leave every file as it was, then let the next run finish alike (U21)."""
+    """Leave every file as it was; the next run gives the uninterrupted files (U21).
+
+    The next run is left out after the new-file check fails, since the
+    reading added for that check changes what the run writes.
+    """
     config = make_deployment(tmp_path)
     run_once(config, steps=4)
     files_before = archived_files(config)
@@ -330,11 +334,12 @@ def test_counting_the_write_step(
 WRITE_EVENTS: Final = 52
 """How many writes and fsyncs a run of the invented data makes.
 
-The archives' directories are flushed once when made. The first of the two
-writes, one per day, writes and flushes the journal and its directory, and
-each writes every data file. The final write then flushes every data file
-the run wrote and the directories of the files it created, and flushes the
-journal's directory after deleting it.
+The processed directory is flushed once, after the two archive directories
+are made in it. The first of the two writes, one per day, writes and
+flushes the journal and its directory, and each writes every data file.
+The final write then flushes every data file the run wrote and the
+directories of the files it created, and flushes the journal's directory
+after deleting it.
 """
 
 

@@ -109,7 +109,7 @@ class _Loader(yaml.SafeLoader):
         node : MappingNode
             The mapping's node.
         deep : bool, optional
-            Whether to build the values at once, as PyYAML's own loader.
+            Whether to build the values at once, as in PyYAML's own loader.
 
         Returns
         -------
@@ -419,8 +419,8 @@ class ClockConfig(BaseModel):
     clocks : dict of str to tuple of Entry
         Each clock's entries, the first giving its type or every setting.
     ignore : tuple of str, optional
-        The clocks whose measurements and series are left out without a
-        word; none when the file names none.
+        The clocks whose measurements and series are left out with no
+        warning logged; none when the file names none.
 
     Raises
     ------
@@ -625,7 +625,8 @@ class ClockConfig(BaseModel):
         Returns
         -------
         ClockEntry
-            The type default of the clock's first entry, with every entry in
+            The clock's default (its type's, or its first entry's own
+            settings when that entry gives no type), with every entry in
             force at ``epoch_start`` applied in order of ``effective_mjd``: an entry
             without one from the start, one with one from the first mark at
             or after it.
@@ -633,7 +634,8 @@ class ClockConfig(BaseModel):
         Raises
         ------
         ConfigError
-            If the configuration has no entry for ``clock``.
+            If the configuration has no entry for ``clock``, or
+            ``epoch_start`` has no timezone; the error is logged first.
         """
         clock_entries = self.clocks.get(clock)
         if clock_entries is None:
@@ -752,7 +754,8 @@ class ClockConfig(BaseModel):
         Raises
         ------
         ConfigError
-            If the configuration has no entry for the series' clock.
+            If the configuration has no entry for the series' clock, or
+            ``epoch_start`` has no timezone; the error is logged first.
         """
         return self._series_params(
             series_key, self.entry_for(series_key[-1], epoch_start)
@@ -778,7 +781,8 @@ class ClockConfig(BaseModel):
         Raises
         ------
         ConfigError
-            If the configuration has no entry for a series' clock.
+            If the configuration has no entry for a series' clock, or
+            ``epoch_start`` has no timezone; the error is logged first.
         """
         clock_entries: dict[str, ClockEntry] = {}
         series_params = {}

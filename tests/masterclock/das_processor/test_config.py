@@ -6,8 +6,10 @@ are validated with the command line winning, text from the file read as the
 command line reads it, paths absolute, MJDs on a day a data file covers,
 the literal None only where a setting accepts it, and unknown fields
 refused, a time-constants file among them; a start MJD given by neither
-source is 59500; a required setting given by neither source is a
-MissingSettingsError; the processed subdirectories and the lock file are
+source is 59500; the command line alone, with no file, is enough; a
+required setting given by neither source is a MissingSettingsError; the INI
+sections and entries read are those the table names; the models cannot be
+changed once built; the processed subdirectories and the lock file are
 named from processed_path and the channel; and check_paths refuses a data
 or steering directory that is not one or cannot be listed, a clock
 configuration file that is not a regular file it can read, and a processed
@@ -15,7 +17,7 @@ directory that is something else or cannot be written into.
 
 The processed-directory refusals are word for word, and a file naming a
 redo or a count of epochs, which only the command line gives, is refused.
-The logging settings are built alone, before the rest.
+The logging settings are built alone, with other required settings missing.
 """
 
 import os
@@ -85,7 +87,7 @@ def build_from_ini(
 
 
 def test_every_command_line_setting_is_described_once() -> None:
-    """Describe every CliOptions field but the three that back no entry."""
+    """Describe every CliOptions field but those that back no entry."""
     setting_fields = set(cli.CliOptions.model_fields) - {
         "config_file",
         "steps",

@@ -175,7 +175,7 @@ class SeriesDone(NamedTuple):
     Parameters
     ----------
     lines : list of (series key, str)
-        Each line written, with its newline, and its series, in key order;
+        Each line made, with its newline, and its series, in key order;
         a series whose row is not written has none.
     components : dict of (str, str) to Component
         Each pair's part in the triples; empty for triples.
@@ -308,7 +308,7 @@ class SeriesShard:
     def finish_pairs(
         self, corrections: Mapping[PairKey, int], excluded: frozenset[PairKey]
     ) -> SeriesDone:
-        """Correct and filter the share's pairs, and write their lines.
+        """Correct and filter the share's pairs, and make their lines.
 
         Parameters
         ----------
@@ -359,7 +359,7 @@ class SeriesShard:
         )
 
     def work_triples(self, components: Mapping[PairKey, Component]) -> SeriesDone:
-        """Work the share's triples from every pair's part, and write their lines.
+        """Work the share's triples from every pair's part, and make their lines.
 
         Parameters
         ----------
@@ -456,7 +456,7 @@ class SeriesShard:
         file_records: Mapping[KeyT, MeasRecord | DdiffRecord],
         components: dict[PairKey, Component],
     ) -> SeriesDone:
-        """Write the series' lines, keep their newest rows, and log them.
+        """Make the series' lines, keep their newest rows, and log their outcomes.
 
         Parameters
         ----------
@@ -643,7 +643,7 @@ class WorkerPool:
         last_epoch: run.Epoch | None = None,
         steering_files: SteeringFiles | None = None,
     ) -> run.Epoch:
-        """Process one epoch with the workers, and add its rows to the buffer.
+        """Process one epoch with the workers, add its rows to the buffer, and log it.
 
         Parameters
         ----------

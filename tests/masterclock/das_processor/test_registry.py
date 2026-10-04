@@ -3,17 +3,18 @@
 The rules covered: the references of an epoch are the clocks of its block
 named as references, the prefix and one digit; a pair exists for every
 reference and clock measured together, and is never removed once it
-exists; a triple (r, s, c) is in an epoch for every pair (s, c), its c a
+exists. A triple (r, s, c) is in an epoch for every pair (s, c), c a
 reference or not, and every reference r whose link with s is measured both
-ways, the self pair standing for both ways when r = s, so every clock local
-to r gets (r, r, c), but only while s and c are in the same building, an
-existing triple left out when they are not, and none when the clock, the
-reference or both have no location; the
-keys come out sorted; a series' file is named for its channel and key, in
-the measurement or double-difference directory, built once and then given
-again, and a name that cannot name a file is refused every time; and the
-existing series are
-read back from the names of a channel's files, other names ignored.
+ways; for r = s the self pair stands for both ways, so every clock local to
+r gets (r, r, c). A triple is kept only while s and c are in the same
+building: an existing one is left out when they are not, and none is given
+when c, s or both have no location. The keys come out sorted. A series'
+file is named for its channel and key, in the measurement or
+double-difference directory, built once and then given again, and a name
+that cannot name a file is refused every time. The existing series are read
+back from the names of a channel's files, other names ignored; with no
+archive directory there are none, and an archive that cannot be listed is
+refused.
 
 An archive refusal is logged as raised.
 """

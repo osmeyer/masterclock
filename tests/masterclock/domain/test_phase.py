@@ -7,12 +7,15 @@ naive datetimes are refused; a float becomes an exact fraction, and a value
 that is not finite is refused; rounding is to the nearest whole number,
 a tie going to the even one, exactly at any size; the estimator's phase is
 held in whole femtoseconds, rounded the same way; an epoch lasts 600 s; and
-a measurement is decycled against the prediction at its own time, or
-against the last buffered measurement, or with no cycles added, and
-referred back to its epoch start with one exact rounding.
+a measurement is decycled against the prediction at its own time, or,
+without a prediction, against the last buffered measurement, or with no
+cycles added, and referred back to its epoch start with one exact rounding;
+a reading outside one period, or a measurement time outside its epoch, is
+refused; and a decycled measurement is frozen.
 
-Decycling takes the drift term and steering inside the epoch its way, and
-each error is logged as raised.
+Decycling includes the drift term d delta**2 / 2, and adds the steering
+inside the epoch to the prediction and takes it off again; each error is
+logged as raised.
 """
 
 import dataclasses
@@ -240,7 +243,7 @@ def test_the_worked_epoch_decycles_to_six_cycles() -> None:
 
 
 def predicted_motion(prediction: State, delta: mpq) -> mpq:
-    """Work out y delta + d delta**2 / 2 exactly, as the reference does."""
+    """Work out y delta + d delta**2 / 2 exactly, as decycle does."""
     y = mpq(*prediction.y.as_integer_ratio())
     d = mpq(*prediction.d.as_integer_ratio())
     return y * delta + d * delta * delta / 2

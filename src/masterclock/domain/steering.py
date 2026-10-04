@@ -103,7 +103,7 @@ def _signed_events(
     window_start: datetime,
     window_end: datetime,
 ) -> Iterator[tuple[int, SteerEvent]]:
-    """Yield the events that move a series in (after, through], with their signs.
+    """Yield the events in (window_start, window_end] that move a series, with signs.
 
     Parameters
     ----------

@@ -4,11 +4,13 @@ The rules covered: the deployment holds every reference against itself and
 every other reference, and each clock against one reference in turn; its
 DAS files hold one block per epoch with every pair once and no line the
 reader refuses, however many pairs there are, and a clock configuration
-entry for every clock; the timed runs write the deployment's files, a
-pair's one row per run of one epoch and one per epoch of the batch, a
-triple's from its first measurement on; a failed run is
-reported with exit status 1; and a folder that is not new or empty, a
-number out of range, or more runs than epochs is a usage error.
+entry for every clock; the references are named from the digits
+das_processor reads, skipped references left out; the timed runs write the
+deployment's files, a pair's one row per run of one epoch and one per epoch
+of the batch, a triple's from its first measurement on; one timed run
+prints no median; a failed run is reported with exit status 1; and a folder
+that is not new or empty, a number out of range, or more runs than epochs
+is a usage error.
 """
 
 import logging

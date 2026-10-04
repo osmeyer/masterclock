@@ -1,7 +1,11 @@
 """Tests for scripts/clean.py.
 
-The rule covered: only the generated paths the script names are removed, never
-configuration, data, logs, the virtual environment or git's own files.
+The rules covered: only the generated paths the script names are removed, never
+configuration, data, logs, the virtual environment or git's own files; a cache
+inside a generated folder goes with that folder and is counted once; a linked
+folder is unlinked, its target kept; a folder without pyproject.toml is refused
+with status 2 and nothing removed, and a missing folder is a usage error; and
+run as a program, the script exits with the status main returns.
 """
 
 import runpy

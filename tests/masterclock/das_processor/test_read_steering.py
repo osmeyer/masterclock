@@ -6,8 +6,8 @@ gives the events in (after, through], as SteerEvents; a missing file means
 the reference has never been steered and gives no events; and a file that
 cannot be read, a line that does not parse, a value in another form than
 plain decimals or not finite, an MJD outside the data days, a line earlier
-than the one before it, and a last line with no newline each raise
-DataFileError.
+than the one before it, a last line with no newline, and asking for the
+steering of a name that is not a reference's each raise DataFileError.
 
 Each line is read and checked once in a run: later reads take only the
 lines appended since, numbered and ordered after the lines before them; a
@@ -403,7 +403,7 @@ def test_a_file_removed_gives_no_events_and_one_that_appears_is_read(
 def test_a_file_that_cannot_be_looked_at_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Raise DataFileError when the file's status cannot be read, or it cannot open."""
+    """Raise DataFileError when its status cannot be read or it cannot be opened."""
     steering_directory = steering_directory_with(tmp_path)
 
     def refuse(*_: object, **__: object) -> NoReturn:

@@ -1,12 +1,15 @@
 """Tests for src/masterclock/app/shutdown.py.
 
-The rules covered: a shutdown handler starts with nothing requested and
-nothing installed; installing replaces the handlers of the configured signals
-and no others, uninstalling puts back exactly what was there, and an install
-that fails puts back whatever it had replaced; a configured signal, sent for
-real, sets the shutdown flag and records which signal it was; a shutdown can
-also be requested in code; waiting returns as soon as a shutdown is
-requested, or when its timeout runs out.
+The rules covered: the default signals are interrupt, terminate and hangup;
+the signals are kept once each, in the order first given; a shutdown handler
+starts with nothing requested and nothing installed; installing replaces the
+handlers of the configured signals and no others, uninstalling puts back
+exactly what was there, nested handlers put back in turn, and an install
+that fails, or is tried off the main thread, leaves nothing replaced; a
+configured signal, sent for real, sets the shutdown flag and records which
+signal it was, the latest one when several arrive; a shutdown can also be
+requested in code; waiting returns as soon as a shutdown is requested, or
+when its timeout runs out.
 """
 
 import os
@@ -162,7 +165,7 @@ def test_uninstall_leaves_the_request_in_place() -> None:
 
 
 def test_the_with_block_installs_and_restores() -> None:
-    """Install on entering, give back the handler, and restore on leaving."""
+    """Enter as the same handler, install on entering, and restore on leaving."""
     handlers_before = {signum: signal.getsignal(signum) for signum in WATCHED_SIGNALS}
     shutdown_handler = shutdown.ShutdownHandler()
     with shutdown_handler as entered_handler:

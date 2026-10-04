@@ -1,11 +1,14 @@
-"""Running das_processor: building each epoch, processing it, the epoch loop.
+"""Running das_processor: the start of a run, each epoch, the loop, the log.
 
-Only the run functions take the configuration. :func:`build_epoch` resolves
-everything one epoch needs into an :class:`Epoch` of plain values: its
-references, every pair and triple, the steering of every reference that
-steers a series, and each series' settings, kept from the last epoch while
-they cannot have changed. Everything below it receives that epoch or plain
-values.
+A run first cuts the files back to what it can keep, then builds and
+processes each epoch in turn, and logs what each epoch did.
+
+Only the functions that read files take the configuration.
+:func:`build_epoch` resolves everything one epoch needs into an
+:class:`Epoch` of plain values: its references, every pair and triple, the
+steering of every reference that steers a series, and each series'
+settings, kept from the last epoch while they cannot have changed.
+Everything below it receives that epoch or plain values.
 """
 
 import logging
@@ -211,6 +214,11 @@ def build_epoch(
     ------
     DataFileError
         If a steering file cannot be read.
+
+    Notes
+    -----
+    A clock with no entry that the configuration does not ignore is logged
+    at WARNING when it is first found (see :func:`_configured_only`).
     """
     das_block, earlier_series, clocks_without_entry = _configured_only(
         das_block, earlier_series, clock_config, last_epoch
@@ -555,6 +563,11 @@ def _measured_pairs(
         Each measured pair's measurement, in the readings' order, decycled
         against its prediction, or against its anchor when it has none,
         with the steering inside the epoch taken off.
+
+    Raises
+    ------
+    PhaseError
+        If a reading or its offset is out of range.
     """
     steered = any(steering.values())
     measurements = {}
@@ -768,8 +781,9 @@ def process_pairs(
         new, or starts again.
     last_segments : Mapping of series key to int or None, optional
         The segment of the newest row of each series that starts again
-        after epochs it had no row for, the series starting in the next
-        (see :func:`~masterclock.domain.filter.carry`); none when ``None``.
+        after epochs it had no row for; such a series starts in the next
+        segment (see :func:`~masterclock.domain.filter.carry`); none when
+        ``None``.
 
     Returns
     -------
@@ -1136,7 +1150,8 @@ def next_epoch(config: AppConfig) -> datetime:
     good row. Each damaged file is logged once at ERROR by the file check,
     and a roll-back that changed anything, or followed a stopped write, is
     logged once at WARNING, with why, how many files it cut, deleted and
-    left, and the epoch the run goes on after.
+    left, and the epoch the run goes on after. Once the files are cut back,
+    the journal is deleted.
     """
     journal = config.processed.processed_path / JOURNAL_FILE_TEMPLATE.format(
         rf=config.das.rf
@@ -1322,7 +1337,7 @@ def process_epoch(
     last_epoch: Epoch | None = None,
     steering_files: SteeringFiles | None = None,
 ) -> EpochDone:
-    """Process one epoch and add its rows to the day buffer (design 6.3).
+    """Process one epoch, add its rows to the day buffer, and log it (design 6.3).
 
     Parameters
     ----------
@@ -1446,7 +1461,7 @@ def _file_records(
 class EpochProcessor(Protocol):
     """Something that processes an epoch as :func:`process_epoch` does.
 
-    Such as :class:`~masterclock.das_processor.workers.WorkerPool`, which
+    One is :class:`~masterclock.das_processor.workers.WorkerPool`, which
     works the series in worker processes.
     """
 
@@ -1516,7 +1531,8 @@ def run(
         If an epoch cannot be processed or a write fails. When the run had
         written its journal, the journal is left, so the next run cuts
         every file back to before this run's first epoch and computes its
-        rows again; otherwise no file was changed.
+        rows again; otherwise no rows were written, though the files may
+        have been cut back at the start (see :func:`next_epoch`).
 
     Notes
     -----
@@ -1704,7 +1720,8 @@ def _log_series(
     step_result : StepResult
         Its row at the epoch.
     last_row : Row or None
-        Its last row, or ``None`` for a new series.
+        Its row of the epoch before, or ``None`` for a new series or one
+        that starts again.
     """
     row = step_result.row
     _log.debug("%s: %s", series_label, row.flags)
@@ -1802,8 +1819,8 @@ def log_epoch(
 
     Notes
     -----
-    Screening, slip and reject events go at WARNING except
-    corrected slips; steps, cold starts, dormancy, a series that stops,
+    Screening, slip and reject events go at WARNING; corrected slips,
+    phase and frequency steps, cold starts, dormancy, a series that stops,
     configuration changes and the epoch's counts of rows written at INFO;
     each series' outcome at DEBUG and its prediction and update at TRACE.
     Series are logged in key order, pairs first. Nothing is worked out for

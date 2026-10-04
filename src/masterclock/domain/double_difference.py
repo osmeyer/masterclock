@@ -117,10 +117,11 @@ def double_difference(
     -------
     TripleValue or None
         With both links accepted: z(s,c) + (z(r,s) - z(s,r)) / 2, with
-        sigma_sc**2 + (sigma_rs**2 + sigma_sr**2) / 4 (111). With one, the
-        other replaced through rho = x-(r,s) + x-(s,r):
-        z(s,c) + z(r,s) - rho/2 with sigma_sc**2 + sigma_rs**2 (110), or
-        z(s,c) - z(s,r) + rho/2 with sigma_sc**2 + sigma_sr**2 (101). A
+        sigma_dd**2 = sigma_sc**2 + (sigma_rs**2 + sigma_sr**2) / 4 (111).
+        With one, the other replaced through rho = x-(r,s) + x-(s,r):
+        z(s,c) + z(r,s) - rho/2 with sigma_dd**2 = sigma_sc**2 + sigma_rs**2
+        (110), or z(s,c) - z(s,r) + rho/2 with
+        sigma_dd**2 = sigma_sc**2 + sigma_sr**2 (101). A
         local triple needs only (r, c), and is z(r, c) with sigma_rc. Cold
         when any pair cold-started. ``None`` when (s, c) is not accepted,
         neither link is, or rho is needed and a prediction is missing.

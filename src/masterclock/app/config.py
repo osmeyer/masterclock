@@ -208,7 +208,7 @@ def _checked(settings: Sequence[Setting]) -> Sequence[Setting]:
     Raises
     ------
     ValueError
-        If two settings share an attribute, or a section and entry, since
+        If two settings share an ``options_field``, or a section and entry, since
         one would quietly take the other's value; or if a setting's entry
         is not in lowercase, or its section is ``DEFAULT``, since no file
         could then give it.
@@ -463,7 +463,7 @@ def _missing_settings(
     Parameters
     ----------
     effective_values : Mapping[str, object]
-        The effective value of every setting, keyed by attribute;
+        The effective value of every setting, keyed by ``options_field``;
         :data:`~masterclock.app.cli.UNSET` where neither source
         provided one.
     settings : Sequence of Setting
@@ -496,7 +496,7 @@ def _grouped_values(
     Parameters
     ----------
     effective_values : Mapping[str, object]
-        The effective value of every setting, keyed by attribute.
+        The effective value of every setting, keyed by ``options_field``.
     settings : Sequence of Setting
         The program's settings, which say which group each lands in.
 
@@ -534,7 +534,7 @@ def known_sections(settings: Sequence[Setting]) -> frozenset[str]:
     Raises
     ------
     ValueError
-        If two settings share an attribute, or a section and entry, or a
+        If two settings share an ``options_field``, or a section and entry, or a
         setting's entry is not in lowercase or its section is ``DEFAULT``.
     """
     return frozenset(setting.ini_section for setting in _checked(settings))

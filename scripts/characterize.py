@@ -1,6 +1,6 @@
 """Choose each clock's estimator settings from a characterization run (design 15.3).
 
-A characterization run is das_processor run with every clock at one state,
+A characterization run is a das_processor run with every clock at one state,
 into a processed_path of its own. This script reads that run's files and,
 for every clock measured against a reference, prepares the z of each local
 triple (r, r, c) in the design's steps, fits the clock's noise model and the
@@ -9,8 +9,8 @@ settings: the time constant M, the initial innovation scale sigma0 (the
 size of a one-epoch innovation) and the gap limit G_max. The measurement
 noise comes from the fit, never from the rms the DAS reports. Days when the
 phase holds no clock signal, or the clock runs far off frequency, are left
-out, and a clock with too few days of rows gets no settings. It prints one
-line per clock::
+out, and a clock with too few days of rows gets no settings. It prints a
+header line, then one line per clock. Run it as::
 
     uv run --frozen python scripts/characterize.py RUN --rf a --three-state ox
 
@@ -115,7 +115,7 @@ MEAS_SLICES: Final[dict[str, slice]] = _column_slices(MEAS_COLUMNS)
 
 
 class TripleRow(NamedTuple):
-    """What step 1 and 2 need of a local triple's row.
+    """What steps 1 and 2 need of a local triple's row.
 
     Parameters
     ----------
@@ -569,7 +569,7 @@ def split_at_jumps(stretch: Stretch) -> list[Stretch]:
         less its day's median change times the epochs between them, is past
         its day's limit times those epochs (see :func:`_day_limits`). A row
         whose day has no two rows one epoch apart cannot be judged, and
-        starts no new piece. None for no values.
+        starts no new piece. An empty list for no values.
 
     Examples
     --------
@@ -1001,8 +1001,9 @@ def initial_innovation_scale(coefficients: Coefficients) -> float:
     -------
     float
         sqrt(sigma_meas**2 + (T sigma_y,c(T))**2): the measurement noise and
-        the clock's own wander over one epoch together, so a clock whose
-        noise the measurement's cannot be told apart from still has one.
+        the clock's own wander over one epoch together, so a clock whose own
+        noise is too small to tell apart from the measurement noise still
+        gets a nonzero sigma0.
 
     Examples
     --------
@@ -1108,7 +1109,7 @@ def _weighted_residual(
         The variances.
     weights : sequence of float
         Each one's weight.
-    fitted : (float, float, float)
+    fitted : (float, float, float, float)
         The model.
 
     Returns
@@ -1125,7 +1126,7 @@ def _weighted_residual(
 def _weighted_fit(
     tau_values: Sequence[TauValue], weights: Sequence[float], used: tuple[int, ...]
 ) -> tuple[Coefficients, float] | None:
-    """Fit only the terms in used by weighted least squares.
+    """Fit only the terms in ``used`` by weighted least squares.
 
     Parameters
     ----------
@@ -1138,7 +1139,7 @@ def _weighted_fit(
 
     Returns
     -------
-    ((float, float, float), float) or None
+    ((float, float, float, float), float) or None
         The coefficients and the weighted sum of squared residuals; ``None``
         when the system is singular or a coefficient comes out negative.
     """
@@ -1307,7 +1308,8 @@ def gap_limit(coefficients: Coefficients, M: int) -> int:
     Returns
     -------
     int
-        The largest n for which 5 sigma_x,pred((n + 1) T) < P / 2, with
+        The largest n for which :data:`GATE_SIGMAS` sigma_x,pred((n + 1) T)
+        < P / 2, with
         sigma_x,pred(tau) = 10**12 tau sqrt(sigma_y,c**2(tau) + sigma_y,c**2(MT)),
         up to :data:`GAP_SEARCH_LIMIT`; -1 when not even n = 0 is.
     """
@@ -1356,7 +1358,7 @@ class ClockResult(NamedTuple):
     coefficients : (float, float, float, float) or None
         The fitted model; ``None`` with too few rows.
     tau_c : float or None
-        The crossover, s.
+        The crossover, s; ``None`` with too few rows or without a crossover.
     M : int or None
         The time constant, epochs; ``None`` without a crossover.
     gap : int or None

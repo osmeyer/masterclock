@@ -1,6 +1,9 @@
 """Tests for scripts/check_test_modules_alone.py.
 
-The rule covered: every test module passes when it is run on its own.
+The rules covered: every test module passes when it is run on its own; a
+module that collects no tests fails, and so does finding no test modules; a
+missing folder is a usage error with status 2; and run as a program, the
+script exits with the status main returns.
 """
 
 import runpy

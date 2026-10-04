@@ -2,11 +2,13 @@
 
 The rules covered: a run lock on a name in a directory is held by one lock
 at a time, across processes and within one, and records its holder's PID;
-names that differ do not exclude each other; releasing frees it and keeps
-the file; a refusal names the lock and, when it can be read, the holder; a
-failure that is not another holder is reported as what it is and leaves
-nothing held; the name must be a plain file name in the directory; and a
-with block cannot enter a lock that is already held.
+names that differ do not exclude each other; a second acquire or release
+of the same lock changes nothing; releasing frees it and keeps the file;
+the lock is not inherited by programs the process starts; a refusal names
+the lock and, when it can be read, the holder, and is logged at ERROR as
+raised; a failure that is not another holder is reported as what it is and
+leaves nothing held; the name must be a plain file name in the directory;
+and a with block cannot enter a lock that is already held.
 
 A holder file that is not ASCII digits names no PID; the lock file is made
 0o644; taking and giving back the lock are logged at DEBUG, and entering a
@@ -161,7 +163,10 @@ def test_the_descriptor_is_not_inherited(tmp_path: Path) -> None:
 
 
 def test_the_with_block_holds_and_releases(tmp_path: Path) -> None:
-    """Hold the lock inside the block, give back the lock, and free it after."""
+    """Enter as the same lock, hold it in the block, and release it after.
+
+    It is released after a block that raises too.
+    """
     run_lock = lock.RunLock(tmp_path, LOCK_FILE_NAME)
     with run_lock as entered_lock:
         assert entered_lock is run_lock

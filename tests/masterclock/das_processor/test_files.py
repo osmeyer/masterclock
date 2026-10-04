@@ -3,7 +3,8 @@
 The rules covered: the column table gives the measurement file a width of
 477 and 33 header lines and the double-difference file 455 and 31; every
 header line is exactly that wide and starts with '#', in the design's order
-with the warning second; rows are right-justified fixed-width columns
+with the warning second, and only for its kind of series, which it names
+in words; rows are right-justified fixed-width columns
 separated by ', ', with '-' for an empty field, floats as {:+.16e} and the
 estimator's phase as whole femtoseconds written in ps with three decimals;
 the design's example rows come out byte for byte; a value too wide for its
@@ -15,23 +16,34 @@ slip correction exactly when the row carries S, and S never on a triple.
 
 The file check: a file whose length is its header plus whole rows, with a
 last row that parses, is sound and good through that row, its other rows
-not read; otherwise it is good
-through the row before its first line that does not parse, holds nothing
-good when it has no whole row, and is refused when its first row does not
-parse, unless a write stopped part way, when it holds nothing good; a
-damaged file is explained once at ERROR, where and why; and the last row
-of a sound file is read back as its row (U26). A roll-back keeps a file's
-rows up to an epoch, found by searching though epochs may have no row, says
-what it did to the file and logs nothing; a redo is logged once at INFO.
+not read; otherwise it is good through the row before its first line that
+does not parse, holds nothing good when it has no whole row, and is refused
+when its first row does not parse, unless a write stopped part way, when it
+holds nothing good; a file that cannot be read is refused; a damaged file
+is explained once at ERROR, where and why; and the last row of a sound file
+is read back as its row, and only from a sound file whose last row is ASCII
+(U26). A roll-back keeps a file's rows up to an epoch, the cut found by a
+search, since some epochs have no row, says what it did to the file and
+logs nothing. A redo removes every row at or after its epoch, deletes a
+file with no earlier row, finishes when run again after it stopped part
+way, and is logged once at INFO.
 
-A line made elsewhere is buffered for its series as a record's line is,
-its epoch noted and no row kept, and the row kept for a record is the one
-its line gives back. The write: every check is made before a file is
-opened, and a failed one
-changes nothing; files are written one at a time, measurement files first;
-with a journal, the earliest buffered epoch is flushed to it before any data
-file opens and it is deleted after the last flush, a journal already there
-is refused, and one not whole is read as no write stopped.
+A file keeps one series, and a buffer takes all of another buffer's rows or
+none. A row too wide is refused before it is buffered. A line made
+elsewhere is buffered for its series as a record's line is, its epoch noted
+and no row kept, and the row kept for a record is the one its line gives
+back, so a pair's is kept without its innovation. The write: every check is
+made before a file is opened, and a failed one changes nothing; a new file
+gets its header and its rows in one write, and a later write appends;
+files are written one at a time, measurement files first; a write empties
+the buffered text and keeps each series' newest row. A day's write flushes
+no data file: only the final write does, each file written since once,
+measurement files first, then the directories of new files, and an empty
+buffer writes and flushes nothing. With a journal, the run's first write
+flushes its earliest epoch to it before any data file opens, it stays
+through later writes, and it is deleted after the final write's flushes; a
+journal already there is refused, one not whole is read as no write
+stopped, and clearing deletes it.
 
 A row read back is checked by pydantic models with a row's, a pair
 measurement's and a triple measurement's fields, in their order: each
@@ -43,11 +55,12 @@ row keeps.
 A row that parses but breaks a record's rules is a damaged line; every
 refusal, device fault, roll-back and redo message is word for word, and each
 error is logged as raised; free space is counted per device, just enough
-being enough; a missing archive is made beside one already there; a
-missing processed_path is made with every directory above it, top down,
-each flushed into its parent, one already there is left, and one whose name
-is taken by a file is refused; and a measurement time on a whole second
-keeps its microseconds.
+being enough; the archive directories are made when missing and left when
+there, a name taken by a file is refused, and a missing archive is made
+beside one already there; a missing processed_path is made with every
+directory above it, top down, each flushed into its parent, one already
+there is left, and one whose name is taken by a file is refused; and a
+measurement time on a whole second keeps its microseconds.
 """
 
 import dataclasses
@@ -1496,7 +1509,7 @@ def test_an_interrupted_redo_finishes_when_run_again(
 def test_a_redo_and_a_roll_back_at_one_start_keep_each_file_whole(
     tmp_path: Path,
 ) -> None:
-    """Redo first, then cut each file to its own last good row (review focus 5)."""
+    """Redo first, then cut each file to its own last good row, at one start."""
     data_files = write_archive(tmp_path)
     triple_path = data_files[1][0]
     with triple_path.open("ab") as open_file:

@@ -9,12 +9,14 @@ triple for each pair through each reference. No reference steers.
 It then runs das_processor as the scheduler does, one process per epoch,
 for the first epochs of a day whose DAS file is already whole, so each run
 reads the whole day's file; and, on a copy of the same data, one process for
-the whole day. Give it a folder that does not exist yet or is empty::
+every epoch of the data. Give it a folder that does not exist yet or is empty::
 
     uv run --frozen python scripts/epoch_timing.py FOLDER --references 3 --clocks 20
 
-It prints how long each run took and what share of an epoch's 600 s that
-is. A run that fails is reported with its error output and exit status 1.
+It prints how long the first one-epoch run took and the median and longest
+of the others, and the batch run's time in total and per epoch; each time
+but the batch total also as a share of an epoch's 600 s. A run that fails
+is reported with its error output and exit status 1.
 """
 
 import argparse
@@ -327,7 +329,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ----------
     argv : Sequence of str or None, optional
         The arguments, without the program name; ``None`` for
-        :data:`sys.argv`.
+        ``sys.argv[1:]``.
 
     Returns
     -------

@@ -2,16 +2,21 @@
 
 The rules covered: a line is five columns, its numbers written in their
 plain form, the MJD as five digits, a point and six decimals, and each
-column valid, or it is refused as malformed; a record
-works out its reference, instants and epoch from its columns, and none of
-them may be passed in; a file's lines that are malformed, on another day,
-late in their epoch, backwards in time or a repeated pair are logged under
-that reason and skipped, a line measured against a skipped reference is
-skipped with nothing logged, and a skipped line is not remembered; a file whose
-last line has no newline, or that cannot be read, ends the read; daily file
-names cover days 50000 to 99999 only and read back to the day they were made
-from; and the files of a directory are read in day order as one stream of
-ten-minute blocks, from a given epoch if one is asked for.
+column valid, or it is refused as malformed; a record works out its
+reference, instants and epoch from its columns, none of them may be passed
+in, and it refuses unknown fields and cannot be changed once built; a block
+is never empty and holds only measurements of its own epoch; a measurement
+is written back in the DAS layout and reads back as itself; a file's lines
+that are malformed, on another day, late in their epoch, backwards in time
+or a repeated pair are logged under that reason and skipped, a line
+measured against a skipped reference is skipped with nothing logged, and a
+skipped line is not remembered; a file whose last line has no newline, or
+that cannot be read, ends the read; daily file names cover days 50000 to
+99999 only and read back to the day they were made from; a directory's
+entries that are not regular files named for a day are ignored at DEBUG,
+and a directory with no data files gives a WARNING; and the files of a
+directory are read in day order as one stream of ten-minute blocks, from a
+given epoch if one is asked for.
 
 Each refusal's reason, the skipped line as it is, each error and each DEBUG
 message are word for word.
@@ -87,7 +92,7 @@ def measurement_at(
 
 
 def skipped_line_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
-    """Return the WARNING messages logged, which name each skipped line."""
+    """Return every WARNING message logged."""
     return [
         log_record.getMessage()
         for log_record in caplog.records
@@ -173,7 +178,7 @@ def test_a_number_not_in_its_plain_form_is_malformed(
     ],
 )
 def test_a_column_outside_its_range_or_spelling_is_malformed(line_text: str) -> None:
-    """Refuse a phase past one period, a day out of range, or a bad switch."""
+    """Refuse a phase of a whole period or more, a day out of range, or a bad switch."""
     with pytest.raises(MalformedLineError, match=r"."):
         reader.parse_line(line_text)
 
@@ -200,7 +205,7 @@ def test_a_line_that_is_not_utf8_is_malformed() -> None:
 def test_a_worked_out_value_may_not_be_passed_in(
     derived_field: str, looks_valid: bool
 ) -> None:
-    """Refuse any of the four worked-out values, whether it looks valid or not."""
+    """Refuse any worked-out value, whether it looks valid or not."""
     measurement = measurement_at(60)
     passed_value = getattr(measurement, derived_field) if looks_valid else "zz"
     column_values = measurement.model_dump(exclude=set(reader.DASMeasurement._DERIVED))
@@ -513,7 +518,7 @@ def test_the_same_clock_against_another_reference_is_not_a_repeat(
     assert len(list(reader.read_measurements(day_file))) == 2
 
 
-# EPOCH_EDGE before the end of DAY's first epoch: an instant an MJD holds
+# EPOCH_EDGE before the end of DATA_DAY's first epoch: an instant an MJD holds
 # exactly, so the test is of the bound and not of rounding around it.
 EPOCH_EDGE_INSTANT: Final = mjd_to_datetime(DATA_DAY) + EPOCH_LENGTH - reader.EPOCH_EDGE
 

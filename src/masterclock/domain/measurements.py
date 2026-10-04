@@ -8,8 +8,8 @@ its measurement time and epoch start are worked out from the MJD. A triple
 measurement is a double difference built from its pairs' accepted
 measurements.
 
-Both give the filter step their plain values (:meth:`PairMeasurement.measured`,
-:meth:`TripleMeasurement.measured`).
+Both give the filter step their plain values
+(:meth:`PairMeasurement.filter_input`, :meth:`TripleMeasurement.filter_input`).
 """
 
 import dataclasses
@@ -172,7 +172,8 @@ class TripleMeasurement:
         Parameters
         ----------
         triple_value : TripleValue
-            The double difference the domain gave.
+            The double difference, from
+            :func:`~masterclock.domain.double_difference.double_difference`.
 
         Returns
         -------

@@ -2,9 +2,10 @@
 
 The rules covered: an epoch lasts ten minutes; ten-minute rounding lands on
 a mark in UTC, down or strictly up, whatever the zone of the datetime or the
-local time; a mark is
-rendered in UTC as fixed text, with its MJD rounded and padded; and every
-function is cached.
+local time; a string that is not a valid datetime is refused, and rounding
+up past the last datetime raises OverflowError; a mark is rendered in UTC
+as fixed text, with its MJD rounded and padded; and every function is
+cached.
 """
 
 import inspect
@@ -23,8 +24,8 @@ from hypothesis import strategies as st
 from masterclock.app import timeutil
 from masterclock.das_processor import epochs
 
-# Kept a day inside the range of datetimes the property tests draw from, so
-# no offset can move them outside it.
+# Kept a day inside the range from MJD zero (1858-11-17) to the end of 2199,
+# so no UTC offset, always under a day, can move an instant outside it.
 naive_instants: Final = st.datetimes(
     min_value=datetime(1858, 11, 18),
     max_value=datetime(2199, 12, 30, 23, 59, 59, 999_999),
@@ -85,7 +86,7 @@ def test_a_naive_datetime_is_rounded_as_utc_whatever_the_local_time(
 def test_a_string_that_is_not_a_datetime_is_refused(
     rounding_function: Callable[[str], object], bad_text: str
 ) -> None:
-    """Raise ValueError for bad ISO 8601, a leap second or a day that isn't."""
+    """Raise ValueError for bad ISO 8601, a leap second or an impossible date."""
     with pytest.raises(ValueError, match=r"."):
         rounding_function(bad_text)
 
@@ -240,7 +241,7 @@ def test_format_epoch_writes_negative_zero_without_a_sign(negative_zero: float) 
 
 
 def test_every_function_is_cached() -> None:
-    """Wrap every function the module defines in an LRU cache of the set size."""
+    """Wrap every function the module defines in an LRU cache of _CACHE_SIZE."""
     # Names with double underscores are left out: Python itself adds
     # __annotate__ to a module whose names carry annotations.
     module_functions = {

@@ -159,7 +159,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     int
         :data:`SUCCESS` when the run finished; :data:`FAILURE` when it
         stopped on a MasterClockError, already logged where it was raised,
-        or a setting that cannot be used, printed on standard error.
+        or a setting or path that cannot be used, logged at ERROR, or
+        printed on standard error when the log level is None or logging
+        cannot start.
 
     Raises
     ------

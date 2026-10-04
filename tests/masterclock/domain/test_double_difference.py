@@ -9,11 +9,12 @@ pairs used; with neither, or with the round trip needed and a prediction
 missing, there is no value; the value is summed exactly and rounded once;
 a local triple (r, r, c) needs only (r, c), collapses to z(r, c) exactly and
 stops with PhaseError when it does not; the value is marked cold when any
-component cold-started; and a constant link offset keeps the value
-continuous as the components used change.
+component cold-started; a constant link offset keeps the value continuous
+as the components used change; and a component has its z and rms exactly
+when it was accepted, and is refused otherwise, logged as raised.
 
-The 110 sigma squares the forward rms, and a local triple that does not
-collapse says so in full.
+The 110 sigma combines the clock pair's and the forward link's rms in
+quadrature, and a local triple that does not collapse says so in full.
 """
 
 import math

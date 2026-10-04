@@ -10,7 +10,9 @@ last row is not a settled acceptance; the correction is -m whole periods
 for the first pair of a D and +m for the second; an undecided case corrects
 nothing and excludes every clock pair in a flagged D; pairs without an
 innovation, or excluded by screening, and links not usable both ways are
-not used; and each correction or undecided case gives an event.
+not used; each correction or undecided case gives an event; and a pair
+given an innovation but no scale is refused with a FilterError, logged as
+raised.
 
 The D scale combines as the design writes it and a slip lies strictly inside
 five of them; a D that cannot be worked out does not stop the rest; and

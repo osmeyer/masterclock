@@ -2,9 +2,10 @@
 
 The rules covered: every exception the module defines descends from
 MasterClockError, which descends from Exception alone, so one clause catches
-all of them and nothing else; and describe_error writes a validation error as
-each field's dotted location and message, and any other error as its text,
-always on one line and never empty.
+all of them and nothing else; a missing setting is a ConfigError; and
+describe_error writes a validation error as each field's dotted location and
+message, and any other error as its text, always on one line and never
+empty.
 """
 
 import inspect
@@ -42,7 +43,7 @@ def test_every_exception_descends_from_the_root() -> None:
 
 
 def test_the_root_descends_from_exception_alone() -> None:
-    """Derive the root from Exception only, apart from built-in errors."""
+    """Derive the root from Exception alone, so it stays apart from built-in errors."""
     assert exceptions.MasterClockError.__bases__ == (Exception,)
 
 

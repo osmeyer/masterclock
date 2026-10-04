@@ -1,14 +1,14 @@
 """Tests for src/masterclock/domain/measurements.py.
 
 The rules covered: a pair measurement is a reading decycled and referred
-to its epoch start, against the prediction or, without one, the anchor; it
-holds the plain values it was made from, and its measurement time, epoch
-start and offset after the epoch start are worked out from the MJD, the
-offset exactly from the datetimes, and none of them can be passed in; an
-epoch starts at midnight and every epoch after; a slip correction moves the
-cycle count and z by whole periods and marks it; a pair or triple
-measurement gives the filter step its plain values; and a triple's sigma
-may be zero.
+to its epoch start, against the prediction or, without one, the anchor,
+with the steering since the epoch start taken off; it holds the plain values
+it was made from, and its measurement time, epoch start and offset after the
+epoch start are worked out from the MJD, the offset exactly from the
+datetimes, and none of them can be passed in; an epoch starts at midnight
+and every epoch after; a slip correction moves the cycle count and z by
+whole periods and marks it; a pair or triple measurement gives the filter
+step its plain values; and a triple's sigma may be zero.
 
 The ranges of a measurement's values are checked where a measurement is
 read back from a file, and tested there (das_processor/test_files.py).
@@ -187,7 +187,10 @@ def test_a_triple_measurement_comes_from_its_value() -> None:
 
 
 def test_a_triple_sigma_may_be_zero() -> None:
-    """Take a sigma of 0, as a pair's rms of 0 is taken, as the scale's floor."""
+    """Accept a sigma of 0, as a pair's rms of 0 is accepted.
+
+    The filter input then has a scale floor of 0.
+    """
     triple_measurement = TripleMeasurement(
         z=1, double_difference_sigma=0.0, components_used="111", pair_cold_started=False
     )

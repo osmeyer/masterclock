@@ -10,7 +10,8 @@ first, so a setting or path that cannot be used is logged at ERROR with exit
 starting or logging is set to None; any later MasterClockError exits 1,
 logged once where it was raised; a second run of the same channel is refused
 by the run lock; a redo deletes the rows from its epoch before the run,
-which computes them again; and logging set to None logs nothing.
+which computes them again; ``--steps`` limits the run to that many epochs;
+and logging set to None logs nothing.
 
 A usage error ends with the missing setting; the logging settings reach the
 logging; and a redo computes its rows again with the settings in force now.
@@ -120,7 +121,7 @@ def test_a_run_exits_zero_and_writes_the_archives(tmp_path: Path) -> None:
 
 
 def test_a_first_run_makes_its_processed_path(tmp_path: Path) -> None:
-    """Make a missing processed_path and its parent, then run as into one there."""
+    """Make a missing processed_path and its parent; write as into an existing one."""
     ready_root, first_root = tmp_path / "ready", tmp_path / "first"
     ready_root.mkdir()
     first_root.mkdir()
@@ -179,7 +180,7 @@ def test_with_logging_silenced_a_bad_setting_is_still_printed(
 def test_a_logging_setting_that_cannot_be_used_is_printed(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Print a log file that cannot be opened on standard error: nothing can log."""
+    """Print on standard error that the log file cannot be opened: nothing can log."""
     argv = make_deployment(tmp_path)
     (tmp_path / "a file").write_text("")
     argv[argv.index("--log-file") + 1] = str(tmp_path / "a file" / "run.log")
@@ -236,7 +237,7 @@ def test_a_second_run_of_the_channel_is_refused(
 
 
 def test_a_redo_deletes_the_rows_from_its_epoch_before_the_run(tmp_path: Path) -> None:
-    """Redo from an MJD before running, so the rows are computed again alike (6.5)."""
+    """Delete the rows from the redo MJD, then compute them again, same bytes (6.5)."""
     argv = make_deployment(tmp_path)
     assert das_processor.main(argv) == 0
     files_before_redo = archived_files(tmp_path)

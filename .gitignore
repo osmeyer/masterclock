@@ -36,8 +36,9 @@ etc/*
 # away, so no rendered copy can drift from the document it came from.
 *.pdf
 
-# Logs are written to a directory at the project root. They are a record of
-# one machine's runs, not part of the project.
+# Logs go wherever the log_file setting points, which may be a logs
+# directory at the project root. They are a record of one machine's runs,
+# not part of the project.
 /logs/
 *.log
 

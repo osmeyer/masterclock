@@ -2,9 +2,9 @@
 
 Every error this project raises descends from :class:`MasterClockError`, so
 one ``except`` clause catches all of them while anything unrelated goes past.
-That rule is what lets the entry point turn a failure it recognises into an
-exit status and say nothing more, on the understanding that the failure was
-already reported where it happened.
+That rule is what lets the entry point turn such a failure into an exit
+status and say nothing more, since the failure was already reported where
+it happened.
 
 The root is here, with the errors of being a program. Every package keeps
 its own errors in its own ``exceptions`` module, and every exception there
@@ -52,10 +52,10 @@ class ConfigError(MasterClockError):
     Examples
     --------
     >>> try:
-    ...     raise ConfigError("missing required entries: [paths] output")
+    ...     raise ConfigError("config file names what the program does not read: [RUN]")
     ... except MasterClockError as exc:
     ...     str(exc)
-    'missing required entries: [paths] output'
+    'config file names what the program does not read: [RUN]'
     """
 
 
@@ -86,7 +86,8 @@ class RunLockError(MasterClockError):
     A run holds an exclusive lock on one named file for as long as it runs,
     so a second run that would write the same output - and so write the same
     data twice - aborts with this error instead. Also raised when the lock
-    file itself cannot be opened.
+    file cannot be opened, locked or written, and when a ``with`` block
+    enters a lock it already holds.
 
     Examples
     --------

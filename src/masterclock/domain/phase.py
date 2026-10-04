@@ -1,9 +1,10 @@
 """The phase of a 5 MHz signal, as the measurements give it, and exact sums of it.
 
 A phase is a whole number of picoseconds. It wraps at one period of the
-signal, so a reading can only say where in the period it fell. Decycling
+signal, so a reading gives only where in the period it fell. Decycling
 puts back the whole periods a reading lost (:func:`decycle`), by comparing
-it with where the estimator expected the phase to be.
+it with the phase the estimator predicts, or else with the series' last
+buffered measurement.
 
 The one phase held more finely is the estimator's, in whole femtoseconds
 (see :data:`FS_PER_PS`).

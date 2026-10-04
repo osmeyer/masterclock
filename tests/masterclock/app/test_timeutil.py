@@ -1,9 +1,12 @@
 """Tests for src/masterclock/app/timeutil.py.
 
-The rules covered: every conversion between datetimes, Unix timestamps,
-Modified Julian Days and Julian Days agrees with exact rational arithmetic to
-within the spacing of the floats involved; every datetime is taken as UTC,
-naive ones included, and every datetime returned is in UTC; and every
+The rules covered: the constants agree with the calendar; every conversion
+between datetimes, Unix timestamps, Modified Julian Days and Julian Days
+agrees with exact rational arithmetic to within the spacing of the floats
+involved; every datetime is taken as UTC, naive ones included, and every
+datetime returned is in UTC; a datetime may be given as ISO 8601 text and a
+number as its text, and text that is neither is refused; a number that is
+not finite, or outside years 1 to 9999, gives no datetime; and every
 function is cached.
 """
 
@@ -34,16 +37,19 @@ UNIX_RANGE_END: Final = (RANGE_END - datetime(1970, 1, 1, tzinfo=UTC)).total_sec
 MJD_RANGE_END: Final = UNIX_RANGE_END / 86_400 + 40_587
 JD_RANGE_START: Final = 2_400_000.5
 JD_RANGE_END: Final = MJD_RANGE_END + JD_RANGE_START
-# The same offset as JD_FIRST, held exactly for the rational arithmetic.
+# The same offset as timeutil.JD_MINUS_MJD, held exactly for the rational
+# arithmetic.
 JD_OFFSET: Final = Fraction(4_800_001, 2)
 
 MICROSECOND: Final = Fraction(1, 10**6)
 DAY_SECONDS: Final = 86_400
 
 # In this range adjacent floats are under a microsecond apart as seconds
-# since 1970 or as an MJD, and about 40 microseconds apart as a JD. Each
-# conversion rounds a few times, so each tolerance allows a little more than
-# the spacing it depends on.
+# since 1970, at most about 1.3 microseconds apart as an MJD, and about 40
+# microseconds apart as a JD. The last rounding of a conversion, onto the
+# spacing of its result, leaves up to half that spacing, and the roundings
+# before it add much less. So each tolerance is above half the spacing of
+# its result.
 UNIX_TOLERANCE: Final = 2 * MICROSECOND
 MJD_TOLERANCE: Final = 2 * MICROSECOND / DAY_SECONDS
 JD_TOLERANCE: Final = 25 * MICROSECOND / DAY_SECONDS
@@ -210,7 +216,7 @@ def test_ensure_utc_keeps_the_instant(zoned_instant: datetime) -> None:
 def test_a_string_that_is_not_a_datetime_is_refused(
     conversion: Callable[[str], object], bad_text: str
 ) -> None:
-    """Raise ValueError for bad ISO 8601, a leap second or a day that isn't."""
+    """Raise ValueError for bad ISO 8601, a leap second or an impossible date."""
     with pytest.raises(ValueError, match=r"."):
         conversion(bad_text)
 
@@ -415,7 +421,7 @@ def test_a_number_that_names_no_instant_is_refused(
 
 
 def test_every_function_is_cached() -> None:
-    """Wrap every function the module defines in an LRU cache of the set size."""
+    """Wrap every function the module defines in an untyped LRU cache of _CACHE_SIZE."""
     # Names with double underscores are left out: Python itself adds
     # __annotate__ to a module whose names carry annotations.
     module_functions = {

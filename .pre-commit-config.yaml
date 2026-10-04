@@ -76,7 +76,7 @@ repos:
         pass_filenames: false
         always_run: true
         verbose: true
-      # The three coverage hooks report on the data the pytest hook above has
+      # The coverage hooks below report on the data the pytest hook above has
       # just written, so they must come after it. Run on their own, they report
       # on whatever pytest run came last.
       - id: coverage-src

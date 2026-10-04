@@ -1,7 +1,12 @@
 """Tests for scripts/check_docstrings.py.
 
-The rule covered: every module, class, method and function has a docstring,
-public or private, nested or not, including ``__init__`` and the magic methods.
+The rules covered: every module, class, method and function has a docstring,
+public or private, nested or not, including ``__init__`` and the magic methods,
+and an empty docstring counts as missing; Python files are found in nested
+folders, and a folder named like one is left out; a file that cannot be read
+or parsed fails, and so does finding no Python files; no folder, or a missing
+one, is a usage error with status 2; and run as a program, the script exits
+with the status main returns.
 """
 
 import runpy

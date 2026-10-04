@@ -16,7 +16,10 @@ up to the second; a clock's location comes from its entries like any
 other setting, never from its type, a later entry moving it from its date,
 and is a positive whole number or not given at all; every clock's
 location at a mark is the last its entries in force give, none before its
-first; and the committed example file loads.
+first; a mark without a timezone, and a clock the file does not name, are
+refused with ConfigError; every series is given its settings with each
+clock's entry settled once; a name that only starts like a reference's may
+have any type; and the committed example file loads.
 
 Every refusal names the file, then the problem, a merge or repeated key with
 its line and column, and is logged as raised; undated entries come first

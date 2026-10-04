@@ -7,8 +7,8 @@ then override any of those except its number of states, from the start or
 from a given MJD. A clock's entries may also give its location, the number
 of the building it is in, which a type never gives: a clock that moves gets
 an entry with the new building from the MJD of the move. The file also gives
-how many counted rejects make a series dormant, and the RMS limit of the
-pairs' gate.
+how many counted rejects make a series dormant, the RMS limit of the pairs'
+gate, and the clocks to ignore: measured, but of no use.
 
 The file is read once, at the start of a run, with a safe YAML loader that
 refuses a key repeated in any mapping, and validated into frozen models
@@ -418,11 +418,15 @@ class ClockConfig(BaseModel):
         The default entry of each clock type.
     clocks : dict of str to tuple of Entry
         Each clock's entries, the first giving its type or every setting.
+    ignore : tuple of str, optional
+        The clocks whose measurements and series are left out without a
+        word; none when the file names none.
 
     Raises
     ------
     pydantic.ValidationError
-        If any check of the clock configuration fails: a clock with no
+        If any check of the clock configuration fails: a clock ignored twice,
+        or ignored and given entries; a clock with no
         entry, or whose first entry gives neither a type the file gives nor,
         undated, every setting itself; a later entry giving a type; a
         reference not of type mc; an entry changing the number of states;
@@ -437,6 +441,7 @@ class ClockConfig(BaseModel):
     rms_limits: RmsLimits = Field(alias="rms_limit")
     types: dict[str, TypeDefault]
     clocks: dict[str, tuple[Entry, ...]]
+    ignore: tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _check(self) -> Self:
@@ -452,6 +457,7 @@ class ClockConfig(BaseModel):
         ValueError
             Naming the first rule broken.
         """
+        self._check_ignored()
         for type_name, type_default in self.types.items():
             self._check_gap(
                 _settled(type_default, (), f"type {type_name}"), f"type {type_name}"
@@ -468,6 +474,24 @@ class ClockConfig(BaseModel):
                     clock_name,
                 )
         return self
+
+    def _check_ignored(self) -> None:
+        """Refuse a clock ignored twice, or ignored and given entries.
+
+        Raises
+        ------
+        ValueError
+            Naming the first such clock.
+        """
+        seen: set[str] = set()
+        for clock_name in self.ignore:
+            if clock_name in seen:
+                message = f"clock {clock_name} is ignored twice"
+                raise ValueError(message)
+            if clock_name in self.clocks:
+                message = f"clock {clock_name} is ignored but has entries"
+                raise ValueError(message)
+            seen.add(clock_name)
 
     def _type_default(
         self, clock_name: str, clock_entries: Sequence[Entry]

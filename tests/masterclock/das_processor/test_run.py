@@ -4,7 +4,7 @@ The rules covered: building an epoch resolves everything it needs: its
 references from its block; every pair, the existing ones kept, and every
 triple, existing or new, whose s and c are in one building at the epoch,
 leaving out, with one warning, every measurement and series of a clock the
-clock configuration has no entry for;
+clock configuration has no entry for, and with none of a clock it ignores;
 the steering of every reference that steers a series, read over
 (E - T, E + T]; and each series' settings, a pair taking its second
 clock's entry and RMS limit and a triple its clock c's entry, kept from
@@ -281,6 +281,40 @@ def test_a_clock_with_no_entry_is_left_out_and_logged(
     with caplog.at_level(logging.WARNING, logger=RUN_LOGGER):
         run.build_epoch(E, das_block, NO_SERIES, config, clock_config, first_epoch)
     assert caplog.records == []
+
+
+def ignoring_deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
+    """Give the deployment with hm9 among the clocks to ignore."""
+    config, _ = make_deployment(tmp_path)
+    ignoring_file = tmp_path / "ignoring.yaml"
+    ignoring_file.write_text(
+        CLOCK_CONFIG_YAML.replace("clocks:\n", "ignore: [hm9]\nclocks:\n"),
+        encoding="utf-8",
+    )
+    return config, read_clock_config(ignoring_file)
+
+
+def test_an_ignored_clock_is_left_out_without_a_word(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Leave out a clock the configuration ignores, its series too, logging nothing."""
+    config, clock_config = ignoring_deployment(tmp_path)
+    earlier_series = ExistingSeries(
+        pairs=frozenset({("mc2", "hm9")}), triples=frozenset({("mc2", "mc2", "hm9")})
+    )
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=RUN_LOGGER):
+        epoch = run.build_epoch(
+            E,
+            das_block_of([*MEASURED_PAIRS, ("mc2", "hm9")]),
+            earlier_series,
+            config,
+            clock_config,
+        )
+    assert caplog.records == []
+    assert epoch.clocks_without_entry == frozenset()
+    assert epoch.pairs == tuple(sorted(MEASURED_PAIRS))
+    assert all("hm9" not in series_key for series_key in epoch.triples)
 
 
 def test_a_series_of_a_clock_with_no_entry_is_left_out(tmp_path: Path) -> None:

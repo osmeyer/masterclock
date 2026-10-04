@@ -119,8 +119,9 @@ class Epoch:
         Every clock's location at E, as the clock configuration gives it.
     clocks_without_entry : frozenset of str, optional
         The clocks measured at E, or with a series before it, that the clock
-        configuration has no entry for; their measurements and series are
-        left out of the epoch.
+        configuration has no entry for and does not ignore; their
+        measurements and series are left out of the epoch, as an ignored
+        clock's are.
 
     Raises
     ------
@@ -263,7 +264,8 @@ def _configured_only(
     A series takes the settings of its clock side, its last name, so a
     measurement or series whose clock the clock configuration lacks cannot
     be worked out. It is left out, and the clock is logged once at WARNING
-    when it is first found so, in the run or after an epoch without it.
+    when it is first found so, in the run or after an epoch without it,
+    unless the configuration ignores it: then nothing is logged.
 
     Parameters
     ----------
@@ -282,12 +284,14 @@ def _configured_only(
     tuple of (DASData or None, ExistingSeries, frozenset of str)
         The block without the measurements of clocks with no entry, ``None``
         when none is left; the series without those of such clocks; and
-        those clocks.
+        those clocks, less the ones the configuration ignores.
     """
     configured = frozenset(clock_config.clocks)
     das_block, block_clocks = _configured_block(das_block, configured)
     earlier_series, series_clocks = _configured_series(earlier_series, configured)
-    clocks_without_entry = block_clocks | series_clocks
+    clocks_without_entry = (block_clocks | series_clocks) - frozenset(
+        clock_config.ignore
+    )
     logged = frozenset() if last_epoch is None else last_epoch.clocks_without_entry
     for clock in sorted(clocks_without_entry - logged):
         _log.warning(

@@ -22,6 +22,11 @@ types:
   mc:       {filter_states: 1, scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432}
   aog:      {filter_states: 1, scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432}
 
+# Clocks the DAS measures that are of no use; their measurements are left
+# out without a word. A clock not named here or below is left out too, with
+# a warning. Leave the key out to ignore none.
+ignore: [gps9]
+
 # Each clock's entries. The first gives its type, or, for a clock no type
 # fits, every setting itself, holding from the start; a later one overrides
 # values other than filter_states, from effective_mjd on. An entry may give

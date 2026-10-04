@@ -20,8 +20,10 @@ first; and the committed example file loads.
 
 Every refusal names the file, then the problem, a merge or repeated key with
 its line and column, and is logged as raised; undated entries come first
-wherever listed; rejects_before_restart may equal the gap limit; and a
-gap limit has no lower bound of its own.
+wherever listed; rejects_before_restart may equal the gap limit; a gap
+limit has no lower bound of its own; and the clocks to ignore are listed,
+none when the file names none, each once and never with entries of its
+own.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -242,6 +244,8 @@ def test_an_unknown_clock_has_no_entry(tmp_path: Path) -> None:
         ("  mc: {filter_states: 1,", "  mc: {colour: red, filter_states: 1,", "colour"),
         ("  default: 50", "  default: 50\n  colour: 3", "colour"),
         ("rejects_before_restart: 36\n", "", "rejects_before_restart"),
+        ("clocks:\n", "ignore: [cs7]\nclocks:\n", "cs7 is ignored but has entries"),
+        ("clocks:\n", "ignore: [gps1, gps1]\nclocks:\n", "gps1 is ignored twice"),
     ],
 )
 def test_every_check_refuses_the_file(
@@ -647,6 +651,13 @@ def test_an_undated_entry_listed_last_still_comes_first(tmp_path: Path) -> None:
     loaded_config = read_config_text(tmp_path, yaml_text)
     assert loaded_config.entry_for("ox23", MARK_BEFORE_MJD_60980).time_constant == 120.0
     assert loaded_config.entry_for("ox23", MJD_60980_START).time_constant == 150.0
+
+
+def test_ignored_clocks_are_listed_or_none(tmp_path: Path) -> None:
+    """Read the clocks to ignore, and none when the file names none (15.2)."""
+    yaml_text = BASE_YAML.replace("clocks:\n", "ignore: [gps1, amp2]\nclocks:\n")
+    assert read_config_text(tmp_path, yaml_text).ignore == ("gps1", "amp2")
+    assert read_config_text(tmp_path).ignore == ()
 
 
 def test_rejects_before_restart_may_equal_the_gap_limit(tmp_path: Path) -> None:

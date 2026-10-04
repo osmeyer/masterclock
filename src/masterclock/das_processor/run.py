@@ -13,7 +13,7 @@ from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Final
+from typing import Final, NamedTuple, Protocol
 
 from gmpy2 import mpq
 
@@ -312,7 +312,9 @@ def _steered(epoch: Epoch) -> bool:
 
 
 def _steering_input(
-    series_key: SeriesKey, epoch: Epoch, *, steered: bool
+    series_key: SeriesKey,
+    epoch_start: datetime,
+    steering: Mapping[str, tuple[SteerEvent, ...]],
 ) -> tuple[mpq, float]:
     """Give a series' steering input over the epoch before E.
 
@@ -320,11 +322,11 @@ def _steering_input(
     ----------
     series_key : series key
         The series.
-    epoch : Epoch
-        The epoch.
-    steered : bool
-        Whether any event falls in the epoch's steering window (see
-        :func:`_steered`).
+    epoch_start : datetime
+        The epoch start E.
+    steering : Mapping of str to tuple of SteerEvent
+        The epoch's steering events; empty, or holding no event, when no
+        event falls in the epoch's steering window.
 
     Returns
     -------
@@ -332,13 +334,66 @@ def _steering_input(
         What :func:`~masterclock.domain.steering.steer_u` gives; zero, as it
         would give, when no event falls in the window.
     """
-    if not steered:
+    if not any(steering.values()):
         return _NO_STEERING_INPUT
-    return steer_u(series_key, epoch.interpolated_datetime, epoch.steering)
+    return steer_u(series_key, epoch_start, steering)
+
+
+class PairReading(NamedTuple):
+    """One DAS measurement of a pair, as the pairs' work needs it.
+
+    Parameters
+    ----------
+    pair : (str, str)
+        The pair measured.
+    measurement_mjd : float
+        When, as the DAS gave it.
+    measured_phase : int
+        The reading, ps.
+    rms : int
+        Its rms, ps.
+    measurement_datetime : datetime
+        When, as a datetime.
+    """
+
+    pair: PairKey
+    measurement_mjd: float
+    measured_phase: int
+    rms: int
+    measurement_datetime: datetime
+
+
+def pair_readings(das_block: DASData | None) -> tuple[PairReading, ...]:
+    """Give a block's measurements as pair readings, in the block's order.
+
+    Parameters
+    ----------
+    das_block : DASData or None
+        The epoch's DAS block, or ``None``.
+
+    Returns
+    -------
+    tuple of PairReading
+        One per measurement; none without a block.
+    """
+    if das_block is None:
+        return ()
+    return tuple(
+        PairReading(
+            (das_measurement.reference, das_measurement.clock),
+            das_measurement.measurement_mjd,
+            das_measurement.measured_phase,
+            das_measurement.rms,
+            das_measurement.measurement_datetime,
+        )
+        for das_measurement in das_block.measurements
+    )
 
 
 def _measured_pairs(
-    epoch: Epoch,
+    epoch_start: datetime,
+    steering: Mapping[str, tuple[SteerEvent, ...]],
+    readings: Iterable[PairReading],
     last_rows: Mapping[SeriesKey, Row],
     predictions: Mapping[PairKey, State | None],
 ) -> dict[PairKey, PairMeasurement]:
@@ -346,8 +401,12 @@ def _measured_pairs(
 
     Parameters
     ----------
-    epoch : Epoch
-        The epoch.
+    epoch_start : datetime
+        The epoch start E.
+    steering : Mapping of str to tuple of SteerEvent
+        The epoch's steering events.
+    readings : Iterable of PairReading
+        The epoch's readings.
     last_rows : Mapping of series key to Row
         Each series' last row.
     predictions : Mapping of (str, str) to State or None
@@ -356,32 +415,26 @@ def _measured_pairs(
     Returns
     -------
     dict of (str, str) to PairMeasurement
-        Each measured pair's measurement, decycled against its prediction,
-        or against its anchor when it has none, with the steering inside
-        the epoch taken off.
+        Each measured pair's measurement, in the readings' order, decycled
+        against its prediction, or against its anchor when it has none,
+        with the steering inside the epoch taken off.
     """
-    if epoch.das_block is None:
-        return {}
-    epoch_start = epoch.interpolated_datetime
-    steered = _steered(epoch)
+    steered = any(steering.values())
     measurements = {}
-    for das_measurement in epoch.das_block.measurements:
-        pair = (das_measurement.reference, das_measurement.clock)
+    for reading in readings:
+        pair = reading.pair
         w = (
-            steer_w(
-                pair, epoch_start, epoch.steering, das_measurement.measurement_datetime
-            )
+            steer_w(pair, epoch_start, steering, reading.measurement_datetime)
             if steered
             else _NO_STEERING_INPUT[0]
         )
-        anchor = anchor_of(last_rows.get(pair))
         measurements[pair] = measure_pair(
-            measurement_mjd=das_measurement.measurement_mjd,
-            measured_phase=das_measurement.measured_phase,
-            rms=das_measurement.rms,
+            measurement_mjd=reading.measurement_mjd,
+            measured_phase=reading.measured_phase,
+            rms=reading.rms,
             prediction=predictions[pair],
             w=w,
-            anchor=anchor,
+            anchor=anchor_of(last_rows.get(pair)),
         )
     return measurements
 
@@ -406,7 +459,8 @@ def _innovations(
     -------
     tuple of (dict, dict)
         The innovation of every pair with a measurement and a prediction,
-        exact, and the innovation scale of every pair with a prediction.
+        exact, in the measurements' order, and the innovation scale of
+        every pair with a prediction, in the predictions' order.
     """
     scales: dict[PairKey, float] = {}
     for pair, prediction in predictions.items():
@@ -423,6 +477,142 @@ def _innovations(
         if prediction is not None:
             innovations[pair] = measurement.z - prediction.x
     return innovations, scales
+
+
+@dataclass(frozen=True, slots=True)
+class PairStart:
+    """What some pairs give before screening (design 7, 8.3).
+
+    Parameters
+    ----------
+    predictions : dict of (str, str) to State or None
+        Each pair's prediction at E, in the pairs' order.
+    measurements : dict of (str, str) to PairMeasurement
+        Each measured pair's measurement, in the readings' order.
+    innovations : dict of (str, str) to mpq
+        Each innovation screening and the slip check use.
+    scales : dict of (str, str) to float
+        Each innovation scale they use.
+    last_flags : dict of (str, str) to str
+        The flags of each pair's last row, in the pairs' order.
+    """
+
+    predictions: dict[PairKey, State | None]
+    measurements: dict[PairKey, PairMeasurement]
+    innovations: dict[PairKey, mpq]
+    scales: dict[PairKey, float]
+    last_flags: dict[PairKey, str]
+
+
+def start_pairs(
+    epoch_start: datetime,
+    steering: Mapping[str, tuple[SteerEvent, ...]],
+    pairs: Iterable[PairKey],
+    readings: Iterable[PairReading],
+    last_rows: Mapping[SeriesKey, Row],
+) -> PairStart:
+    """Predict and decycle some pairs: their part of an epoch before screening.
+
+    Parameters
+    ----------
+    epoch_start : datetime
+        The epoch start E.
+    steering : Mapping of str to tuple of SteerEvent
+        The epoch's steering events.
+    pairs : Iterable of (str, str)
+        The pairs, sorted.
+    readings : Iterable of PairReading
+        Their readings, in the block's order.
+    last_rows : Mapping of series key to Row
+        Each series' row of the epoch before E.
+
+    Returns
+    -------
+    PairStart
+        Each pair's prediction, each measurement, and the innovations,
+        scales and last flags screening and the slip check use.
+
+    Raises
+    ------
+    PhaseError
+        If a reading or its offset is out of range.
+    """
+    pairs = tuple(pairs)
+    predictions = {
+        pair: predict(last_rows.get(pair), _steering_input(pair, epoch_start, steering))
+        for pair in pairs
+    }
+    measurements = _measured_pairs(
+        epoch_start, steering, readings, last_rows, predictions
+    )
+    innovations, scales = _innovations(measurements, predictions, last_rows)
+    last_flags = {pair: last_rows[pair].flags for pair in pairs if pair in last_rows}
+    return PairStart(
+        predictions=predictions,
+        measurements=measurements,
+        innovations=innovations,
+        scales=scales,
+        last_flags=last_flags,
+    )
+
+
+def finish_pairs(
+    epoch_start: datetime,
+    series_params: Mapping[SeriesKey, SeriesParams],
+    last_rows: Mapping[SeriesKey, Row],
+    last_segments: Mapping[SeriesKey, int],
+    pair_start: PairStart,
+    corrections: Mapping[PairKey, int],
+    excluded: frozenset[PairKey],
+) -> tuple[dict[PairKey, PairMeasurement], dict[PairKey, StepResult]]:
+    """Correct and filter some pairs: their part of an epoch after screening.
+
+    Parameters
+    ----------
+    epoch_start : datetime
+        The epoch start E.
+    series_params : Mapping of series key to SeriesParams
+        Each pair's settings at E.
+    last_rows : Mapping of series key to Row
+        Each series' row of the epoch before E.
+    last_segments : Mapping of series key to int
+        The segment of the newest row of each series that starts again
+        (see :func:`~masterclock.domain.filter.carry`).
+    pair_start : PairStart
+        What :func:`start_pairs` gave for the pairs, whose predictions name
+        them in order.
+    corrections : Mapping of (str, str) to int
+        The slip check's correction of each pair it corrected, cycles.
+    excluded : frozenset of (str, str)
+        The pairs screening or the slip check excluded.
+
+    Returns
+    -------
+    tuple of (dict, dict)
+        Each measurement, its slip corrected, and each pair's row and
+        whether it cold-started, in the pairs' order.
+
+    Raises
+    ------
+    FilterError
+        If a row breaks a rule of a row.
+    """
+    measurements = dict(pair_start.measurements)
+    for pair, cycles in corrections.items():
+        measurements[pair] = measurements[pair].corrected(cycles)
+    step_results = {}
+    for pair, prediction in pair_start.predictions.items():
+        measurement = measurements.get(pair)
+        step_results[pair] = filter_step(
+            epoch_start,
+            series_params[pair],
+            last_rows.get(pair),
+            prediction,
+            None if measurement is None else measurement.filter_input(),
+            excluded=pair in excluded,
+            last_segment=last_segments.get(pair),
+        )
+    return measurements, step_results
 
 
 def process_pairs(
@@ -447,7 +637,9 @@ def process_pairs(
     Returns
     -------
     PairStep
-        Every pair's row and what led to it, in sorted key order.
+        Every pair's row and what led to it, in sorted key order: the
+        pairs started (see :func:`start_pairs`), screened and checked for
+        slips across the epoch, then finished (see :func:`finish_pairs`).
 
     Raises
     ------
@@ -457,42 +649,62 @@ def process_pairs(
         If a reading or its offset is out of range.
     """
     epoch_start = epoch.interpolated_datetime
-    steered = _steered(epoch)
-    predictions = {
-        pair: predict(
-            last_rows.get(pair), _steering_input(pair, epoch, steered=steered)
-        )
-        for pair in epoch.pairs
-    }
-    measurements = _measured_pairs(epoch, last_rows, predictions)
-    innovations, scales = _innovations(measurements, predictions, last_rows)
-    screening = screen_references(innovations, scales, epoch.refs)
-    last_flags = {
-        pair: last_rows[pair].flags for pair in epoch.pairs if pair in last_rows
-    }
-    slips = slip_check(innovations, scales, last_flags, epoch.refs, screening.excluded)
-    for pair, cycles in slips.corrections.items():
-        measurements[pair] = measurements[pair].corrected(cycles)
-    excluded_pairs = screening.excluded | slips.excluded
-    step_results = {}
-    for pair in epoch.pairs:
-        measurement = measurements.get(pair)
-        step_results[pair] = filter_step(
-            epoch_start,
-            epoch.series_params[pair],
-            last_rows.get(pair),
-            predictions[pair],
-            None if measurement is None else measurement.filter_input(),
-            excluded=pair in excluded_pairs,
-            last_segment=(last_segments or {}).get(pair),
-        )
+    pair_start = start_pairs(
+        epoch_start,
+        epoch.steering,
+        epoch.pairs,
+        pair_readings(epoch.das_block),
+        last_rows,
+    )
+    screening, slips = screen_pairs(
+        pair_start.innovations, pair_start.scales, pair_start.last_flags, epoch.refs
+    )
+    measurements, step_results = finish_pairs(
+        epoch_start,
+        epoch.series_params,
+        last_rows,
+        last_segments or {},
+        pair_start,
+        slips.corrections,
+        screening.excluded | slips.excluded,
+    )
     return PairStep(
         step_results=step_results,
         measurements=measurements,
-        predictions=predictions,
+        predictions=pair_start.predictions,
         screening=screening,
         slips=slips,
     )
+
+
+def screen_pairs(
+    innovations: Mapping[PairKey, mpq],
+    scales: Mapping[PairKey, float],
+    last_flags: Mapping[PairKey, str],
+    refs: frozenset[str],
+) -> tuple[Screening, Slips]:
+    """Screen an epoch's references and check its pairs for slips (design 10, 11).
+
+    Parameters
+    ----------
+    innovations : Mapping of (str, str) to mpq
+        Every pair's innovation.
+    scales : Mapping of (str, str) to float
+        Every pair's innovation scale.
+    last_flags : Mapping of (str, str) to str
+        The flags of every pair's last row.
+    refs : frozenset of str
+        The epoch's references.
+
+    Returns
+    -------
+    tuple of (Screening, Slips)
+        What screening decided, and what the slip check decided with the
+        pairs screening excluded left out.
+    """
+    screening = screen_references(innovations, scales, refs)
+    slips = slip_check(innovations, scales, last_flags, refs, screening.excluded)
+    return screening, slips
 
 
 @dataclass(frozen=True, slots=True)
@@ -514,15 +726,22 @@ class TripleStep:
     predictions: dict[TripleKey, State | None]
 
 
-def _component(pair_step: PairStep, pair: PairKey) -> Component:
+def component_of(
+    step_result: StepResult | None,
+    prediction: State | None,
+    measurement: PairMeasurement | None,
+) -> Component:
     """Give a pair's part in a triple: its accepted measurement, never its estimate.
 
     Parameters
     ----------
-    pair_step : PairStep
-        What the epoch's pairs gave.
-    pair : (str, str)
-        The pair.
+    step_result : StepResult or None
+        The pair's row at the epoch; ``None`` for a pair the epoch does
+        not hold.
+    prediction : State or None
+        Its prediction at the epoch.
+    measurement : PairMeasurement or None
+        Its measurement, its slip corrected; ``None`` when it has none.
 
     Returns
     -------
@@ -530,10 +749,7 @@ def _component(pair_step: PairStep, pair: PairKey) -> Component:
         Whether the pair's row was accepted, its z and rms when it was, its
         prediction, and whether it cold-started.
     """
-    step_result = pair_step.step_results.get(pair)
-    prediction = pair_step.predictions.get(pair)
     predicted = None if prediction is None else prediction.x
-    measurement = pair_step.measurements.get(pair)
     if step_result is None or "A" not in step_result.row.flags or measurement is None:
         cold_started = step_result is not None and step_result.cold_started
         return Component(
@@ -545,6 +761,29 @@ def _component(pair_step: PairStep, pair: PairKey) -> Component:
         rms=measurement.rms,
         predicted_phase=predicted,
         cold_started=step_result.cold_started,
+    )
+
+
+def _component(pair_step: PairStep, pair: PairKey) -> Component:
+    """Give a pair's part in a triple, from what the epoch's pairs gave.
+
+    Parameters
+    ----------
+    pair_step : PairStep
+        What the epoch's pairs gave.
+    pair : (str, str)
+        The pair.
+
+    Returns
+    -------
+    Component
+        What :func:`component_of` gives for the pair; for a pair the epoch
+        does not hold, one not accepted, with no prediction.
+    """
+    return component_of(
+        pair_step.step_results.get(pair),
+        pair_step.predictions.get(pair),
+        pair_step.measurements.get(pair),
     )
 
 
@@ -572,11 +811,62 @@ def process_triples(
     Returns
     -------
     TripleStep
-        Every triple's row and double difference, in sorted key order. A
+        What :func:`work_triples` gives for every triple, each pair's part
+        worked out once for the epoch.
+
+    Raises
+    ------
+    PhaseError
+        If a local triple does not collapse to its pair.
+    FilterError
+        If a row breaks a rule of a row.
+    """
+    return work_triples(
+        epoch.interpolated_datetime,
+        epoch.steering,
+        epoch.triples,
+        epoch.series_params,
+        last_rows,
+        last_segments or {},
+        {pair: _component(pair_step, pair) for pair in epoch.pairs},
+    )
+
+
+def work_triples(
+    epoch_start: datetime,
+    steering: Mapping[str, tuple[SteerEvent, ...]],
+    triples: Iterable[TripleKey],
+    series_params: Mapping[SeriesKey, SeriesParams],
+    last_rows: Mapping[SeriesKey, Row],
+    last_segments: Mapping[SeriesKey, int],
+    components: Mapping[PairKey, Component],
+) -> TripleStep:
+    """Work some triples of an epoch from the pairs' parts (design 12).
+
+    Parameters
+    ----------
+    epoch_start : datetime
+        The epoch start E.
+    steering : Mapping of str to tuple of SteerEvent
+        The epoch's steering events.
+    triples : Iterable of (str, str, str)
+        The triples, sorted.
+    series_params : Mapping of series key to SeriesParams
+        Each triple's settings at E.
+    last_rows : Mapping of series key to Row
+        Each series' row of the epoch before E.
+    last_segments : Mapping of series key to int
+        The segment of the newest row of each series that starts again.
+    components : Mapping of (str, str) to Component
+        Each pair's part in the triples (see :func:`component_of`).
+
+    Returns
+    -------
+    TripleStep
+        Every triple's row and double difference, in the triples' order. A
         local triple (r, r, c) is given its self pair for both links, so
-        the check that it collapses to its pair runs every epoch. Each
-        pair's part in the triples is worked out once for the epoch; a pair
-        the epoch does not hold takes part as one not accepted, with no
+        the check that it collapses to its pair runs every epoch; a pair
+        with no part given takes part as one not accepted, with no
         prediction.
 
     Raises
@@ -586,13 +876,10 @@ def process_triples(
     FilterError
         If a row breaks a rule of a row.
     """
-    epoch_start = epoch.interpolated_datetime
-    steered = _steered(epoch)
-    components = {pair: _component(pair_step, pair) for pair in epoch.pairs}
     step_results: dict[TripleKey, StepResult] = {}
     measurements: dict[TripleKey, TripleMeasurement] = {}
     predictions: dict[TripleKey, State | None] = {}
-    for triple in epoch.triples:
+    for triple in triples:
         r, s, c = triple
         triple_value = double_difference(
             triple,
@@ -608,16 +895,16 @@ def process_triples(
         if measurement is not None:
             measurements[triple] = measurement
         prediction = predict(
-            last_rows.get(triple), _steering_input(triple, epoch, steered=steered)
+            last_rows.get(triple), _steering_input(triple, epoch_start, steering)
         )
         predictions[triple] = prediction
         step_results[triple] = filter_step(
             epoch_start,
-            epoch.series_params[triple],
+            series_params[triple],
             last_rows.get(triple),
             prediction,
             None if measurement is None else measurement.filter_input(),
-            last_segment=(last_segments or {}).get(triple),
+            last_segment=last_segments.get(triple),
         )
     return TripleStep(
         step_results=step_results, measurements=measurements, predictions=predictions
@@ -859,7 +1146,7 @@ def read_last_state(config: AppConfig) -> dict[SeriesKey, Row]:
     }
 
 
-def _rows_before(
+def rows_before(
     newest_rows: Mapping[SeriesKey, Row], epoch_start: datetime
 ) -> tuple[dict[SeriesKey, Row], dict[SeriesKey, int]]:
     """Split the series' newest rows into last rows and series that start again.
@@ -945,7 +1232,7 @@ def process_epoch(
             if len(series_key) == _TRIPLE
         ),
     )
-    last_rows, last_segments = _rows_before(newest_rows, epoch_start)
+    last_rows, last_segments = rows_before(newest_rows, epoch_start)
     epoch = build_epoch(
         epoch_start,
         das_block,
@@ -991,11 +1278,55 @@ def process_epoch(
     return epoch_done
 
 
+class EpochProcessor(Protocol):
+    """Something that processes an epoch as :func:`process_epoch` does.
+
+    Such as :class:`~masterclock.das_processor.workers.WorkerPool`, which
+    works the series in worker processes.
+    """
+
+    def process_epoch(
+        self,
+        epoch_start: datetime,
+        das_block: DASData | None,
+        day_buffer: DayBuffer,
+        config: AppConfig,
+        clock_config: ClockConfig,
+        last_epoch: Epoch | None = None,
+        steering_files: SteeringFiles | None = None,
+    ) -> Epoch:
+        """Process one epoch and add its rows to the day buffer.
+
+        Parameters
+        ----------
+        epoch_start : datetime
+            The epoch start E.
+        das_block : DASData or None
+            The epoch's DAS block, or ``None`` when the DAS measured nothing.
+        day_buffer : DayBuffer
+            The day buffer.
+        config : AppConfig
+            The run's settings.
+        clock_config : ClockConfig
+            The clock configuration.
+        last_epoch : Epoch or None, optional
+            The epoch processed before this one in the run.
+        steering_files : SteeringFiles or None, optional
+            The run's steering files.
+
+        Returns
+        -------
+        Epoch
+            The epoch, as :func:`process_epoch` gives it in its result.
+        """
+
+
 def run(
     config: AppConfig,
     clock_config: ClockConfig,
     steps: int | None,
     shutdown: ShutdownHandler,
+    epoch_processor: EpochProcessor | None = None,
 ) -> None:
     """Process the channel's epochs in order, up to the end of the data (design 6.3).
 
@@ -1009,6 +1340,9 @@ def run(
         How many epochs to process at most; ``None`` for all the data has.
     shutdown : ShutdownHandler
         Asked between epochs whether to stop.
+    epoch_processor : EpochProcessor or None, optional
+        What processes each epoch; ``None``, the default, for
+        :func:`process_epoch` in this process.
 
     Raises
     ------
@@ -1051,15 +1385,26 @@ def run(
         if next_das_block.interpolated_datetime == epoch_start:
             das_block = next_das_block
             next_das_block = _next_block(das_blocks, epoch_start + _EPOCH)
-        last_epoch = process_epoch(
-            epoch_start,
-            das_block,
-            day_buffer,
-            config,
-            clock_config,
-            last_epoch,
-            steering_files,
-        ).epoch
+        if epoch_processor is None:
+            last_epoch = process_epoch(
+                epoch_start,
+                das_block,
+                day_buffer,
+                config,
+                clock_config,
+                last_epoch,
+                steering_files,
+            ).epoch
+        else:
+            last_epoch = epoch_processor.process_epoch(
+                epoch_start,
+                das_block,
+                day_buffer,
+                config,
+                clock_config,
+                last_epoch,
+                steering_files,
+            )
         if (epoch_start + _EPOCH).date() != epoch_start.date():
             write_buffer(day_buffer)
         epoch_start += _EPOCH
@@ -1133,17 +1478,19 @@ def _pair_names(channel: RfChannel, pair_keys: Iterable[PairKey]) -> str:
     return ", ".join(series_name(channel, pair) for pair in sorted(pair_keys))
 
 
-def _log_screening(pair_step: PairStep, channel: RfChannel) -> None:
+def log_screening(screening: Screening, slips: Slips, channel: RfChannel) -> None:
     """Log what screening and the slip check found (design 16.2).
 
     Parameters
     ----------
-    pair_step : PairStep
-        What the epoch's pairs gave.
+    screening : Screening
+        What screening decided.
+    slips : Slips
+        What the slip check decided.
     channel : {'a', 'b'}
         The RF channel.
     """
-    for screening_event in pair_step.screening.events:
+    for screening_event in screening.events:
         ref_names = "-".join(screening_event.references)
         excluded_names = _pair_names(channel, screening_event.excluded)
         if screening_event.finding == "self_missing":
@@ -1160,7 +1507,7 @@ def _log_screening(pair_step: PairStep, channel: RfChannel) -> None:
             _log.warning(
                 "closure of link %s failed: excluded %s", ref_names, excluded_names
             )
-    for slip_event in pair_step.slips.events:
+    for slip_event in slips.events:
         if slip_event.finding == "slip_corrected":
             pair_name = series_name(channel, slip_event.pairs[0])
             _log.info("%s slip corrected: %+d cycles", pair_name, slip_event.cycles)
@@ -1292,30 +1639,82 @@ def log_epoch(
     """
     if not _log.isEnabledFor(logging.WARNING):
         return
-    trace_logged = _log.isEnabledFor(TRACE)
     pair_step, triple_step = epoch_done.pair_step, epoch_done.triple_step
-    _log_screening(pair_step, channel)
-    series_results: list[tuple[SeriesKey, StepResult, State | None]] = [
-        (pair, step_result, pair_step.predictions[pair])
-        for pair, step_result in pair_step.step_results.items()
-    ]
-    series_results += [
-        (triple, step_result, triple_step.predictions[triple])
-        for triple, step_result in triple_step.step_results.items()
-    ]
-    for series_key, step_result, prediction in series_results:
-        series_label = series_name(channel, series_key)
-        _log_series(series_label, step_result, last_rows.get(series_key))
-        if trace_logged:
-            _log_trace(series_label, step_result.row, prediction)
-    accepted_count = sum(
-        "A" in step_result.row.flags for _, step_result, _ in series_results
+    log_screening(pair_step.screening, pair_step.slips, channel)
+    accepted_count = log_series_results(
+        pair_step.step_results, pair_step.predictions, last_rows, channel
     )
-    _log.info(
-        "epoch %s: %d pairs, %d triples, %d accepted, %d held",
+    accepted_count += log_series_results(
+        triple_step.step_results, triple_step.predictions, last_rows, channel
+    )
+    log_counts(
         epoch_done.epoch.interpolated_datetime,
         len(pair_step.step_results),
         len(triple_step.step_results),
         accepted_count,
-        len(series_results) - accepted_count,
+    )
+
+
+def log_series_results[KeyT: SeriesKey](
+    step_results: Mapping[KeyT, StepResult],
+    predictions: Mapping[KeyT, State | None],
+    last_rows: Mapping[SeriesKey, Row],
+    channel: RfChannel,
+) -> int:
+    """Log each series' outcome at an epoch, in the order given (design 16.2).
+
+    Parameters
+    ----------
+    step_results : Mapping of series key to StepResult
+        Each series' row at the epoch, in the order to log them.
+    predictions : Mapping of series key to State or None
+        Each series' prediction at the epoch.
+    last_rows : Mapping of series key to Row
+        Each series' last row.
+    channel : {'a', 'b'}
+        The RF channel.
+
+    Returns
+    -------
+    int
+        How many of the rows were accepted.
+
+    Notes
+    -----
+    A series' TRACE line is made only when TRACE is logged.
+    """
+    trace_logged = _log.isEnabledFor(TRACE)
+    accepted_count = 0
+    for series_key, step_result in step_results.items():
+        series_label = series_name(channel, series_key)
+        _log_series(series_label, step_result, last_rows.get(series_key))
+        if trace_logged:
+            _log_trace(series_label, step_result.row, predictions[series_key])
+        accepted_count += "A" in step_result.row.flags
+    return accepted_count
+
+
+def log_counts(
+    epoch_start: datetime, pair_count: int, triple_count: int, accepted_count: int
+) -> None:
+    """Log an epoch's counts at INFO (design 16.2).
+
+    Parameters
+    ----------
+    epoch_start : datetime
+        The epoch start E.
+    pair_count : int
+        How many pairs the epoch held.
+    triple_count : int
+        How many triples it held.
+    accepted_count : int
+        How many of their rows were accepted; the rest are held.
+    """
+    _log.info(
+        "epoch %s: %d pairs, %d triples, %d accepted, %d held",
+        epoch_start,
+        pair_count,
+        triple_count,
+        accepted_count,
+        pair_count + triple_count - accepted_count,
     )

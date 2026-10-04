@@ -1583,6 +1583,34 @@ _FILE_KIND_ORDER: Final[dict[FileKind, int]] = {"meas": 0, "ddiff": 1}
 """The order the kinds of file are written in: measurement files first."""
 
 
+def record_line(file_record: MeasRecord | DdiffRecord) -> tuple[str, Row]:
+    """Write a series' record as its file's line, and give the row to keep.
+
+    Parameters
+    ----------
+    file_record : MeasRecord or DdiffRecord
+        A series' measurement and row at an epoch.
+
+    Returns
+    -------
+    tuple of (str, Row)
+        The line, with its newline, and the row a later run would read back
+        from it: the row as it is, less what the file does not hold, a
+        measurement row's innovation.
+
+    Raises
+    ------
+    DataFileError
+        If a value is wider than its column.
+    """
+    if isinstance(file_record, MeasRecord):
+        return (
+            format_meas_row(file_record) + "\n",
+            dataclasses.replace(file_record.row, innovation=None),
+        )
+    return format_ddiff_row(file_record) + "\n", file_record.row
+
+
 class DayBuffer:
     """The rows computed since the last write, for every file (design 5.8).
 
@@ -1659,6 +1687,66 @@ class DayBuffer:
         what the file does not hold: a measurement row's innovation.
         """
         file_kind: FileKind = "meas" if isinstance(file_record, MeasRecord) else "ddiff"
+        self._check_series(data_file, file_kind, series_key)
+        line_text, kept_row = record_line(file_record)
+        self.file_lines.setdefault(data_file, []).append(line_text)
+        self.last_rows[series_key] = kept_row
+        self._started(kept_row.interpolated_datetime)
+
+    def add_line(
+        self,
+        data_file: Path,
+        file_kind: FileKind,
+        series_key: SeriesKey,
+        line_text: str,
+        epoch_start: datetime,
+    ) -> None:
+        """Add a series' line for an epoch, made elsewhere by :func:`record_line`.
+
+        The series' newest row is not kept here: whoever made the line keeps
+        it, as a worker process does for its own series.
+
+        Parameters
+        ----------
+        data_file : Path
+            The series' file.
+        file_kind : {'meas', 'ddiff'}
+            The kind of file.
+        series_key : (str, str) or (str, str, str)
+            The series.
+        line_text : str
+            The row's line, with its newline.
+        epoch_start : datetime
+            The row's epoch.
+
+        Raises
+        ------
+        DataFileError
+            If ``data_file`` was given another series or kind of file before.
+        """
+        self._check_series(data_file, file_kind, series_key)
+        self.file_lines.setdefault(data_file, []).append(line_text)
+        self._started(epoch_start)
+
+    def _check_series(
+        self, data_file: Path, file_kind: FileKind, series_key: SeriesKey
+    ) -> None:
+        """Note the series a path is for, refusing a path given another before.
+
+        Parameters
+        ----------
+        data_file : Path
+            The series' file.
+        file_kind : {'meas', 'ddiff'}
+            The kind of file.
+        series_key : (str, str) or (str, str, str)
+            The series.
+
+        Raises
+        ------
+        DataFileError
+            If ``data_file`` was given another series or kind of file before.
+        """
         if self._file_series.setdefault(data_file, (file_kind, series_key)) != (
             file_kind,
             series_key,
@@ -1667,15 +1755,6 @@ class DayBuffer:
                 f"{data_file} holds the {self._file_series[data_file]} series,"
                 f" not {(file_kind, series_key)}"
             )
-        if isinstance(file_record, MeasRecord):
-            row_line = format_meas_row(file_record)
-            kept_row = dataclasses.replace(file_record.row, innovation=None)
-        else:
-            row_line = format_ddiff_row(file_record)
-            kept_row = file_record.row
-        self.file_lines.setdefault(data_file, []).append(row_line + "\n")
-        self.last_rows[series_key] = kept_row
-        self._started(kept_row.interpolated_datetime)
 
     def _started(self, epoch_start: datetime | None) -> None:
         """Note an epoch of a buffered row, keeping the earliest.

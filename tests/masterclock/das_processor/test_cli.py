@@ -35,6 +35,7 @@ EVERY_OPTION: list[str] = [
     "--redo-from-mjd", "60010.5",
     "--start-from-mjd", "59600",
     "--clock-config-file", "/etc/clocks.yaml",
+    "--num-workers", "3",
     "--steps", "6",
     "--log-file", "/logs/das.log",
     "--log-level", "DEBUG",
@@ -48,7 +49,7 @@ usage: das_processor [-h] [--version] [--config-file PATH] [--rf {a,b}]
                      [--cd5m5m-path PATH] [--steering-path PATH]
                      [--processed-path PATH] [--redo-from-mjd MJD]
                      [--start-from-mjd MJD] [--clock-config-file PATH]
-                     [--steps N] [--log-file PATH]
+                     [--num-workers N] [--steps N] [--log-file PATH]
                      [--log-level {TRACE,DEBUG,INFO,WARNING,ERROR,CRITICAL,None}]
                      [--backup-count N]
 
@@ -85,6 +86,10 @@ options:
                         parameters and each pair's RMS limit, overriding the
                         config file's [PROCESSED] clock_config_file (default:
                         use the config file)
+  --num-workers N       number of worker processes to work each epoch's
+                        series, overriding the config file's [PROCESSED]
+                        num_workers; pass None to work them in the main
+                        process alone (default: use the config file)
   --steps N             process exactly this many ten-minute epochs and shut
                         down, instead of every epoch not yet processed;
                         command line only, with no config-file entry (default:
@@ -123,6 +128,7 @@ def test_every_option_is_read_as_given() -> None:
         redo_from_mjd=60010.5,
         start_from_mjd=59600.0,
         clock_config_file=Path("/etc/clocks.yaml"),
+        num_workers=3,
         steps=6,
         log_file=Path("/logs/das.log"),
         log_level="DEBUG",
@@ -142,6 +148,7 @@ def test_an_option_left_out_defers_to_the_config_file() -> None:
         "redo_from_mjd": None,
         "start_from_mjd": UNSET,
         "clock_config_file": UNSET,
+        "num_workers": UNSET,
         "log_file": UNSET,
         "log_level": UNSET,
         "backup_count": UNSET,
@@ -154,6 +161,7 @@ def test_an_option_left_out_defers_to_the_config_file() -> None:
     [
         ("--log-file", "None", "log_file"),
         ("--log-level", "None", "log_level"),
+        ("--num-workers", "None", "num_workers"),
     ],
 )
 def test_none_sets_no_value_where_accepted(

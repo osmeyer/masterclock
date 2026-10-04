@@ -139,6 +139,10 @@ class CliOptions(BaseModel):
         Name of the logging level, ``None`` when logging is explicitly
         disabled, or :data:`UNSET` when the option was omitted (defer to the
         config file).
+    num_workers : PositiveInt, None, or Unset
+        Number of worker processes to work each epoch's series, ``None``
+        when the main process works them alone, or :data:`UNSET` when the
+        option was omitted (defer to the config file).
     backup_count : PositiveInt, None, or Unset
         Number of rotated daily log files to keep, ``None`` when every rotated
         file is kept, or :data:`UNSET` when the option was omitted (defer to
@@ -162,6 +166,7 @@ class CliOptions(BaseModel):
     clock_config_file: AbsolutePath | Unset = UNSET
     log_file: AbsolutePath | Unset | None = UNSET
     log_level: LogLevelName | Unset | None = UNSET
+    num_workers: PositiveInt | Unset | None = UNSET
     backup_count: PositiveInt | Unset | None = UNSET
     steps: PositiveInt | None = None
 
@@ -269,6 +274,18 @@ def build_parser() -> argparse.ArgumentParser:
             "path to the YAML file giving each clock's estimator parameters "
             "and each pair's RMS limit, overriding the config file's "
             "[PROCESSED] clock_config_file (default: use the config file)"
+        ),
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=positive_int_or_none,
+        default=UNSET,
+        metavar="N",
+        help=(
+            "number of worker processes to work each epoch's series, "
+            "overriding the config file's [PROCESSED] num_workers; pass "
+            f"{NONE_LITERAL} to work them in the main process alone "
+            "(default: use the config file)"
         ),
     )
     parser.add_argument(
@@ -389,6 +406,7 @@ def parse_args(argv: Sequence[str] | None = None) -> CliOptions:
         clock_config_file=namespace.clock_config_file,
         log_file=namespace.log_file,
         log_level=None if namespace.log_level == NONE_LITERAL else namespace.log_level,
+        num_workers=namespace.num_workers,
         backup_count=namespace.backup_count,
         steps=namespace.steps,
     )

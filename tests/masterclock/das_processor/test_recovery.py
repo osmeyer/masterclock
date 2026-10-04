@@ -129,6 +129,7 @@ def make_deployment(deployment_directory: Path) -> AppConfig:
                 "processed_path": deployment_directory / "processed",
                 "start_from_mjd": datetime_to_mjd(FIRST_EPOCH_START),
                 "clock_config_file": deployment_directory / "clock_config.yaml",
+                "num_workers": None,
             },
             "logging": {"log_file": None, "log_level": None, "backup_count": None},
         }

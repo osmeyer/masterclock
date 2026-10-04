@@ -120,6 +120,7 @@ def test_none_is_accepted_by_the_settings_whose_options_accept_it() -> None:
     assert none_accepting_fields == {
         "log_file",
         "log_level",
+        "num_workers",
         "backup_count",
     }
     for setting in config.SETTINGS:
@@ -151,6 +152,7 @@ def test_a_file_of_the_required_settings_builds(tmp_path: Path) -> None:
         "processed_path": Path("/data/processed"),
         "start_from_mjd": cli.START_FROM_MJD,
         "clock_config_file": Path("/etc/clocks.yaml"),
+        "num_workers": None,
     }
     assert app_config.logging.model_dump() == {
         "log_file": Path("/logs/das.log"),
@@ -213,6 +215,8 @@ def test_a_start_given_in_the_file_is_kept(tmp_path: Path) -> None:
         ("PROCESSED__start_from_mjd", "None", "invalid positive float value"),
         ("PROCESSED__start_from_mjd", "1", "MJD must be on a day from 50000"),
         ("LOGGING__backup_count", "0", "value must be a positive integer"),
+        ("PROCESSED__num_workers", "0", "value must be a positive integer"),
+        ("PROCESSED__num_workers", "2.5", "invalid positive int value"),
     ],
 )
 def test_a_bad_value_in_the_file_is_refused(
@@ -282,8 +286,20 @@ def test_none_in_the_file_sets_no_value_where_accepted(tmp_path: Path) -> None:
     app_config = build_from_ini(
         tmp_path,
         LOGGING__backup_count="None",
+        PROCESSED__num_workers="None",
     )
     assert app_config.logging.backup_count is None
+    assert app_config.processed.num_workers is None
+
+
+def test_a_number_of_workers_is_read_from_either_source(tmp_path: Path) -> None:
+    """Read num_workers from the file, as the command line reads it, which wins."""
+    from_file = build_from_ini(tmp_path, PROCESSED__num_workers="+4")
+    assert from_file.processed.num_workers == 4
+    from_command_line = build_from_ini(
+        tmp_path, "--num-workers", "None", PROCESSED__num_workers="4"
+    )
+    assert from_command_line.processed.num_workers is None
 
 
 def test_required_settings_given_by_neither_are_named(tmp_path: Path) -> None:

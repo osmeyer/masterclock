@@ -24,7 +24,10 @@ of a sound file is read back as its row (U26). A roll-back keeps a file's
 rows up to an epoch, found by searching though epochs may have no row, says
 what it did to the file and logs nothing; a redo is logged once at INFO.
 
-The write: every check is made before a file is opened, and a failed one
+A line made elsewhere is buffered for its series as a record's line is,
+its epoch noted and no row kept, and the row kept for a record is the one
+its line gives back. The write: every check is made before a file is
+opened, and a failed one
 changes nothing; files are written one at a time, measurement files first;
 with a journal, the earliest buffered epoch is flushed to it before any data
 file opens and it is deleted after the last flush, a journal already there
@@ -1491,6 +1494,22 @@ def test_a_buffer_takes_nothing_from_a_clashing_one(tmp_path: Path) -> None:
     with pytest.raises(DataFileError, match="series"):
         day_buffer.take(epoch_buffer)
     assert (buffered_lines(day_buffer), dict(day_buffer.last_rows)) == buffer_before
+
+
+def test_a_line_made_elsewhere_is_buffered_as_a_record_is(tmp_path: Path) -> None:
+    """Buffer a ready line for its series, noting its epoch and keeping no row."""
+    pair_path = tmp_path / "das_a.mc2.ox23.dat"
+    line_text, kept_row = files.record_line(predicted_record(3))
+    assert kept_row == dataclasses.replace(predicted_record(3).row, innovation=None)
+    day_buffer = files.DayBuffer("a")
+    day_buffer.add_line(pair_path, "meas", PAIR_KEY, line_text, E + 3 * ONE_EPOCH)
+    day_buffer.add_line(pair_path, "meas", PAIR_KEY, line_text, E + ONE_EPOCH)
+    assert day_buffer.file_lines == {pair_path: [line_text, line_text]}
+    assert day_buffer.earliest_epoch == E + ONE_EPOCH
+    assert day_buffer.series_of(pair_path) == ("meas", PAIR_KEY)
+    assert day_buffer.last_rows == {}
+    with pytest.raises(DataFileError, match="series"):
+        day_buffer.add_line(pair_path, "ddiff", TRIPLE_KEY, line_text, E)
 
 
 # ---------------------------------------------------------- the write journal

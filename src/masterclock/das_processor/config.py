@@ -27,8 +27,15 @@ status 2) rather than a configuration failure.
 import os
 from typing import TYPE_CHECKING, Annotated, Final
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, ValidationError
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    PositiveInt,
+    ValidationError,
+)
 
+from masterclock.app.cli import positive_int
 from masterclock.app.config import (
     AbsolutePath,
     LoggingConfig,
@@ -111,6 +118,14 @@ SETTINGS: Final[tuple[Setting, ...]] = (
         "start_from_mjd",
         "--start-from-mjd",
         allow_none=False,
+    ),
+    Setting(
+        "num_workers",
+        "processed",
+        "PROCESSED",
+        "num_workers",
+        "--num-workers",
+        allow_none=True,
     ),
     Setting(
         "backup_count",
@@ -218,6 +233,10 @@ class ProcessedConfig(BaseModel):
     clock_config_file : Path
         Absolute path of the YAML file giving each clock's estimator
         parameters and each pair's RMS limit.
+    num_workers : PositiveInt or None
+        How many worker processes work each epoch's series, or ``None`` to
+        work them in the main process alone. Text is read as
+        :func:`~masterclock.app.cli.positive_int` reads it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -225,6 +244,7 @@ class ProcessedConfig(BaseModel):
     processed_path: AbsolutePath
     start_from_mjd: Annotated[DayMjd, BeforeValidator(_start_when_not_given)]
     clock_config_file: AbsolutePath
+    num_workers: Annotated[PositiveInt | None, as_on_command_line(positive_int)]
 
     @property
     def meas_path(self) -> Path:

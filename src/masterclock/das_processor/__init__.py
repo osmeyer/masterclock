@@ -37,6 +37,7 @@ from masterclock.das_processor.epochs import floor_to_ten_minutes
 from masterclock.das_processor.files import redo_from
 from masterclock.das_processor.run import data_series
 from masterclock.das_processor.run import run as run_channel
+from masterclock.das_processor.workers import WorkerPool
 
 SUCCESS: Final[int] = 0
 """The exit status of a run that finished."""
@@ -170,7 +171,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     The run holds its channel's lock throughout, so a second run of the
     same channel is refused, and turns a termination signal into a request
     to stop between epochs. A redo, when one is asked for, deletes its rows
-    before the run starts, and the run then computes them again.
+    before the run starts, and the run then computes them again. With
+    num_workers set, worker processes work each epoch's series; they start
+    after any redo and stop when the run ends (design 6.8).
     """
     run_settings = _read_settings(argv)
     if run_settings is None:
@@ -193,7 +196,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                     floor_to_ten_minutes(mjd_to_datetime(redo_mjd)),
                     config.das.rf,
                 )
-            run_channel(config, clock_config, cli_options.steps, shutdown)
+            num_workers = config.processed.num_workers
+            if num_workers is None:
+                run_channel(config, clock_config, cli_options.steps, shutdown)
+            else:
+                with WorkerPool(
+                    num_workers, config.processed.processed_path, config.das.rf
+                ) as worker_pool:
+                    run_channel(
+                        config, clock_config, cli_options.steps, shutdown, worker_pool
+                    )
     except MasterClockError:
         return FAILURE
     return SUCCESS

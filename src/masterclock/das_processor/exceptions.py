@@ -1,4 +1,4 @@
-"""The errors of reading and writing das_processor's data files.
+"""The errors of das_processor: its data files, and its worker processes.
 
 Every one descends from :class:`~masterclock.app.exceptions.MasterClockError`,
 so the one ``except`` clause that catches every error the project raises
@@ -152,3 +152,20 @@ class LateLineError(RefusedLineError):
     """
 
     refusal_kind: ClassVar[str] = "late"
+
+
+class WorkerError(MasterClockError):
+    """Raised when a worker process fails or stops answering.
+
+    A failure of the project's own kinds in a worker is sent back and
+    raised again as it is; this is raised for any other failure there, and
+    for a worker that stopped answering.
+
+    Examples
+    --------
+    >>> try:
+    ...     raise WorkerError("worker 2 stopped answering")
+    ... except MasterClockError as exc:
+    ...     str(exc)
+    'worker 2 stopped answering'
+    """

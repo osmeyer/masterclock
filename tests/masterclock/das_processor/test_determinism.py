@@ -167,6 +167,7 @@ def write_deployment(deployment_directory: Path, deployment: Deployment) -> AppC
                 "processed_path": deployment_directory / "processed",
                 "start_from_mjd": datetime_to_mjd(first_epoch_start),
                 "clock_config_file": deployment_directory / "clock_config.yaml",
+                "num_workers": None,
             },
             "logging": {"log_file": None, "log_level": None, "backup_count": None},
         }

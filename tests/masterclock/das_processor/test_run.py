@@ -126,6 +126,7 @@ def make_deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
                 "processed_path": tmp_path / "processed",
                 "start_from_mjd": None,
                 "clock_config_file": clock_config_file,
+                "num_workers": None,
             },
             "logging": {"log_file": None, "log_level": None, "backup_count": None},
         }
@@ -1851,7 +1852,7 @@ def test_no_steering_is_worked_out_when_no_event_falls_near(
     assert not run._steered(epoch)
     series_keys: list[SeriesKey] = [*epoch.pairs, *epoch.triples]
     for series_key in series_keys:
-        assert run._steering_input(series_key, epoch, steered=False) == steer_u(
+        assert run._steering_input(series_key, E, epoch.steering) == steer_u(
             series_key, E, epoch.steering
         )
 
@@ -2076,7 +2077,7 @@ def test_a_series_with_no_row_for_the_epoch_before_starts_again() -> None:
     """Give rows of the epoch before as last rows, and older series their segments."""
     current_row = last_row()
     older_row = last_row(interpolated_datetime=PREVIOUS_EPOCH - 3 * T, segment=6)
-    last_rows, last_segments = run._rows_before(
+    last_rows, last_segments = run.rows_before(
         {("mc1", "mc1"): current_row, ("mc2", "mc2"): older_row}, E
     )
     assert last_rows == {("mc1", "mc1"): current_row}

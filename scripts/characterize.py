@@ -3,10 +3,12 @@
 A characterization run is das_processor run with every clock at one state,
 into a processed_path of its own. This script reads that run's files and,
 for every clock measured against a reference, prepares the z of each local
-triple (r, r, c) in the design's steps, fits the clock's noise model to
-their Allan variances and works out the settings: the time constant M, the
-initial innovation scale sigma0 and the gap limit G_max. It prints one line
-per clock::
+triple (r, r, c) in the design's steps, fits the clock's noise model and the
+measurement's white phase noise to their Allan variances, and works out the
+settings: the time constant M, the initial innovation scale sigma0 (the
+measurement noise) and the gap limit G_max. The measurement noise comes
+from the fit, never from the rms the DAS reports. Days when the phase holds
+no clock signal are left out. It prints one line per clock::
 
     uv run --frozen python scripts/characterize.py RUN --rf a --three-state ox
 
@@ -48,8 +50,12 @@ T: Final[int] = EPOCH_SECONDS
 EPOCHS_PER_DAY: Final[int] = 86_400 // EPOCH_SECONDS
 """Epochs in a day, to turn an epoch-start MJD into an epoch number."""
 
+NO_SIGNAL_PS: Final[float] = 10_000.0
+"""The typical one-epoch change, less the day's median change, above which a
+day holds no clock signal, ps (step 3)."""
+
 OUTLIER_SPREADS: Final[float] = 5.0
-"""How many robust spreads a change may stray from the median (step 4)."""
+"""How many robust spreads a change may stray from its day's median (steps 5, 6)."""
 
 MAD_TO_SIGMA: Final[float] = 1.4826
 """The robust spread of normal values per median absolute deviation."""
@@ -208,23 +214,8 @@ def read_triple_rows(data_file: Path) -> list[TripleRow]:
     return triple_rows
 
 
-class PairRows(NamedTuple):
-    """What steps 3 and the noise floor need of a local pair's file.
-
-    Parameters
-    ----------
-    deltas : dict of int to float
-        Each measured epoch's measurement time after its start, s.
-    rms_values : list of int
-        Every rms the pair's rows hold, ps.
-    """
-
-    deltas: dict[int, float]
-    rms_values: list[int]
-
-
-def read_pair_rows(data_file: Path) -> PairRows:
-    """Read the measurement times and rms values of a local pair's file.
+def read_pair_deltas(data_file: Path) -> dict[int, float]:
+    """Read the measurement times of a local pair's file (step 4).
 
     Parameters
     ----------
@@ -233,12 +224,11 @@ def read_pair_rows(data_file: Path) -> PairRows:
 
     Returns
     -------
-    PairRows
-        The measurement time after its epoch start of every row with a
-        measurement, and the rms of each.
+    dict of int to float
+        The measurement time after its epoch start, s, of every row with a
+        measurement, by epoch.
     """
     deltas = {}
-    rms_values = []
     for row_line in _rows(data_file, MEAS_HEADER_LINES):
         measured_text = _field(row_line, MEAS_SLICES, "measurement_datetime")
         if measured_text == EMPTY:
@@ -249,8 +239,7 @@ def read_pair_rows(data_file: Path) -> PairRows:
         measured_at = datetime.fromisoformat(measured_text)
         epoch = epoch_number(_field(row_line, MEAS_SLICES, "interpolated_mjd"))
         deltas[epoch] = (measured_at - epoch_start).total_seconds()
-        rms_values.append(int(_field(row_line, MEAS_SLICES, "rms")))
-    return PairRows(deltas=deltas, rms_values=rms_values)
+    return deltas
 
 
 type Stretch = dict[int, float]
@@ -320,13 +309,114 @@ def one_epoch_changes(stretch: Stretch) -> dict[int, float]:
     }
 
 
-def to_epoch_start(stretch: Stretch, deltas: dict[int, float]) -> Stretch:
-    """Move each value back to its epoch start by rate times delta (step 3).
+def _day(epoch: int) -> int:
+    """Give the day an epoch is in, as a day number.
+
+    Parameters
+    ----------
+    epoch : int
+        The epoch number.
+
+    Returns
+    -------
+    int
+        The epoch number divided by the epochs in a day, rounded down.
+
+    Examples
+    --------
+    >>> _day(143), _day(144)
+    (0, 1)
+    """
+    return epoch // EPOCHS_PER_DAY
+
+
+def _changes_by_day(changes: dict[int, float]) -> dict[int, list[float]]:
+    """Group changes by the day of the epoch each ends at.
+
+    Parameters
+    ----------
+    changes : dict of int to float
+        Changes, by the epoch each ends at.
+
+    Returns
+    -------
+    dict of int to list of float
+        Each day's changes.
+    """
+    by_day: dict[int, list[float]] = {}
+    for epoch, change in changes.items():
+        by_day.setdefault(_day(epoch), []).append(change)
+    return by_day
+
+
+def _typical_departure(changes: Sequence[float]) -> tuple[float, float]:
+    """Give the median of some changes and their median absolute departure from it.
+
+    Parameters
+    ----------
+    changes : sequence of float
+        At least one change.
+
+    Returns
+    -------
+    (float, float)
+        The median, and the median of the absolute differences from it.
+
+    Examples
+    --------
+    >>> _typical_departure([1.0, 2.0, 10.0])
+    (2.0, 1.0)
+    """
+    median_change = statistics.median(changes)
+    return median_change, statistics.median(abs(c - median_change) for c in changes)
+
+
+def drop_no_signal_days(stretch: Stretch) -> tuple[Stretch, int]:
+    """Drop every day whose phase holds no clock signal (step 3).
+
+    A DAS channel whose clock is off or disconnected still gives readings,
+    but their phase is spread over the whole period, so their one-epoch
+    changes are tens of nanoseconds; a clock's are far smaller.
 
     Parameters
     ----------
     stretch : Stretch
         Values from step 2, by epoch.
+
+    Returns
+    -------
+    (Stretch, int)
+        The values less every row of each day whose one-epoch changes, less
+        their median, typically depart from it by more than
+        :data:`NO_SIGNAL_PS`; and how many days were dropped. A day with no
+        two rows one epoch apart cannot be judged, and is kept.
+
+    Examples
+    --------
+    >>> quiet = {epoch: 5.0 * epoch for epoch in range(144)}
+    >>> random_phase = {144 + k: (7_919.0 * k * k) % 200_000 for k in range(144)}
+    >>> kept, dropped = drop_no_signal_days({**quiet, **random_phase})
+    >>> sorted(kept) == list(range(144)), dropped
+    (True, 1)
+    """
+    no_signal = {
+        day
+        for day, changes in _changes_by_day(one_epoch_changes(stretch)).items()
+        if _typical_departure(changes)[1] > NO_SIGNAL_PS
+    }
+    kept = {
+        epoch: value for epoch, value in stretch.items() if _day(epoch) not in no_signal
+    }
+    return kept, len(no_signal)
+
+
+def to_epoch_start(stretch: Stretch, deltas: dict[int, float]) -> Stretch:
+    """Move each value back to its epoch start by rate times delta (step 4).
+
+    Parameters
+    ----------
+    stretch : Stretch
+        Values from step 3, by epoch.
     deltas : dict of int to float
         Each epoch's measurement time after its start, s.
 
@@ -353,55 +443,82 @@ class SingularError(ArithmeticError):
     """A linear system with no single solution."""
 
 
-def _is_outlier(before: float | None, after: float | None, limit: float) -> bool:
-    """Tell whether a row's changes, less the median change, mark it as an outlier.
+type Departure = tuple[float, float]
+"""A change less its day's median change, and its day's outlier limit, ps."""
+
+
+def _day_limits(changes: dict[int, float]) -> dict[int, Departure]:
+    """Give each day's median change and outlier limit.
 
     Parameters
     ----------
-    before : float or None
-        The change from the row one epoch before, less the median change;
-        ``None`` when that row is missing.
-    after : float or None
-        The change to the row one epoch after, less the median change;
-        ``None`` when that row is missing.
-    limit : float
-        :data:`OUTLIER_SPREADS` robust spreads.
+    changes : dict of int to float
+        Changes, by the epoch each ends at.
+
+    Returns
+    -------
+    dict of int to (float, float)
+        For each day, the median of its changes and :data:`OUTLIER_SPREADS`
+        robust spreads of them: 1.4826 times their median absolute departure
+        from that median.
+    """
+    limits = {}
+    for day, day_changes in _changes_by_day(changes).items():
+        median_change, departure = _typical_departure(day_changes)
+        limits[day] = (median_change, OUTLIER_SPREADS * MAD_TO_SIGMA * departure)
+    return limits
+
+
+def _is_outlier(before: Departure | None, after: Departure | None) -> bool:
+    """Tell whether a row's changes, against their days' limits, mark it as an outlier.
+
+    Parameters
+    ----------
+    before : (float, float) or None
+        The change from the row one epoch before, less its day's median, and
+        that day's limit; ``None`` when that row is missing.
+    after : (float, float) or None
+        The same for the change to the row one epoch after.
 
     Returns
     -------
     bool
-        With both: whether each is past the limit, in opposite directions.
-        With one: whether it is past the limit. With neither: false.
+        With both: whether each is past its limit, in opposite directions.
+        With one: whether it is past its limit. With neither: false.
 
     Examples
     --------
-    >>> _is_outlier(9.0, -9.0, 5.0), _is_outlier(9.0, 9.0, 5.0)
+    >>> _is_outlier((9.0, 5.0), (-9.0, 5.0)), _is_outlier((9.0, 5.0), (9.0, 5.0))
     (True, False)
-    >>> _is_outlier(None, 9.0, 5.0), _is_outlier(None, None, 5.0)
+    >>> _is_outlier(None, (9.0, 5.0)), _is_outlier(None, None)
     (True, False)
     """
     if before is not None and after is not None:
-        return abs(before) > limit and abs(after) > limit and before * after < 0
+        return (
+            abs(before[0]) > before[1]
+            and abs(after[0]) > after[1]
+            and before[0] * after[0] < 0
+        )
     single = before if before is not None else after
-    return single is not None and abs(single) > limit
+    return single is not None and abs(single[0]) > single[1]
 
 
 def drop_outliers(stretch: Stretch) -> Stretch:
-    """Drop rows whose changes from their neighbours are out of line (step 4).
+    """Drop rows whose changes from their neighbours are out of line (step 5).
 
     Parameters
     ----------
     stretch : Stretch
-        Values from step 3, by epoch.
+        Values from step 4, by epoch.
 
     Returns
     -------
     Stretch
         The values less every row whose changes from both neighbouring rows,
-        one epoch either side, each differ from the median change by more
-        than :data:`OUTLIER_SPREADS` robust spreads, in opposite directions;
-        or, with only one such neighbour present, whose one change does.
-        Unchanged when no two rows are one epoch apart.
+        one epoch either side, each differ from their day's median change by
+        more than their day's limit (see :func:`_day_limits`), in opposite
+        directions; or, with only one such neighbour present, whose one
+        change does. Unchanged when no two rows are one epoch apart.
 
     Examples
     --------
@@ -411,17 +528,86 @@ def drop_outliers(stretch: Stretch) -> Stretch:
     [0, 1, 2, 3, 4, 6, 7, 8, 9]
     """
     changes = one_epoch_changes(stretch)
-    if not changes:
-        return dict(stretch)
-    median_change = statistics.median(changes.values())
-    off_median = {epoch: change - median_change for epoch, change in changes.items()}
-    spread = MAD_TO_SIGMA * statistics.median(abs(off) for off in off_median.values())
-    limit = OUTLIER_SPREADS * spread
+    limits = _day_limits(changes)
+    departures = {
+        epoch: (change - limits[_day(epoch)][0], limits[_day(epoch)][1])
+        for epoch, change in changes.items()
+    }
     return {
         epoch: value
         for epoch, value in stretch.items()
-        if not _is_outlier(off_median.get(epoch), off_median.get(epoch + 1), limit)
+        if not _is_outlier(departures.get(epoch), departures.get(epoch + 1))
     }
+
+
+def split_at_jumps(stretch: Stretch) -> list[Stretch]:
+    """Split the rows wherever the phase jumps and stays (step 6).
+
+    Parameters
+    ----------
+    stretch : Stretch
+        Values from step 5, by epoch, outliers dropped.
+
+    Returns
+    -------
+    list of Stretch
+        The values split before every row whose change from the row before,
+        less its day's median change times the epochs between them, is past
+        its day's limit times those epochs (see :func:`_day_limits`). A row
+        whose day has no two rows one epoch apart cannot be judged, and
+        starts no new piece. None for no values.
+
+    Examples
+    --------
+    >>> values = {epoch: float(epoch) for epoch in range(6)}
+    >>> values.update({epoch: epoch + 500.0 for epoch in range(6, 10)})
+    >>> [sorted(piece) for piece in split_at_jumps(values)]
+    [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]]
+    """
+    limits = _day_limits(one_epoch_changes(stretch))
+    pieces: list[Stretch] = []
+    piece: Stretch = {}
+    previous: tuple[int, float] | None = None
+    for epoch, value in sorted(stretch.items()):
+        if previous is not None and _jumps(previous, (epoch, value), limits):
+            pieces.append(piece)
+            piece = {}
+        piece[epoch] = value
+        previous = (epoch, value)
+    if piece:
+        pieces.append(piece)
+    return pieces
+
+
+def _jumps(
+    previous: tuple[int, float],
+    current: tuple[int, float],
+    limits: dict[int, Departure],
+) -> bool:
+    """Tell whether the phase jumps between two rows.
+
+    Parameters
+    ----------
+    previous : (int, float)
+        The earlier row's epoch and value.
+    current : (int, float)
+        The later row's epoch and value.
+    limits : dict of int to (float, float)
+        Each day's median change and limit.
+
+    Returns
+    -------
+    bool
+        Whether the change, less the later row's day's median change times
+        the epochs between them, is past that day's limit times those
+        epochs; false when that day has no limit.
+    """
+    day_limit = limits.get(_day(current[0]))
+    if day_limit is None:
+        return False
+    epochs = current[0] - previous[0]
+    departure = current[1] - previous[1] - day_limit[0] * epochs
+    return abs(departure) > day_limit[1] * epochs
 
 
 def _eliminate(rows: list[list[float]], column: int) -> None:
@@ -524,12 +710,12 @@ def _quadratic(points: dict[float, float]) -> tuple[float, float, float]:
 
 
 def remove_drift(stretch: Stretch) -> Stretch:
-    """Take off a quadratic fitted to the values by least squares (step 5).
+    """Take off a quadratic fitted to the values by least squares (step 7).
 
     Parameters
     ----------
     stretch : Stretch
-        Values from step 4, by epoch.
+        Values from step 6, by epoch.
 
     Returns
     -------
@@ -682,61 +868,30 @@ def reference_variances(stretches: Sequence[Stretch]) -> list[TauValue]:
     ]
 
 
-def white_phase_variance(sigma_meas: float, tau: float) -> float:
-    """Give the Allan variance of white phase noise of sigma_meas ps at tau.
+def clock_variances(per_reference: Sequence[list[TauValue]]) -> list[TauValue]:
+    """Combine every reference's variances at each tau by their terms.
 
     Parameters
     ----------
-    sigma_meas : float
-        The measurement noise, ps.
-    tau : float
-        The averaging time, s.
-
-    Returns
-    -------
-    float
-        3 sigma_meas**2 10**-24 / tau**2.
-
-    Examples
-    --------
-    >>> white_phase_variance(10.0, 600.0) == 3 * 100 * 1e-24 / 360_000
-    True
-    """
-    return 3.0 * (sigma_meas * PS) ** 2 / (tau * tau)
-
-
-def clock_variances(
-    per_reference: Sequence[tuple[list[TauValue], float]],
-) -> list[TauValue]:
-    """Take each reference's measurement noise off and combine them by terms.
-
-    Parameters
-    ----------
-    per_reference : sequence of (list of TauValue, float)
-        Each local triple's variances and its pair's sigma_meas, ps.
+    per_reference : sequence of list of TauValue
+        Each local triple's variances.
 
     Returns
     -------
     list of TauValue
-        For each tau, the variances less their white phase noise, those
-        not above zero left out, weighted by their number of terms.
+        For each tau, the variances weighted by their number of terms.
 
     Examples
     --------
-    >>> clock_variances([([TauValue(1, 2.0, 10)], 0.0), ([TauValue(1, 4.0, 30)], 0.0)])
+    >>> clock_variances([[TauValue(1, 2.0, 10)], [TauValue(1, 4.0, 30)]])
     [TauValue(m=1, variance=3.5, terms=40)]
     """
     totals: dict[int, tuple[float, int]] = {}
-    for tau_values, sigma_meas in per_reference:
+    for tau_values in per_reference:
         for tau_value in tau_values:
-            clock_variance = tau_value.variance - white_phase_variance(
-                sigma_meas, tau_value.m * T
-            )
-            if clock_variance <= 0:
-                continue
             weighted, terms = totals.get(tau_value.m, (0.0, 0))
             totals[tau_value.m] = (
-                weighted + clock_variance * tau_value.terms,
+                weighted + tau_value.variance * tau_value.terms,
                 terms + tau_value.terms,
             )
     return [
@@ -745,17 +900,42 @@ def clock_variances(
     ]
 
 
-type Coefficients = tuple[float, float, float]
-"""a_-1, a_0, a_1 of sigma_y**2(tau) = a_-1 / tau + a_0 + a_1 tau."""
+type Coefficients = tuple[float, float, float, float]
+"""a_-2, a_-1, a_0, a_1 of sigma_y**2(tau) = a_-2 / tau**2 + a_-1 / tau + a_0 + a_1 tau:
+the measurement's white phase noise, then the clock's white, flicker and
+random-walk frequency noise."""
 
 
 def model_variance(coefficients: Coefficients, tau: float) -> float:
-    """Give the noise model's Allan variance at tau.
+    """Give the fitted Allan variance at tau, the measurement's noise included.
 
     Parameters
     ----------
-    coefficients : (float, float, float)
-        a_-1, a_0, a_1.
+    coefficients : (float, float, float, float)
+        a_-2, a_-1, a_0, a_1.
+    tau : float
+        The averaging time, s.
+
+    Returns
+    -------
+    float
+        a_-2 / tau**2 + a_-1 / tau + a_0 + a_1 tau.
+
+    Examples
+    --------
+    >>> model_variance((360_000.0, 600.0, 1.0, 1 / 600), 600.0)
+    4.0
+    """
+    return coefficients[0] / (tau * tau) + clock_variance(coefficients, tau)
+
+
+def clock_variance(coefficients: Coefficients, tau: float) -> float:
+    """Give the clock's own Allan variance at tau, sigma_y,c**2.
+
+    Parameters
+    ----------
+    coefficients : (float, float, float, float)
+        a_-2, a_-1, a_0, a_1; a_-2 is not used.
     tau : float
         The averaging time, s.
 
@@ -766,15 +946,37 @@ def model_variance(coefficients: Coefficients, tau: float) -> float:
 
     Examples
     --------
-    >>> model_variance((600.0, 1.0, 1 / 600), 600.0)
+    >>> clock_variance((5.0, 600.0, 1.0, 1 / 600), 600.0)
     3.0
     """
-    a_minus_1, a_0, a_1 = coefficients
+    _, a_minus_1, a_0, a_1 = coefficients
     return a_minus_1 / tau + a_0 + a_1 * tau
 
 
-def _basis(tau: float) -> tuple[float, float, float]:
-    """Give the model's three terms at tau, each with coefficient one.
+def measurement_noise(coefficients: Coefficients) -> float:
+    """Give the measurement noise the fit found, sigma_meas, ps.
+
+    Parameters
+    ----------
+    coefficients : (float, float, float, float)
+        a_-2, a_-1, a_0, a_1.
+
+    Returns
+    -------
+    float
+        sqrt(a_-2 / 3) in ps: white phase noise of sigma_meas has an Allan
+        variance of 3 sigma_meas**2 / tau**2.
+
+    Examples
+    --------
+    >>> round(measurement_noise((3e-24 * 100, 0.0, 0.0, 0.0)), 9)
+    10.0
+    """
+    return math.sqrt(coefficients[0] / 3.0) / PS
+
+
+def _basis(tau: float) -> tuple[float, float, float, float]:
+    """Give the model's four terms at tau, each with coefficient one.
 
     Parameters
     ----------
@@ -783,10 +985,10 @@ def _basis(tau: float) -> tuple[float, float, float]:
 
     Returns
     -------
-    (float, float, float)
-        1 / tau, 1 and tau.
+    (float, float, float, float)
+        1 / tau**2, 1 / tau, 1 and tau.
     """
-    return (1.0 / tau, 1.0, tau)
+    return (1.0 / (tau * tau), 1.0 / tau, 1.0, tau)
 
 
 def _normal_equations(
@@ -838,7 +1040,7 @@ def _scaled_columns(
     tau_values : sequence of TauValue
         The variances.
     used : tuple of int
-        Which of the three terms are fitted.
+        Which of the four terms are fitted.
 
     Returns
     -------
@@ -893,7 +1095,7 @@ def _weighted_fit(
     weights : sequence of float
         Each one's weight.
     used : tuple of int
-        Which of the three terms are fitted; the others are zero.
+        Which of the four terms are fitted; the others are zero.
 
     Returns
     -------
@@ -911,17 +1113,17 @@ def _weighted_fit(
         return None
     if any(value < 0 for value in solution):
         return None
-    coefficients = [0.0, 0.0, 0.0]
+    coefficients = [0.0, 0.0, 0.0, 0.0]
     for term, value, scale in zip(used, solution, scales, strict=True):
         coefficients[term] = value / scale
-    fitted = (coefficients[0], coefficients[1], coefficients[2])
+    fitted = (coefficients[0], coefficients[1], coefficients[2], coefficients[3])
     return fitted, _weighted_residual(tau_values, weights, fitted)
 
 
 def nonnegative_fit(
     tau_values: Sequence[TauValue], weights: Sequence[float]
 ) -> Coefficients:
-    """Fit the noise model with every coefficient zero or above.
+    """Fit the model with every coefficient zero or above.
 
     Parameters
     ----------
@@ -932,46 +1134,46 @@ def nonnegative_fit(
 
     Returns
     -------
-    (float, float, float)
+    (float, float, float, float)
         The coefficients with the least weighted squared residual among the
         fits of every set of terms that come out zero or above; all zero
         when none does.
 
     Examples
     --------
-    >>> taus = [TauValue(m, 1.0 / (m * 600) + 1e-3, 10) for m in (1, 2, 4, 8)]
-    >>> [round(value, 9) for value in nonnegative_fit(taus, [1.0] * 4)]
-    [1.0, 0.001, 0.0]
+    >>> taus = [TauValue(m, 1.0 / (m * 600) + 1e-3, 10) for m in (1, 2, 4, 8, 16)]
+    >>> [round(value, 9) for value in nonnegative_fit(taus, [1.0] * 5)]
+    [0.0, 1.0, 0.001, 0.0]
     """
     best: tuple[Coefficients, float] | None = None
-    for size in (1, 2, 3):
-        for used in combinations(range(3), size):
+    for size in (1, 2, 3, 4):
+        for used in combinations(range(4), size):
             fit = _weighted_fit(tau_values, weights, used)
             if fit is not None and (best is None or fit[1] < best[1]):
                 best = fit
-    return best[0] if best is not None else (0.0, 0.0, 0.0)
+    return best[0] if best is not None else (0.0, 0.0, 0.0, 0.0)
 
 
 def fit_noise_model(tau_values: Sequence[TauValue]) -> Coefficients:
-    """Fit the noise model, weighted by the model itself, until it settles (step 6).
+    """Fit the model, weighted by the model itself, until it settles (step 8).
 
     Parameters
     ----------
     tau_values : sequence of TauValue
-        The clock's variances, measurement noise taken off.
+        The clock's variances, the measurement's noise in them.
 
     Returns
     -------
-    (float, float, float)
+    (float, float, float, float)
         The coefficients. Each tau = mT is weighted by (terms / m) over the
         model's value there squared: the measured value at first, then the
         fitted model's, until no coefficient changes by more than
         :data:`FIT_TOLERANCE` of itself or :data:`FIT_ROUNDS` fits are done.
     """
     if not tau_values:
-        return (0.0, 0.0, 0.0)
+        return (0.0, 0.0, 0.0, 0.0)
     expected = [tv.variance for tv in tau_values]
-    coefficients = (0.0, 0.0, 0.0)
+    coefficients = (0.0, 0.0, 0.0, 0.0)
     for _ in range(FIT_ROUNDS):
         weights = [
             (tv.terms / tv.m) / (value * value)
@@ -991,34 +1193,32 @@ def fit_noise_model(tau_values: Sequence[TauValue]) -> Coefficients:
     return coefficients
 
 
-def crossover(coefficients: Coefficients, sigma_meas: float) -> float | None:
+def crossover(coefficients: Coefficients) -> float | None:
     """Find the tau at which measurement noise and clock noise are equal, s.
 
     Parameters
     ----------
-    coefficients : (float, float, float)
-        The clock's noise model.
-    sigma_meas : float
-        The measurement noise, ps.
+    coefficients : (float, float, float, float)
+        The fitted model.
 
     Returns
     -------
     float or None
-        tau_c with sqrt(3) sigma_meas 10**-12 / tau_c = sigma_y,c(tau_c);
-        ``None`` when the model is zero, and so never reaches it.
+        tau_c with a_-2 / tau_c**2 = sigma_y,c**2(tau_c), the smallest tau
+        searched when the fit found no measurement noise; ``None`` when the
+        clock's own model is zero, and so never reaches it.
 
     Examples
     --------
-    >>> round(crossover((3e-24 * 100 / 600, 0.0, 0.0), 10.0))
+    >>> round(crossover((3e-24 * 100, 3e-24 * 100 / 600, 0.0, 0.0)))
     600
     """
-    if not any(coefficients):
+    if not any(coefficients[1:]):
         return None
-    floor = 3.0 * (sigma_meas * PS) ** 2
 
     def excess(tau: float) -> float:
         """Give tau**2 times the clock's variance less the measurement's, at tau."""
-        return model_variance(coefficients, tau) * tau * tau - floor
+        return clock_variance(coefficients, tau) * tau * tau - coefficients[0]
 
     low, high = 1e-6, 1.0
     while excess(high) < 0:
@@ -1060,8 +1260,8 @@ def gap_limit(coefficients: Coefficients, M: int) -> int:
 
     Parameters
     ----------
-    coefficients : (float, float, float)
-        The clock's noise model.
+    coefficients : (float, float, float, float)
+        The fitted model; only the clock's own terms are used.
     M : int
         The time constant, epochs.
 
@@ -1069,15 +1269,15 @@ def gap_limit(coefficients: Coefficients, M: int) -> int:
     -------
     int
         The largest n for which 5 sigma_x,pred((n + 1) T) < P / 2, with
-        sigma_x,pred(tau) = 10**12 tau sqrt(sigma_y**2(tau) + sigma_y**2(MT)),
+        sigma_x,pred(tau) = 10**12 tau sqrt(sigma_y,c**2(tau) + sigma_y,c**2(MT)),
         up to :data:`GAP_SEARCH_LIMIT`; -1 when not even n = 0 is.
     """
-    settled = model_variance(coefficients, M * T)
+    settled = clock_variance(coefficients, M * T)
 
     def fits(n: int) -> bool:
         """Tell whether a gap of n held rows is decycled with the margin."""
         tau = (n + 1) * T
-        sigma = tau / PS * math.sqrt(model_variance(coefficients, tau) + settled)
+        sigma = tau / PS * math.sqrt(clock_variance(coefficients, tau) + settled)
         return GATE_SIGMAS * sigma < PHASE_PERIOD / 2
 
     if not fits(0):
@@ -1107,10 +1307,12 @@ class ClockResult(NamedTuple):
         The references whose local triples were used.
     rows : int
         The prepared rows used, over every reference.
+    days_dropped : int
+        The days left out for holding no clock signal, over every reference.
     sigma_meas : float
-        The median rms of every local pair, ps.
-    coefficients : (float, float, float)
-        The noise model.
+        The measurement noise the fit found, ps: sigma0.
+    coefficients : (float, float, float, float)
+        The fitted model.
     tau_c : float or None
         The crossover, s.
     M : int or None
@@ -1124,6 +1326,7 @@ class ClockResult(NamedTuple):
     clock: str
     references: tuple[str, ...]
     rows: int
+    days_dropped: int
     sigma_meas: float
     coefficients: Coefficients
     tau_c: float | None
@@ -1133,30 +1336,36 @@ class ClockResult(NamedTuple):
 
 
 def prepare(
-    triple_rows: Sequence[TripleRow], pair_rows: PairRows, drift: bool
-) -> list[Stretch]:
-    """Prepare one local triple's values in steps 1 to 5.
+    triple_rows: Sequence[TripleRow], deltas: dict[int, float], drift: bool
+) -> tuple[list[Stretch], int]:
+    """Prepare one local triple's values in steps 1 to 7.
 
     Parameters
     ----------
     triple_rows : sequence of TripleRow
         The local triple's rows.
-    pair_rows : PairRows
-        Its local pair's measurement times and rms values.
+    deltas : dict of int to float
+        Its local pair's measurement times after their epoch starts, s.
     drift : bool
         Whether the clock runs with three states, so drift is taken off.
 
     Returns
     -------
-    list of Stretch
-        The prepared values of the rows from each cold start up to the next.
+    (list of Stretch, int)
+        The prepared values of the rows from each cold start up to the
+        next, split at every jump; and how many days were left out for
+        holding no clock signal.
     """
     prepared = []
+    days_dropped = 0
     for stretch in split_at_cold_starts(triple_rows):
-        moved = to_epoch_start(stretch, pair_rows.deltas)
-        cleaned = drop_outliers(moved)
-        prepared.append(remove_drift(cleaned) if drift else cleaned)
-    return prepared
+        with_signal, dropped = drop_no_signal_days(stretch)
+        days_dropped += dropped
+        cleaned = drop_outliers(to_epoch_start(with_signal, deltas))
+        prepared += [
+            remove_drift(piece) if drift else piece for piece in split_at_jumps(cleaned)
+        ]
+    return prepared, days_dropped
 
 
 def characterize_clock(
@@ -1187,33 +1396,30 @@ def characterize_clock(
         The clock's settings and the variances they came from.
     """
     per_reference = []
-    rms_values: list[int] = []
     rows = 0
+    days_dropped = 0
     for reference in references:
         triple_rows = read_triple_rows(
             series_file(processed_path, channel, (reference, reference, clock))
         )
-        pair_rows = read_pair_rows(
+        deltas = read_pair_deltas(
             series_file(processed_path, channel, (reference, clock))
         )
-        stretches = prepare(triple_rows, pair_rows, drift)
+        stretches, dropped = prepare(triple_rows, deltas, drift)
         rows += sum(len(stretch) for stretch in stretches)
-        rms_values += pair_rows.rms_values
-        pair_sigma = (
-            statistics.median(pair_rows.rms_values) if pair_rows.rms_values else 0.0
-        )
-        per_reference.append((reference_variances(stretches), float(pair_sigma)))
-    sigma_meas = float(statistics.median(rms_values)) if rms_values else 0.0
+        days_dropped += dropped
+        per_reference.append(reference_variances(stretches))
     variances = clock_variances(per_reference)
     coefficients = fit_noise_model(variances)
-    tau_c = crossover(coefficients, sigma_meas)
+    tau_c = crossover(coefficients)
     M = time_constant(tau_c)
     gap = None if M is None else gap_limit(coefficients, M)
     return ClockResult(
         clock=clock,
         references=tuple(references),
         rows=rows,
-        sigma_meas=sigma_meas,
+        days_dropped=days_dropped,
+        sigma_meas=measurement_noise(coefficients),
         coefficients=coefficients,
         tau_c=tau_c,
         M=M,
@@ -1260,24 +1466,24 @@ def format_result(result: ClockResult) -> str:
     Returns
     -------
     str
-        The clock, its references, rows, sigma_meas, the three coefficients,
-        tau_c, M and G_max, separated by spaces; '-' for what is missing.
+        The clock, its references, rows, days dropped, sigma_meas, the four
+        coefficients, tau_c, M and G_max, separated by spaces; '-' for what
+        is missing.
 
     Examples
     --------
-    >>> print(format_result(ClockResult("hm1", ("mc1",), 10, 3.0, (1e-22, 0.0, 1e-33),
+    >>> print(format_result(ClockResult("hm1", ("mc1",), 10, 2, 3.0,
+    ...                                  (2.7e-23, 1e-22, 0.0, 1e-33),
     ...                                  1200.0, 2, 50, ())))
-    hm1 mc1 10 3.0 1.000e-22 0.000e+00 1.000e-33 1200 2 50
+    hm1 mc1 10 2 3.0 2.700e-23 1.000e-22 0.000e+00 1.000e-33 1200 2 50
     """
-    a_minus_1, a_0, a_1 = result.coefficients
     fields = [
         result.clock,
         ",".join(result.references),
         str(result.rows),
+        str(result.days_dropped),
         f"{result.sigma_meas:.1f}",
-        f"{a_minus_1:.3e}",
-        f"{a_0:.3e}",
-        f"{a_1:.3e}",
+        *(f"{coefficient:.3e}" for coefficient in result.coefficients),
         "-" if result.tau_c is None else f"{result.tau_c:.0f}",
         "-" if result.M is None else str(result.M),
         "-" if result.gap is None else str(result.gap),
@@ -1286,8 +1492,8 @@ def format_result(result: ClockResult) -> str:
 
 
 REPORT_HEADER: Final[str] = (
-    "clock references rows sigma_meas_ps a_minus_1 a_0 a_1 tau_c_s"
-    " time_constant gap_limit"
+    "clock references rows days_dropped sigma_meas_ps a_minus_2 a_minus_1 a_0 a_1"
+    " tau_c_s time_constant gap_limit"
 )
 """The report's first line: what each field holds."""
 

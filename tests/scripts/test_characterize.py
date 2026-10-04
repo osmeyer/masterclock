@@ -2,20 +2,25 @@
 
 The rules covered: a row's columns are read where the file's column table
 puts them; the accepted rows of a local triple, z less step_offset, are
-split at every cold start, a row flagged N after a dormant row; each value
-is moved back to its epoch start by the median one-epoch rate times its
-measurement time after the start; a row whose changes from its neighbours
-both stray, in opposite directions, by more than five robust spreads is
-dropped, and with one neighbour its one change decides; drift is taken off
-as a quadratic; the Allan variance at tau = mT uses only whole sets of three
-rows, m doubling up to a third of the rows' time, the stretches combined by
-their terms; each reference's white phase noise is taken off and the
-references combined by their terms; the noise model is fitted with every
-coefficient zero or above, weighted by terms over m and the model's value
-squared, until it settles; the crossover sets M, at least one; the gap limit
-is the largest gap decycled with a five-sigma margin; and the script reads
-a characterization run's files and prints one line per clock, references
-left out.
+split at every cold start, a row flagged N after a dormant row; a day whose
+one-epoch changes typically depart from their median by more than 10 ns
+holds no clock signal and is dropped, and a day that cannot be judged is
+kept; each value is moved back to its epoch start by the median one-epoch
+rate times its measurement time after the start; a row whose changes from
+its neighbours both stray, in opposite directions, by more than five robust
+spreads of their own day is dropped, and with one neighbour its one change
+decides; the rows are split wherever the phase jumps and stays, across a
+gap in proportion to its length; drift is taken off as a quadratic; the
+Allan variance at tau = mT uses only whole sets of three rows, m doubling
+up to a third of the rows' time, the stretches combined by their terms and
+the references by theirs; the model, the measurement's white phase noise
+and the clock's three noises, is fitted with every coefficient zero or
+above, weighted by terms over m and the model's value squared, until it
+settles; the measurement noise comes from the fit's white phase term and
+never from the rms column; the crossover of the two noises sets M, at least
+one; the gap limit is the largest gap decycled with a five-sigma margin of
+the clock's own noise; and the script reads a characterization run's files
+and prints one line per clock, references left out.
 
 The noise data are invented, from a seeded generator.
 """
@@ -79,6 +84,48 @@ def test_no_accepted_row_gives_no_stretch() -> None:
 
 # ------------------------------------------------------------------- step 3
 
+DAY: Final = characterize.EPOCHS_PER_DAY
+"""Epochs in a day."""
+
+
+def random_phase_day(day: int, seed: int = 9) -> dict[int, float]:
+    """Give a day of phase spread at random over the whole period, ps."""
+    generator = seeded(seed)
+    return {day * DAY + k: generator.uniform(0.0, 200_000.0) for k in range(DAY)}
+
+
+def test_a_day_with_no_clock_signal_is_dropped() -> None:
+    """Drop a day of random phase between quiet days, and count it."""
+    stretch = {**noisy_ramp(DAY), **random_phase_day(1)}
+    stretch.update(
+        {
+            epoch: value
+            for epoch, value in noisy_ramp(3 * DAY).items()
+            if epoch >= 2 * DAY
+        }
+    )
+    kept, dropped = characterize.drop_no_signal_days(stretch)
+    assert dropped == 1
+    assert sorted(kept) == [*range(DAY), *range(2 * DAY, 3 * DAY)]
+
+
+def test_a_noisy_clock_with_a_signal_is_kept() -> None:
+    """Keep a day whose changes depart from their median by under 10 ns."""
+    generator = seeded(10)
+    stretch = {
+        epoch: 5_000.0 * epoch + generator.gauss(0.0, 5_000.0) for epoch in range(DAY)
+    }
+    assert characterize.drop_no_signal_days(stretch) == (stretch, 0)
+
+
+def test_a_day_that_cannot_be_judged_is_kept() -> None:
+    """Keep a day with no two rows one epoch apart."""
+    stretch = {0: 5.0, 2: 150_000.0, 4: 30.0}
+    assert characterize.drop_no_signal_days(stretch) == (stretch, 0)
+
+
+# ------------------------------------------------------------------- step 4
+
 
 def test_a_value_is_moved_back_by_the_rate_times_its_delta() -> None:
     """Take off the median one-epoch change over T, times delta."""
@@ -97,7 +144,7 @@ def test_values_with_no_neighbour_one_epoch_apart_stay() -> None:
     }
 
 
-# ------------------------------------------------------------------- step 4
+# ------------------------------------------------------------------- step 5
 
 
 def noisy_ramp(length: int, rate: float = 50.0, seed: int = 1) -> dict[int, float]:
@@ -152,6 +199,18 @@ def test_no_change_or_no_stray_change_keeps_every_row(
     assert characterize.drop_outliers(stretch) == stretch
 
 
+def test_an_outlier_is_judged_against_its_own_day() -> None:
+    """Drop an outlier on a quiet day though another day is far noisier."""
+    generator = seeded(11)
+    stretch = noisy_ramp(DAY)
+    stretch.update(
+        {DAY + k: 50.0 * (DAY + k) + generator.gauss(0.0, 2_000.0) for k in range(DAY)}
+    )
+    stretch[20] += 100.0
+    assert 20 not in characterize.drop_outliers(stretch)
+    assert set(noisy_ramp(DAY)) - {20} <= set(characterize.drop_outliers(stretch))
+
+
 def test_with_no_spread_any_stray_change_counts() -> None:
     """Drop the one bad row of an otherwise perfect ramp."""
     stretch = {epoch: 2.0 * epoch for epoch in range(10)}
@@ -159,7 +218,47 @@ def test_with_no_spread_any_stray_change_counts() -> None:
     assert sorted(characterize.drop_outliers(stretch)) == [0, 1, 2, 3, 4, 6, 7, 8, 9]
 
 
-# ------------------------------------------------------------------- step 5
+# ------------------------------------------------------------------- step 6
+
+
+def test_a_lasting_jump_splits_the_rows() -> None:
+    """Split before the row where the phase jumps and stays."""
+    stretch = noisy_ramp(50)
+    for epoch in range(25, 50):
+        stretch[epoch] += 1_000.0
+    pieces = characterize.split_at_jumps(stretch)
+    assert [sorted(piece) for piece in pieces] == [list(range(25)), list(range(25, 50))]
+
+
+def random_walk(length: int, step_ps: float = 10.0, seed: int = 12) -> dict[int, float]:
+    """Give a ramp whose phase wanders as a random walk."""
+    generator = seeded(seed)
+    phase, walk = 0.0, {}
+    for epoch in range(length):
+        walk[epoch] = 50.0 * epoch + phase
+        phase += generator.gauss(0.0, step_ps)
+    return walk
+
+
+def test_a_jump_across_a_gap_is_judged_by_the_gap_s_length() -> None:
+    """Split at a jump across a gap, but not at the gap's ordinary wander."""
+    stretch = random_walk(DAY)
+    for epoch in range(20, 120):
+        del stretch[epoch]
+    assert len(characterize.split_at_jumps(stretch)) == 1
+    for epoch in range(120, DAY):
+        stretch[epoch] += 100_000.0
+    assert len(characterize.split_at_jumps(stretch)) == 2
+
+
+def test_a_row_whose_day_cannot_be_judged_starts_no_piece() -> None:
+    """Keep rows together when their day has no two rows one epoch apart."""
+    stretch = {0: 0.0, 1: 1.0, 2: 2.0, DAY + 5: 900_000.0}
+    assert characterize.split_at_jumps(stretch) == [stretch]
+    assert characterize.split_at_jumps({}) == []
+
+
+# ------------------------------------------------------------------- step 7
 
 
 def test_a_quadratic_is_taken_off() -> None:
@@ -185,7 +284,40 @@ def test_too_few_rows_for_a_quadratic(stretch: dict[int, float]) -> None:
         assert max(abs(value) for value in residual.values()) < 1e-9
 
 
-# ------------------------------------------------------------------- step 6
+# ------------------------------------------------- steps 1 to 7 together
+
+
+def test_preparing_drops_no_signal_days_and_splits_at_jumps() -> None:
+    """Leave a random day out, count it, and split where the phase jumps.
+
+    The rows on either side of the day left out follow on at the clock's
+    rate, so they stay together.
+    """
+    stretch = {**noisy_ramp(DAY), **random_phase_day(1)}
+    stretch.update(
+        {
+            epoch: value + 1_000.0
+            for epoch, value in noisy_ramp(3 * DAY).items()
+            if epoch >= 2 * DAY + 10
+        }
+    )
+    stretch.update({2 * DAY + k: 50.0 * (2 * DAY + k) for k in range(10)})
+    rows = [
+        characterize.TripleRow(epoch, round(value), 0, "A")
+        for epoch, value in sorted(stretch.items())
+    ]
+    prepared, days_dropped = characterize.prepare(
+        rows, dict.fromkeys(stretch, 0.0), drift=False
+    )
+    assert days_dropped == 1
+    assert [(min(piece), max(piece)) for piece in prepared] == [
+        (0, 2 * DAY + 9),
+        (2 * DAY + 10, 3 * DAY - 1),
+    ]
+    assert not any(DAY <= epoch < 2 * DAY for piece in prepared for epoch in piece)
+
+
+# ------------------------------------------------------------------- step 8
 
 
 def test_taus_double_up_to_a_third_of_the_rows_time() -> None:
@@ -229,17 +361,18 @@ def test_a_hole_leaves_out_every_set_it_falls_in() -> None:
     assert characterize.allan_sums({0: 0.0, 1: 0.0, 2: 0.0, 4: 0.0}, 1).terms == 1
 
 
-def test_white_phase_noise_is_taken_off_each_reference() -> None:
-    """Take each reference's own noise off before combining, dropping none above."""
-    noise = characterize.white_phase_variance(10.0, T)
+def test_references_are_combined_by_their_terms_with_nothing_taken_off() -> None:
+    """Average each tau over the references, weighted by terms, every value kept."""
     combined = characterize.clock_variances(
         [
-            ([characterize.TauValue(1, noise + 2e-30, 10)], 10.0),
-            ([characterize.TauValue(1, noise / 2, 30)], 10.0),
+            [characterize.TauValue(1, 2e-24, 10), characterize.TauValue(2, 1e-24, 5)],
+            [characterize.TauValue(1, 4e-24, 30)],
         ]
     )
-    assert [(tau_value.m, tau_value.terms) for tau_value in combined] == [(1, 10)]
-    assert combined[0].variance == pytest.approx(2e-30)
+    assert combined == [
+        characterize.TauValue(1, pytest.approx(3.5e-24), 40),  # type: ignore[arg-type]
+        characterize.TauValue(2, 1e-24, 5),
+    ]
 
 
 def model_taus(coefficients: characterize.Coefficients) -> list[characterize.TauValue]:
@@ -253,7 +386,13 @@ def model_taus(coefficients: characterize.Coefficients) -> list[characterize.Tau
 
 
 @pytest.mark.parametrize(
-    "coefficients", [(1e-21, 1e-29, 1e-34), (1e-21, 0.0, 1e-34), (0.0, 1e-28, 0.0)]
+    "coefficients",
+    [
+        (2.7e-23, 1e-21, 1e-29, 1e-34),
+        (0.0, 1e-21, 0.0, 1e-34),
+        (0.0, 0.0, 1e-28, 0.0),
+        (2.7e-23, 0.0, 1e-28, 0.0),
+    ],
 )
 def test_the_fit_gives_back_the_model_it_was_made_with(
     coefficients: characterize.Coefficients,
@@ -277,7 +416,7 @@ def test_a_fit_that_does_not_settle_stops_after_its_rounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Give the last fit when the rounds run out before it settles."""
-    tau_values = model_taus((1e-21, 1e-29, 1e-34))
+    tau_values = model_taus((2.7e-23, 1e-21, 1e-29, 1e-34))
     monkeypatch.setattr(characterize, "FIT_ROUNDS", 1)
     assert characterize.fit_noise_model(tau_values) == characterize.nonnegative_fit(
         tau_values,
@@ -287,7 +426,7 @@ def test_a_fit_that_does_not_settle_stops_after_its_rounds(
 
 def test_no_values_fit_to_zero() -> None:
     """Give a zero model for a clock with no values."""
-    assert characterize.fit_noise_model([]) == (0.0, 0.0, 0.0)
+    assert characterize.fit_noise_model([]) == (0.0, 0.0, 0.0, 0.0)
 
 
 def test_a_singular_fit_is_passed_over() -> None:
@@ -310,7 +449,7 @@ def test_the_weights_follow_the_model_and_independent_terms(
         calls.append(list(weights))
         return real_fit(tau_values, weights)
 
-    tau_values = model_taus((1e-21, 1e-29, 1e-34))
+    tau_values = model_taus((2.7e-23, 1e-21, 1e-29, 1e-34))
     monkeypatch.setattr(characterize, "nonnegative_fit", recording_fit)
     characterize.fit_noise_model(tau_values)
     assert calls[0] == [
@@ -322,20 +461,37 @@ def test_the_weights_follow_the_model_and_independent_terms(
 # ------------------------------------------------------ settings from the fit
 
 
+def test_the_measurement_noise_comes_from_the_white_phase_term() -> None:
+    """Give sigma_meas = sqrt(a_-2 / 3), ps, whatever the clock's terms."""
+    assert characterize.measurement_noise(
+        (3 * (20e-12) ** 2, 1e-22, 0.0, 0.0)
+    ) == pytest.approx(20.0)
+    assert characterize.measurement_noise((0.0, 1e-22, 0.0, 0.0)) == 0.0
+
+
 def test_the_crossover_is_where_the_two_noises_meet() -> None:
     """Find tau_c with sqrt(3) sigma_meas 1e-12 / tau_c = sigma_y,c(tau_c)."""
-    coefficients = (1e-22, 1e-30, 1e-36)
-    tau_c = characterize.crossover(coefficients, 20.0)
+    coefficients = (3 * (20e-12) ** 2, 1e-22, 1e-30, 1e-36)
+    tau_c = characterize.crossover(coefficients)
     assert tau_c is not None
     assert math.sqrt(3) * 20e-12 / tau_c == pytest.approx(
-        math.sqrt(characterize.model_variance(coefficients, tau_c)), rel=1e-9
+        math.sqrt(characterize.clock_variance(coefficients, tau_c)), rel=1e-9
     )
-    assert characterize.crossover((0.0, 0.0, 0.0), 20.0) is None
+    assert characterize.crossover((1e-24, 0.0, 0.0, 0.0)) is None
+    assert characterize.crossover((0.0, 0.0, 0.0, 0.0)) is None
+
+
+def test_with_no_measurement_noise_the_crossover_is_the_shortest_tau() -> None:
+    """Give the smallest tau searched, so M is one, when a_-2 is zero."""
+    tau_c = characterize.crossover((0.0, 1e-22, 0.0, 0.0))
+    assert tau_c is not None
+    assert tau_c < 1e-5
+    assert characterize.time_constant(tau_c) == 1
 
 
 def test_the_gap_limit_is_the_largest_gap_decycled_with_margin() -> None:
     """Give n with 5 sigma_x,pred((n + 1) T) under P / 2 and n + 1 not."""
-    coefficients = (1e-22, 1e-28, 1e-33)
+    coefficients = (1e-20, 1e-22, 1e-28, 1e-33)
     gap = characterize.gap_limit(coefficients, 10)
 
     def sigma(n: int) -> float:
@@ -345,8 +501,8 @@ def test_the_gap_limit_is_the_largest_gap_decycled_with_margin() -> None:
             tau
             * 1e12
             * math.sqrt(
-                characterize.model_variance(coefficients, tau)
-                + characterize.model_variance(coefficients, 10 * T)
+                characterize.clock_variance(coefficients, tau)
+                + characterize.clock_variance(coefficients, 10 * T)
             )
         )
 
@@ -355,12 +511,14 @@ def test_the_gap_limit_is_the_largest_gap_decycled_with_margin() -> None:
 
 def test_a_clock_too_noisy_for_one_epoch_has_no_gap() -> None:
     """Give -1 when even the next epoch's prediction is out of reach."""
-    assert characterize.gap_limit((1e-10, 0.0, 0.0), 1) == -1
+    assert characterize.gap_limit((0.0, 1e-10, 0.0, 0.0), 1) == -1
 
 
 def test_a_quiet_clock_reaches_the_search_limit() -> None:
     """Stop the search at its limit for a clock that never strays."""
-    assert characterize.gap_limit((0.0, 0.0, 0.0), 1) == characterize.GAP_SEARCH_LIMIT
+    assert (
+        characterize.gap_limit((1.0, 0.0, 0.0, 0.0), 1) == characterize.GAP_SEARCH_LIMIT
+    )
 
 
 # ------------------------------------------------- a characterization run's files
@@ -415,8 +573,11 @@ def true_phases(seed: int) -> dict[str, list[float]]:
     return phases
 
 
-def write_deployment(folder: Path, seed: int = 4) -> list[str]:
-    """Write the invented DAS files and configuration; give the run's arguments."""
+def write_deployment(folder: Path, seed: int = 4, rms: int = 3) -> list[str]:
+    """Write the invented DAS files and configuration; give the run's arguments.
+
+    Every measurement is given ``rms``, whatever its real noise.
+    """
     for subfolder in ("das", "steering", "processed"):
         (folder / subfolder).mkdir(parents=True)
     (folder / "clock_config.yaml").write_text(CHARACTERIZATION_CONFIG)
@@ -440,7 +601,7 @@ def write_deployment(folder: Path, seed: int = 4) -> list[str]:
             line = DASMeasurement(
                 measurement_mjd=measurement_mjd,
                 measured_phase=measured,
-                rms=3,
+                rms=rms,
                 switch=f"{reference[-1]}A{slot:02d}",
                 clock=clock,
             )
@@ -467,6 +628,20 @@ def processed_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     das_arguments = write_deployment(folder)
     assert das_processor_main(das_arguments) == 0
     return folder / "processed"
+
+
+def test_the_rms_column_changes_nothing(
+    processed_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """Characterize alike from files whose rms column says something else."""
+    folder = tmp_path_factory.mktemp("other_rms")
+    assert das_processor_main(write_deployment(folder, rms=40)) == 0
+    for clock, drift in (("hm1", False), ("ox1", True)):
+        assert characterize.characterize_clock(
+            folder / "processed", "a", clock, REFERENCES, drift
+        ) == characterize.characterize_clock(
+            processed_path, "a", clock, REFERENCES, drift
+        )
 
 
 def test_each_clock_has_a_local_triple_through_each_reference(
@@ -498,9 +673,8 @@ def test_a_triple_s_rows_are_read_from_their_columns(processed_path: Path) -> No
 
 def test_a_pair_s_unmeasured_epochs_give_no_time(processed_path: Path) -> None:
     """Leave out the rows without a measurement."""
-    pair_rows = characterize.read_pair_rows(series_file(processed_path, "a", GAP_PAIR))
-    assert len(pair_rows.deltas) == DAYS * 144 - len(GAP_EPOCHS)
-    assert len(pair_rows.rms_values) == DAYS * 144 - len(GAP_EPOCHS)
+    deltas = characterize.read_pair_deltas(series_file(processed_path, "a", GAP_PAIR))
+    assert len(deltas) == DAYS * 144 - len(GAP_EPOCHS)
 
 
 def test_only_local_triples_of_clocks_are_found(tmp_path: Path) -> None:
@@ -519,26 +693,26 @@ def test_only_local_triples_of_clocks_are_found(tmp_path: Path) -> None:
     assert characterize.local_triples(tmp_path, "a") == {"hm1": ["mc1"]}
 
 
-def test_a_pair_s_measurement_times_and_rms_are_read(processed_path: Path) -> None:
-    """Give each measured epoch's time after its start, and every rms."""
-    pair_rows = characterize.read_pair_rows(
+def test_a_pair_s_measurement_times_are_read(processed_path: Path) -> None:
+    """Give each measured epoch's time after its start."""
+    deltas = characterize.read_pair_deltas(
         series_file(processed_path, "a", ("mc2", "ox1"))
     )
-    assert len(pair_rows.deltas) == DAYS * 144
-    assert all(0 < delta < T for delta in pair_rows.deltas.values())
-    assert set(pair_rows.rms_values) == {3}
+    assert len(deltas) == DAYS * 144
+    assert all(0 < delta < T for delta in deltas.values())
 
 
 def test_each_clock_is_characterized_from_both_references(
     processed_path: Path,
 ) -> None:
-    """Use both local triples, sigma_meas from the rms, and give M and G_max."""
+    """Use both local triples, sigma_meas from the fit, and give M and G_max."""
     result = characterize.characterize_clock(
         processed_path, "a", "ox1", REFERENCES, drift=True
     )
     assert result.references == REFERENCES
     assert result.rows > DAYS * 144
-    assert result.sigma_meas == 3.0
+    assert result.days_dropped == 0
+    assert 1.0 < result.sigma_meas < 6.0
     assert result.variances
     assert result.M is not None and result.M >= 1
     assert result.gap is not None
@@ -604,6 +778,6 @@ def test_the_script_runs_as_a_program(
 def test_a_result_with_nothing_fitted_shows_dashes() -> None:
     """Write '-' for a missing crossover, time constant and gap limit."""
     result = characterize.ClockResult(
-        "hm9", ("mc1",), 0, 0.0, (0.0, 0.0, 0.0), None, None, None, ()
+        "hm9", ("mc1",), 0, 0, 0.0, (0.0, 0.0, 0.0, 0.0), None, None, None, ()
     )
     assert characterize.format_result(result).split()[-3:] == ["-", "-", "-"]

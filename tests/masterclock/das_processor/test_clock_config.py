@@ -20,7 +20,8 @@ first; and the committed example file loads.
 
 Every refusal names the file, then the problem, a merge or repeated key with
 its line and column, and is logged as raised; undated entries come first
-wherever listed; and rejects_before_restart may equal the gap limit.
+wherever listed; rejects_before_restart may equal the gap limit; and a
+gap limit has no lower bound of its own.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -186,7 +187,7 @@ def test_an_unknown_clock_has_no_entry(tmp_path: Path) -> None:
         (
             "initial_innovation_scale: 4.0, gap_limit: 432",
             "initial_innovation_scale: 4.0, gap_limit: 0",
-            "gap_limit",
+            "above the gap_limit 0 of type cesium",
         ),
         (
             "initial_innovation_scale: 4.0",
@@ -654,6 +655,29 @@ def test_rejects_before_restart_may_equal_the_gap_limit(tmp_path: Path) -> None:
         "rejects_before_restart: 36", "rejects_before_restart: 432"
     )
     assert read_config_text(tmp_path, yaml_text).rejects_before_restart == 432
+
+
+@pytest.mark.parametrize("gap_limit", [0, -1])
+def test_a_gap_limit_has_no_lower_bound_of_its_own(gap_limit: int) -> None:
+    """Take any whole gap limit in a type, an entry and settled settings (15.2).
+
+    Only the rule that rejects_before_restart is at most every gap limit
+    bounds it, for a whole configuration.
+    """
+    settings = {
+        "filter_states": 1,
+        "scale_time_constant": 30.0,
+        "initial_innovation_scale": 2.0,
+        "gap_limit": gap_limit,
+    }
+    assert clock_config.TypeDefault.model_validate(settings).gap_limit == gap_limit
+    assert clock_config.Entry(gap_limit=gap_limit).gap_limit == gap_limit
+    assert (
+        clock_config.ClockEntry.model_validate(
+            {**settings, "time_constant": None}
+        ).gap_limit
+        == gap_limit
+    )
 
 
 # ------------------------------------------- a first entry with its own settings

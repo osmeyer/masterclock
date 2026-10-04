@@ -98,7 +98,7 @@ class SeriesParams:
     sigma0 : float
         Innovation scale a cold start begins with, ps; above zero.
     gmax : int
-        Gap limit: how many held rows a prediction may run, at least 1.
+        Gap limit: how many held rows a prediction may run.
     n_break : int
         Counted rejects that make the series dormant, from 3 to ``gmax``.
     rms_max : int or None

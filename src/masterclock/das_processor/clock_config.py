@@ -174,7 +174,8 @@ class TypeDefault(BaseModel):
     initial_innovation_scale : float
         The innovation scale a cold start begins with, sigma0, ps.
     gap_limit : int
-        G_max: how many held rows a prediction may run, at least 1.
+        G_max: how many held rows a prediction may run; no lower than the
+        configuration's ``rejects_before_restart``, the only bound on it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
@@ -183,7 +184,7 @@ class TypeDefault(BaseModel):
     time_constant: _TimeConstant | None = None
     scale_time_constant: _TimeConstant
     initial_innovation_scale: _Scale
-    gap_limit: PositiveInt
+    gap_limit: int
 
 
 _OWN_SETTINGS: Final[tuple[str, ...]] = (
@@ -223,7 +224,7 @@ class Entry(BaseModel):
     time_constant: _TimeConstant | None = None
     scale_time_constant: _TimeConstant | None = None
     initial_innovation_scale: _Scale | None = None
-    gap_limit: PositiveInt | None = None
+    gap_limit: int | None = None
     location: _Location | None = None
 
     def overrides(self) -> dict[str, object]:
@@ -269,7 +270,7 @@ class ClockEntry(BaseModel):
     time_constant: _TimeConstant | None
     scale_time_constant: _TimeConstant
     initial_innovation_scale: _Scale
-    gap_limit: PositiveInt
+    gap_limit: int
     location: _Location | None = None
 
     @model_validator(mode="after")

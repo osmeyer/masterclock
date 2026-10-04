@@ -2,7 +2,9 @@
 
 The rules covered: building an epoch resolves everything it needs: its
 references from its block; every pair, the existing ones kept, and every
-triple, existing or new, whose s and c are in one building at the epoch;
+triple, existing or new, whose s and c are in one building at the epoch,
+leaving out, with one warning, every measurement and series of a clock the
+clock configuration has no entry for;
 the steering of every reference that steers a series, read over
 (E - T, E + T]; and each series' settings, a pair taking its second
 clock's entry and RMS limit and a triple its clock c's entry, kept from
@@ -62,7 +64,6 @@ from typing import Final
 
 import pytest
 
-from masterclock.app.exceptions import ConfigError
 from masterclock.app.log import TRACE
 from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import datetime_to_mjd, mjd_to_datetime
@@ -256,17 +257,51 @@ def test_an_epoch_with_no_block_has_the_existing_series_only(tmp_path: Path) -> 
     assert sorted(epoch.steering) == ["mc2"]
 
 
-def test_a_clock_with_no_entry_stops_the_epoch(tmp_path: Path) -> None:
-    """Raise ConfigError for a measured clock the clock configuration lacks."""
+def test_a_clock_with_no_entry_is_left_out_and_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Leave out a measured clock the configuration lacks, warning of it once."""
     config, clock_config = make_deployment(tmp_path)
-    with pytest.raises(ConfigError, match="hm9"):
-        run.build_epoch(
-            E,
-            das_block_of([*MEASURED_PAIRS, ("mc2", "hm9")]),
-            NO_SERIES,
-            config,
-            clock_config,
-        )
+    das_block = das_block_of([*MEASURED_PAIRS, ("mc2", "hm9")])
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=RUN_LOGGER):
+        first_epoch = run.build_epoch(E, das_block, NO_SERIES, config, clock_config)
+    assert first_epoch.clocks_without_entry == frozenset({"hm9"})
+    assert first_epoch.pairs == tuple(sorted(MEASURED_PAIRS))
+    assert all("hm9" not in triple for triple in first_epoch.triples)
+    assert first_epoch.das_block is not None
+    assert [
+        das_measurement.clock for das_measurement in first_epoch.das_block.measurements
+    ] == [clock for _, clock in MEASURED_PAIRS]
+    assert [log_record.getMessage() for log_record in caplog.records] == [
+        "clock hm9 has no entry in the clock configuration: its measurements are"
+        " ignored"
+    ]
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=RUN_LOGGER):
+        run.build_epoch(E, das_block, NO_SERIES, config, clock_config, first_epoch)
+    assert caplog.records == []
+
+
+def test_a_series_of_a_clock_with_no_entry_is_left_out(tmp_path: Path) -> None:
+    """Leave out an existing series whose clock the configuration lacks."""
+    config, clock_config = make_deployment(tmp_path)
+    earlier_series = ExistingSeries(
+        pairs=frozenset({("mc2", "mc2"), ("mc2", "hm9")}),
+        triples=frozenset({("mc2", "mc2", "hm9")}),
+    )
+    epoch = run.build_epoch(E, None, earlier_series, config, clock_config)
+    assert (epoch.pairs, epoch.triples) == ((("mc2", "mc2"),), ())
+    assert epoch.clocks_without_entry == frozenset({"hm9"})
+
+
+def test_a_block_of_clocks_with_no_entry_is_no_block(tmp_path: Path) -> None:
+    """Give no block when every measurement is of a clock the configuration lacks."""
+    config, clock_config = make_deployment(tmp_path)
+    epoch = run.build_epoch(
+        E, das_block_of([("mc2", "hm9")]), NO_SERIES, config, clock_config
+    )
+    assert (epoch.das_block, epoch.pairs, epoch.refs) == (None, (), frozenset())
 
 
 def test_an_epoch_holds_settings_for_exactly_its_series(tmp_path: Path) -> None:
@@ -1747,6 +1782,28 @@ def test_a_remote_triple_goes_on_when_its_reference_is_missing(
     assert epoch_indexes(series_rows, LATE_START) == [2, 3, 4, 5]
     assert "A" in series_rows[-2].flags
     assert "P" in series_rows[-1].flags
+
+
+def test_a_run_writes_the_same_files_without_a_clock_it_has_no_entry_for(
+    tmp_path: Path,
+) -> None:
+    """Write no file for an unknown clock, and every other file as without it."""
+    readings = [("mc1", "mc1", 1000), ("mc1", "ox23", 50_000)]
+    plain_config, clock_config = make_loop_deployment(tmp_path / "plain")
+    write_das_day(tmp_path / "plain", [readings] * 4)
+    run.run(plain_config, clock_config, None, ShutdownHandler())
+    extra_config, clock_config = make_loop_deployment(tmp_path / "extra")
+    write_das_day(tmp_path / "extra", [[*readings, ("mc1", "hm9", 70_000)]] * 4)
+    run.run(extra_config, clock_config, None, ShutdownHandler())
+    plain_files = run.data_series(plain_config)
+    assert [key for _, _, key in run.data_series(extra_config)] == [
+        key for _, _, key in plain_files
+    ]
+    for plain_file, _, series_key in plain_files:
+        extra_file = registry.series_file(
+            extra_config.processed.processed_path, "a", series_key
+        )
+        assert extra_file.read_bytes() == plain_file.read_bytes(), series_key
 
 
 def test_a_run_with_no_data_and_no_series_does_nothing(tmp_path: Path) -> None:

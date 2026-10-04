@@ -117,6 +117,10 @@ class Epoch:
         Every series' settings at E.
     locations : dict of str to int or None
         Every clock's location at E, as the clock configuration gives it.
+    clocks_without_entry : frozenset of str, optional
+        The clocks measured at E, or with a series before it, that the clock
+        configuration has no entry for; their measurements and series are
+        left out of the epoch.
 
     Raises
     ------
@@ -133,6 +137,7 @@ class Epoch:
     triples: tuple[TripleKey, ...]
     series_params: dict[SeriesKey, SeriesParams]
     locations: dict[str, int | None]
+    clocks_without_entry: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         """Refuse a block of another epoch, or settings for other series.
@@ -190,7 +195,9 @@ def build_epoch(
     Returns
     -------
     Epoch
-        The epoch: its references, every pair and triple (see
+        The epoch, every measurement and series of a clock the clock
+        configuration has no entry for left out (see
+        :func:`_configured_only`): its references, every pair and triple (see
         :func:`~masterclock.das_processor.registry.build_registry`), the
         steering of every reference any series is steered by, read over
         (E - T, E + T] (I4), and each series' settings at E. The settings
@@ -201,11 +208,12 @@ def build_epoch(
 
     Raises
     ------
-    ConfigError
-        If a series' clock has no entry in the clock configuration.
     DataFileError
         If a steering file cannot be read.
     """
+    das_block, earlier_series, clocks_without_entry = _configured_only(
+        das_block, earlier_series, clock_config, last_epoch
+    )
     refs = refs_of(das_block)
     kept_epoch = _configuration_kept(last_epoch, epoch_start, clock_config)
     locations = (
@@ -240,6 +248,124 @@ def build_epoch(
         triples=triples,
         series_params=series_params,
         locations=locations,
+        clocks_without_entry=clocks_without_entry,
+    )
+
+
+def _configured_only(
+    das_block: DASData | None,
+    earlier_series: ExistingSeries,
+    clock_config: ClockConfig,
+    last_epoch: Epoch | None,
+) -> tuple[DASData | None, ExistingSeries, frozenset[str]]:
+    """Leave out every measurement and series of a clock with no entry.
+
+    A series takes the settings of its clock side, its last name, so a
+    measurement or series whose clock the clock configuration lacks cannot
+    be worked out. It is left out, and the clock is logged once at WARNING
+    when it is first found so, in the run or after an epoch without it.
+
+    Parameters
+    ----------
+    das_block : DASData or None
+        The epoch's DAS block, or ``None``.
+    earlier_series : ExistingSeries
+        The series that existed before the epoch.
+    clock_config : ClockConfig
+        The clock configuration.
+    last_epoch : Epoch or None
+        The epoch processed before this one in the run, whose clocks
+        without an entry were logged already; ``None`` for the run's first.
+
+    Returns
+    -------
+    tuple of (DASData or None, ExistingSeries, frozenset of str)
+        The block without the measurements of clocks with no entry, ``None``
+        when none is left; the series without those of such clocks; and
+        those clocks.
+    """
+    configured = frozenset(clock_config.clocks)
+    das_block, block_clocks = _configured_block(das_block, configured)
+    earlier_series, series_clocks = _configured_series(earlier_series, configured)
+    clocks_without_entry = block_clocks | series_clocks
+    logged = frozenset() if last_epoch is None else last_epoch.clocks_without_entry
+    for clock in sorted(clocks_without_entry - logged):
+        _log.warning(
+            "clock %s has no entry in the clock configuration: its measurements are"
+            " ignored",
+            clock,
+        )
+    return das_block, earlier_series, clocks_without_entry
+
+
+def _configured_block(
+    das_block: DASData | None, configured: frozenset[str]
+) -> tuple[DASData | None, frozenset[str]]:
+    """Leave out of a block every measurement of a clock with no entry.
+
+    Parameters
+    ----------
+    das_block : DASData or None
+        The epoch's DAS block, or ``None``.
+    configured : frozenset of str
+        The clocks the clock configuration names.
+
+    Returns
+    -------
+    tuple of (DASData or None, frozenset of str)
+        The block without those measurements, ``None`` when none is left,
+        and the clocks left out.
+    """
+    if das_block is None:
+        return None, frozenset()
+    kept = tuple(
+        das_measurement
+        for das_measurement in das_block.measurements
+        if das_measurement.clock in configured
+    )
+    if len(kept) == len(das_block.measurements):
+        return das_block, frozenset()
+    left_out = (
+        frozenset(das_measurement.clock for das_measurement in das_block.measurements)
+        - configured
+    )
+    if not kept:
+        return None, left_out
+    return das_block.model_copy(update={"measurements": kept}), left_out
+
+
+def _configured_series(
+    earlier_series: ExistingSeries, configured: frozenset[str]
+) -> tuple[ExistingSeries, frozenset[str]]:
+    """Leave out every series whose clock side has no entry.
+
+    Parameters
+    ----------
+    earlier_series : ExistingSeries
+        The series that existed before the epoch.
+    configured : frozenset of str
+        The clocks the clock configuration names.
+
+    Returns
+    -------
+    tuple of (ExistingSeries, frozenset of str)
+        The series whose last name the configuration names, and the clocks
+        of those left out.
+    """
+    series_keys: list[SeriesKey] = [*earlier_series.pairs, *earlier_series.triples]
+    left_out = frozenset(series_key[-1] for series_key in series_keys) - configured
+    if not left_out:
+        return earlier_series, left_out
+    return (
+        ExistingSeries(
+            pairs=frozenset(
+                pair for pair in earlier_series.pairs if pair[-1] in configured
+            ),
+            triples=frozenset(
+                triple for triple in earlier_series.triples if triple[-1] in configured
+            ),
+        ),
+        left_out,
     )
 
 

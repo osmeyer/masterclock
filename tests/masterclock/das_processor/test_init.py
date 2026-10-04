@@ -195,15 +195,13 @@ def test_an_error_during_the_run_exits_one_logged_once(
 ) -> None:
     """Exit 1 for a MasterClockError, logged once, where it was raised."""
     argv = make_deployment(tmp_path)
-    (tmp_path / "clock_config.yaml").write_text(
-        CLOCK_CONFIG_YAML.replace("ox23", "hm9")
-    )
+    (tmp_path / "steering" / "steer_mc1.dat").write_text("not a steering line\n")
     assert das_processor.main(argv) == 1
     error_records = [
         log_record for log_record in caplog.records if log_record.levelname == "ERROR"
     ]
     assert len(error_records) == 1
-    assert "ox23" in error_records[0].getMessage()
+    assert "steer_mc1.dat" in error_records[0].getMessage()
 
 
 def test_a_second_run_of_the_channel_is_refused(

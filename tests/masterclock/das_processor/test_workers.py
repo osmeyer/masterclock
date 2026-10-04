@@ -3,9 +3,9 @@
 The rules covered: every series has one owner among the workers, from its
 name alone; a run with worker processes writes byte-identical data files to
 a run without them, with one worker or several, in one batch or one epoch
-per run, a series that stops included, and logs the same records in the
-same order; the pool knows a series once it writes a row; the command
-line's num_workers starts them.
+per run, a series that stops and a clock with no entry included, and logs
+the same records in the same order; the pool knows a series once it writes
+a row; the command line's num_workers starts them.
 
 A worker answers each exchange of an epoch, reading a series' file the
 first time it meets the series, and logs with its records kept, each with
@@ -97,6 +97,9 @@ MISSING_READING: Final = (5, ("mc2", "cs1"))
 STOPPED_READINGS: Final = (3, ("mc2", "hm1"))
 """This pair is not measured from this epoch on, so its file stops."""
 
+UNCONFIGURED_PAIR: Final = ("mc1", "xx9")
+"""A pair measured every epoch whose clock has no entry in the configuration."""
+
 
 def write_deployment(deployment_directory: Path) -> AppConfig:
     """Write the invented deployment's inputs in a new directory; give its config."""
@@ -108,7 +111,8 @@ def write_deployment(deployment_directory: Path) -> AppConfig:
     das_lines_by_day: dict[int, list[str]] = {}
     for epoch_index in range(EPOCH_COUNT):
         epoch_start = FIRST_EPOCH + epoch_index * T
-        for pair_index, (pair, rate) in enumerate(PAIR_RATES.items()):
+        measured_rates = [*PAIR_RATES.items(), (UNCONFIGURED_PAIR, 0)]
+        for pair_index, (pair, rate) in enumerate(measured_rates):
             if (epoch_index, pair) == MISSING_READING or (
                 epoch_index >= STOPPED_READINGS[0] and pair == STOPPED_READINGS[1]
             ):
@@ -354,7 +358,10 @@ def test_a_worker_that_stopped_stops_the_run(
                 config,
                 clock_config_of(config),
             )
-    assert [log_record.levelname for log_record in caplog.records] == ["ERROR"]
+    assert [
+        (log_record.levelname, UNCONFIGURED_PAIR[1] in log_record.getMessage())
+        for log_record in caplog.records
+    ] == [("WARNING", True), ("ERROR", False)]
 
 
 # ------------------------------------------------- a worker, in this process
@@ -381,7 +388,7 @@ def first_task(config: AppConfig, epoch_start: datetime) -> workers.EpochTask:
         pairs=epoch.pairs,
         triples=epoch.triples,
         new_params=dict(epoch.series_params),
-        readings=run.pair_readings(das_block),
+        readings=run.pair_readings(epoch.das_block),
     )
 
 

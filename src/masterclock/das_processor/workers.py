@@ -684,7 +684,7 @@ class WorkerPool:
             last_epoch,
             steering_files,
         )
-        readings = run.pair_readings(das_block)
+        readings = run.pair_readings(epoch.das_block)
         pairs_started = self._start_pairs(epoch, readings)
         screening, slips = run.screen_pairs(
             _joined([started.innovations for started in pairs_started]),

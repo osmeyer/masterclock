@@ -2380,6 +2380,42 @@ def ensure_archives(processed_path: Path) -> None:
         _sync_directory(processed_path)
 
 
+def make_processed_path(processed_path: Path) -> None:
+    """Make ``processed_path``, and every directory above it, when missing.
+
+    A first run may be given a ``processed_path`` that is not there yet, and
+    the run lock goes straight into it, so it is made before the lock is
+    taken.
+
+    Parameters
+    ----------
+    processed_path : Path
+        The directory the run writes under.
+
+    Raises
+    ------
+    DataFileError
+        If a directory cannot be made, or its name is taken by something
+        that is not a directory.
+
+    Notes
+    -----
+    Each directory made here is flushed into the one above it, so the path
+    is found after a crash.
+    """
+    missing_directories = [
+        directory
+        for directory in (processed_path, *processed_path.parents)
+        if not directory.is_dir()
+    ]
+    for directory in reversed(missing_directories):
+        try:
+            directory.mkdir(exist_ok=True)
+        except OSError as exc:
+            _fail(f"cannot make processed directory {directory}: {exc}", exc)
+        _sync_directory(directory.parent)
+
+
 # ---------------------------------------------------------- the write journal
 
 

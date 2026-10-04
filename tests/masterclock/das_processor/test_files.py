@@ -43,8 +43,11 @@ row keeps.
 A row that parses but breaks a record's rules is a damaged line; every
 refusal, device fault, roll-back and redo message is word for word, and each
 error is logged as raised; free space is counted per device, just enough
-being enough; a missing archive is made beside one already there; and a
-measurement time on a whole second keeps its microseconds.
+being enough; a missing archive is made beside one already there; a
+missing processed_path is made with every directory above it, top down,
+each flushed into its parent, one already there is left, and one whose name
+is taken by a file is refused; and a measurement time on a whole second
+keeps its microseconds.
 """
 
 import dataclasses
@@ -1550,6 +1553,37 @@ def test_an_archive_directory_that_cannot_be_made_is_refused(tmp_path: Path) -> 
     (tmp_path / "ddiff").write_text("")
     with pytest.raises(DataFileError, match="cannot make"):
         files.ensure_archives(tmp_path)
+
+
+def test_a_missing_processed_path_is_made_with_its_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Make the missing directories top down, each flushed into its parent."""
+    flushed_directories: list[Path] = []
+    monkeypatch.setattr(files, "_sync_directory", flushed_directories.append)
+    processed_path = tmp_path / "new" / "processed"
+    files.make_processed_path(processed_path)
+    assert processed_path.is_dir()
+    assert flushed_directories == [tmp_path, tmp_path / "new"]
+
+
+def test_a_processed_path_already_there_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Leave an existing processed_path and its files, flushing nothing."""
+    flushed_directories: list[Path] = []
+    monkeypatch.setattr(files, "_sync_directory", flushed_directories.append)
+    (tmp_path / "kept").write_text("")
+    files.make_processed_path(tmp_path)
+    assert (tmp_path / "kept").exists()
+    assert flushed_directories == []
+
+
+def test_a_processed_path_that_cannot_be_made_is_refused(tmp_path: Path) -> None:
+    """Raise DataFileError when a directory's name above it is taken by a file."""
+    (tmp_path / "taken").write_text("")
+    with pytest.raises(DataFileError, match="cannot make processed directory"):
+        files.make_processed_path(tmp_path / "taken" / "processed")
 
 
 def test_a_buffer_takes_another_s_rows(tmp_path: Path) -> None:

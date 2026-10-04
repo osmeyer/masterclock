@@ -35,7 +35,7 @@ from masterclock.das_processor.config import (
     check_paths,
 )
 from masterclock.das_processor.epochs import floor_to_ten_minutes
-from masterclock.das_processor.files import redo_from
+from masterclock.das_processor.files import make_processed_path, redo_from
 from masterclock.das_processor.run import data_series
 from masterclock.das_processor.run import run as run_channel
 from masterclock.das_processor.workers import WorkerPool
@@ -169,7 +169,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     Notes
     -----
-    The run holds its channel's lock throughout, so a second run of the
+    A ``processed_path`` that is missing is made first, with any directory
+    above it, since the lock goes straight into it. The run holds its
+    channel's lock throughout, so a second run of the
     same channel is refused, and turns a termination signal into a request
     to stop between epochs. A redo, when one is asked for, deletes its rows
     before the run starts, and the run then computes them again. With
@@ -182,6 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     config, cli_options = run_settings
     try:
         clock_config = read_clock_config(config.processed.clock_config_file)
+        make_processed_path(config.processed.processed_path)
         lock_name = LOCK_FILE_TEMPLATE.format(rf=config.das.rf)
         with (
             RunLock(config.processed.processed_path, lock_name),

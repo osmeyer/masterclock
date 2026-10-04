@@ -1,16 +1,16 @@
 """Tests for src/masterclock/das_processor/__init__.py.
 
 The rules covered: das_processor's main runs the channel from its settings
-and exits 0; a required setting given by neither source is a usage error,
-the full help and exit 2, logged too when logging can start; logging
-starts from its own settings first, so a setting or path that cannot be
-used is logged at ERROR with exit 1, printed on standard error instead
-only when it keeps logging from starting or logging is set to None; any
-later
-MasterClockError exits 1, logged once where it was raised; a second run of
-the same channel is refused by the run lock; a redo deletes the rows from
-its epoch before the run, which computes them again; and logging set to
-None logs nothing.
+and exits 0; a first run makes a missing processed_path, with the directory
+above it, and writes what a run into one already there writes; a required
+setting given by neither source is a usage error, the full help and exit 2,
+logged too when logging can start; logging starts from its own settings
+first, so a setting or path that cannot be used is logged at ERROR with exit
+1, printed on standard error instead only when it keeps logging from
+starting or logging is set to None; any later MasterClockError exits 1,
+logged once where it was raised; a second run of the same channel is refused
+by the run lock; a redo deletes the rows from its epoch before the run,
+which computes them again; and logging set to None logs nothing.
 
 A usage error ends with the missing setting; the logging settings reach the
 logging; and a redo computes its rows again with the settings in force now.
@@ -117,6 +117,22 @@ def test_a_run_exits_zero_and_writes_the_archives(tmp_path: Path) -> None:
         "das_a.mc1.mc1.ox23.dat",
         "das_a.mc1.ox23.dat",
     ]
+
+
+def test_a_first_run_makes_its_processed_path(tmp_path: Path) -> None:
+    """Make a missing processed_path and its parent, then run as into one there."""
+    ready_root, first_root = tmp_path / "ready", tmp_path / "first"
+    ready_root.mkdir()
+    first_root.mkdir()
+    assert das_processor.main(make_deployment(ready_root)) == 0
+    first_argv = make_deployment(first_root)
+    (first_root / "processed").rmdir()
+    processed_index = first_argv.index("--processed-path") + 1
+    first_argv[processed_index] = str(first_root / "processed" / "channel")
+    assert das_processor.main(first_argv) == 0
+    assert (first_root / "processed" / "channel" / "das_processor_a.lock").is_file()
+    assert archived_files(first_root) == archived_files(ready_root)
+    assert archived_files(ready_root)
 
 
 def test_a_missing_setting_is_a_usage_error(

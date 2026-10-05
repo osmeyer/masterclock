@@ -1178,6 +1178,37 @@ def test_a_roll_back_counts_every_file_and_says_when_no_row_is_left(
     ]
 
 
+@pytest.mark.parametrize(
+    ("steps", "stop", "reason"),
+    [
+        (None, False, "the end of the data"),
+        (1, False, "its --steps done"),
+        (None, True, "asked to stop"),
+    ],
+)
+def test_a_run_logs_where_it_starts_and_why_it_ends(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    steps: int | None,
+    stop: bool,
+    reason: str,
+) -> None:
+    """Log the epoch a run starts at, and where and why it ends, at INFO."""
+    config, clock_config = make_loop_deployment(tmp_path)
+    write_das_files(tmp_path, [LATE_START + i * T for i in range(3)])
+    shutdown = ShutdownHandler()
+    if stop:
+        shutdown.request_shutdown()
+    with caplog.at_level(logging.INFO):
+        run.run(config, clock_config, steps, shutdown)
+    messages = [log_record.getMessage() for log_record in caplog.records]
+    assert any(m.startswith("run of channel a starts at epoch") for m in messages)
+    assert any(
+        m.startswith("run of channel a ends at epoch") and f": {reason};" in m
+        for m in messages
+    )
+
+
 def test_a_journal_found_at_the_start_rolls_every_file_back_before_its_epoch(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

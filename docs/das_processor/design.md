@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 22:00:55 UTC
+**Date:** 2026-10-05 22:02:46 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -2871,7 +2871,7 @@ Besides the standard levels there is TRACE, below DEBUG.
 | --- | --- |
 | ERROR | Every error, where it is raised; each damaged data file, once, with where and why (§6.7) |
 | WARNING | Refused DAS lines; a DAS directory with no data files; a clock with no entry in the clock configuration and not ignored, once when found (§15.2); counted rejects; missing or failed self-measurements, reciprocity and closure failures; undecided slips; a roll-back, once for all its files (§6.7) |
-| INFO | Each epoch processed, with its counts of rows written, accepted and held; corrected slips; phase steps, frequency steps, cold starts, dormancy, a series that stops writing rows, configuration changes; a clock disabled or enabled again, once at the epoch it happens (§13.6); a redo, once for all its files (§6.5) |
+| INFO | Where a run starts, and where and why it ends; each epoch processed, with its counts of rows written, accepted and held; corrected slips; phase steps, frequency steps, cold starts, dormancy, a series that stops writing rows, configuration changes; a clock disabled or enabled again, once at the epoch it happens (§13.6); a redo, once for all its files (§6.5) |
 | DEBUG | Each series' flags at each epoch; a DAS directory entry passed over; the run lock taken and freed |
 | TRACE | Each series' prediction, innovation and update |
 

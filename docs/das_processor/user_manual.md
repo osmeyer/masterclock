@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-05 22:00:55 UTC
+**Date:** 2026-10-05 22:02:46 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -560,6 +560,7 @@ With `--log-level None` nothing is written, but a `log_file` given is still open
 | `… slip corrected: … cycles` | A reading came out a whole number of periods wrong, and was put right | Nothing, unless it repeats |
 | `slip of clock … undecided: excluded …` | A slip was found and could not be placed, so the clock's readings were set aside for the epoch | Nothing, unless it repeats |
 | `self-measurement of … missing` | A reference was not measured against itself this epoch | Look at the DAS if it repeats |
+| `run of channel … starts at epoch …`, `run of channel … ends at epoch …: …; … epochs wrote rows` | Where a run started, and where and why it stopped: the end of the data, a stop asked for, or its `--steps` | Nothing |
 | `epoch …: … pairs, … triples, … accepted, … held` | One epoch done: rows written, accepted and held | Nothing |
 | `redo of channel … from …: … files cut, … deleted, … with no row at or after it` | A redo removed its rows before the run | Nothing |
 | `clock … disabled from …`, `clock … enabled again from …` | The clock configuration disabled the clock, or enabled it again, from that epoch | Nothing; this is what the configuration asked for |

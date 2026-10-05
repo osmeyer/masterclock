@@ -1802,6 +1802,7 @@ def run(
         and not existing_series(processed_path, channel).pairs
     ):
         epoch_start = max(epoch_start, next_das_block.interpolated_datetime)
+    _log.info("run of channel %s starts at epoch %s", channel, epoch_start)
     journal = processed_path / JOURNAL_FILE_TEMPLATE.format(rf=channel)
     day_buffer = DayBuffer(channel, journal)
     last_epoch: Epoch | None = None
@@ -1842,6 +1843,22 @@ def run(
         epoch_start += _EPOCH
         epochs_done += day_buffer.rows_added > rows_before_epoch
     write_final(day_buffer)
+    _log.info(
+        "run of channel %s ends at epoch %s: %s; %d epochs wrote rows",
+        channel,
+        epoch_start,
+        _end_reason(next_das_block, shutdown),
+        epochs_done,
+    )
+
+
+def _end_reason(next_das_block: DASData | None, shutdown: ShutdownHandler) -> str:
+    """Say why a run stopped: the end of the data, a stop asked for, or its steps."""
+    if next_das_block is None:
+        return "the end of the data"
+    if shutdown.shutdown_requested:
+        return "asked to stop"
+    return "its --steps done"
 
 
 def _next_block(das_blocks: Iterator[DASData], epoch_start: datetime) -> DASData | None:

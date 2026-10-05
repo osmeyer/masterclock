@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-05 21:59:28 UTC
+**Date:** 2026-10-05 22:00:55 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -432,11 +432,11 @@ The header says what the file is and what every column holds:
 #   epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
 #   consecutive_rejects     consecutive counted rejects
 #   reject1_mjd             reject buffer, oldest: epoch start, MJD
-#   reject1_innovation      reject buffer, oldest: innovation, ps
+#   reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
 #   reject2_mjd             reject buffer, middle: epoch start, MJD
-#   reject2_innovation      reject buffer, middle: innovation, ps
+#   reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
 #   reject3_mjd             reject buffer, newest: epoch start, MJD
-#   reject3_innovation      reject buffer, newest: innovation, ps
+#   reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
 #   filter_states           estimator states: 1, 2 or 3
 #   time_constant           estimator time constant, epochs
 #   scale_time_constant     innovation-scale averaging constant, epochs

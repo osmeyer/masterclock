@@ -259,6 +259,19 @@ def test_the_measurement_header_is_the_design_s() -> None:
     )
 
 
+@pytest.mark.parametrize("columns", [files.MEAS_COLUMNS, files.DDIFF_COLUMNS])
+def test_a_reject_slot_says_what_it_holds_while_dormant(
+    columns: tuple[files.Column, ...],
+) -> None:
+    """Say a reject slot holds a measurement while dormant, not an innovation."""
+    descriptions = {column.name: column.meaning for column in columns}
+    for slot, place in (("1", "oldest"), ("2", "middle"), ("3", "newest")):
+        assert descriptions[f"reject{slot}_innovation"] == (
+            f"reject buffer, {place}: innovation, ps;"
+            " while dormant, a measurement z, ps"
+        )
+
+
 def test_the_double_difference_header_is_the_design_s() -> None:
     """Give the lines of design 5.5 in order, the warning second."""
     header_text = files.header("ddiff", "b", ("mc1", "mc2", "ox23"))

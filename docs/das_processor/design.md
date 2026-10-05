@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 21:59:28 UTC
+**Date:** 2026-10-05 22:00:55 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -608,11 +608,11 @@ One row per epoch holds the pair's measurement, decycled and referred to E (§7)
 | 16 | `epochs_since_accept` | 9 | rows since the last accepted measurement, not counting dormant rows that buffer a measurement |
 | 17 | `consecutive_rejects` | 9 | consecutive counted rejects |
 | 18 | `reject1_mjd` | 13 | reject buffer, oldest: epoch start, MJD |
-| 19 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps |
+| 19 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps |
 | 20 | `reject2_mjd` | 13 | reject buffer, middle: epoch start, MJD |
-| 21 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps |
+| 21 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps; while dormant, a measurement z, ps |
 | 22 | `reject3_mjd` | 13 | reject buffer, newest: epoch start, MJD |
-| 23 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps |
+| 23 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps; while dormant, a measurement z, ps |
 | 24 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
 | 25 | `time_constant` | 23 | estimator time constant, epochs |
 | 26 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
@@ -688,11 +688,11 @@ The header of a measurement file:
 #   epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
 #   consecutive_rejects     consecutive counted rejects
 #   reject1_mjd             reject buffer, oldest: epoch start, MJD
-#   reject1_innovation      reject buffer, oldest: innovation, ps
+#   reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
 #   reject2_mjd             reject buffer, middle: epoch start, MJD
-#   reject2_innovation      reject buffer, middle: innovation, ps
+#   reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
 #   reject3_mjd             reject buffer, newest: epoch start, MJD
-#   reject3_innovation      reject buffer, newest: innovation, ps
+#   reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
 #   filter_states           estimator states: 1, 2 or 3
 #   time_constant           estimator time constant, epochs
 #   scale_time_constant     innovation-scale averaging constant, epochs
@@ -728,11 +728,11 @@ One row per epoch holds the triple's double difference (§12) and its estimator 
 | 14 | `epochs_since_accept` | 9 | rows since the last accepted measurement, not counting dormant rows that buffer a measurement |
 | 15 | `consecutive_rejects` | 9 | consecutive counted rejects |
 | 16 | `reject1_mjd` | 13 | reject buffer, oldest: epoch start, MJD |
-| 17 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps |
+| 17 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps |
 | 18 | `reject2_mjd` | 13 | reject buffer, middle: epoch start, MJD |
-| 19 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps |
+| 19 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps; while dormant, a measurement z, ps |
 | 20 | `reject3_mjd` | 13 | reject buffer, newest: epoch start, MJD |
-| 21 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps |
+| 21 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps; while dormant, a measurement z, ps |
 | 22 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
 | 23 | `time_constant` | 23 | estimator time constant, epochs |
 | 24 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
@@ -770,11 +770,11 @@ The header of a double-difference file:
 #   epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
 #   consecutive_rejects     consecutive counted rejects
 #   reject1_mjd             reject buffer, oldest: epoch start, MJD
-#   reject1_innovation      reject buffer, oldest: innovation, ps
+#   reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
 #   reject2_mjd             reject buffer, middle: epoch start, MJD
-#   reject2_innovation      reject buffer, middle: innovation, ps
+#   reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
 #   reject3_mjd             reject buffer, newest: epoch start, MJD
-#   reject3_innovation      reject buffer, newest: innovation, ps
+#   reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
 #   filter_states           estimator states: 1, 2 or 3
 #   time_constant           estimator time constant, epochs
 #   scale_time_constant     innovation-scale averaging constant, epochs

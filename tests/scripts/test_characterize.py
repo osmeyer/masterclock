@@ -28,13 +28,18 @@ starts with a prefix given; and the script reads a characterization run's
 files and prints one line per clock, references left out, the same report
 from several processes as from one.
 
-The noise data are invented, from a seeded generator.
+The noise data are invented, from a seeded generator. A test that runs
+das_processor in this process puts the root logger back as it was, so no
+later test, in whatever order, finds logging silenced.
 """
 
+import logging
 import math
 import random
 import runpy
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
@@ -52,6 +57,27 @@ T: Final = characterize.T
 
 START: Final = datetime(2025, 9, 23, tzinfo=UTC)
 """An invented first epoch."""
+
+
+@contextmanager
+def root_logger_kept() -> Iterator[None]:
+    """Put the root logger back as it was, its level and handlers, when done."""
+    root_logger = logging.getLogger()
+    saved_level, saved_handlers = root_logger.level, list(root_logger.handlers)
+    try:
+        yield
+    finally:
+        for handler in root_logger.handlers:
+            if handler not in saved_handlers:
+                root_logger.removeHandler(handler)
+        root_logger.setLevel(saved_level)
+
+
+@pytest.fixture(autouse=True)
+def restore_root_logger() -> Iterator[None]:
+    """Put the root logger back as it was after each test."""
+    with root_logger_kept():
+        yield
 
 
 def seeded(seed: int) -> random.Random:
@@ -657,7 +683,8 @@ def processed_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Run das_processor once over the invented deployment; give its output."""
     folder = tmp_path_factory.mktemp("characterization")
     das_arguments = write_deployment(folder)
-    assert das_processor_main(das_arguments) == 0
+    with root_logger_kept():
+        assert das_processor_main(das_arguments) == 0
     return folder / "processed"
 
 

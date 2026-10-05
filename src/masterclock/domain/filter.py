@@ -28,7 +28,10 @@ tracked at all: :func:`disabled_step` gives its row, of flag O alone.
 A measurement is accepted when it passes the gate (:func:`within_gate`,
 :func:`rms_ok`). One that fails is a counted reject (:func:`count_reject`),
 and three in a row are looked at for a step (:func:`classify`): agreeing,
-they are a phase step; on a line, a frequency step (:func:`accept_step`).
+they are a phase step; on a line, a frequency step (:func:`accept_step`). A
+pair's reading over its rms limit is never accepted, not by a step and not
+by acquisition: it is a counted reject that empties the buffer, so it is
+never one of the three a step or a cold start is found in.
 
 :func:`filter_step` puts it all together for one series at one epoch: it
 takes the series' measurement as plain values (:class:`FilterInput`) and
@@ -1008,9 +1011,10 @@ def accept_step(
     Row or None
         The accepted row after a phase step (see :func:`phase_step`) or, for
         a 2- or 3-state series, a frequency step (see
-        :func:`frequency_step`). ``None`` while fewer than three
-        consecutive rejects are counted, when the rejects show neither, and
-        for a frequency step of a 1-state series, which has no rate.
+        :func:`frequency_step`). ``None`` while the buffer holds fewer than
+        three rejects, which a reject over the rms limit empties, when the
+        rejects show neither, and for a frequency step of a 1-state series,
+        which has no rate.
 
     Raises
     ------
@@ -1019,7 +1023,7 @@ def accept_step(
         another model than the series' (on a frequency step), or the
         finished row breaks a rule of :class:`Row`.
     """
-    if draft.consecutive_rejects < _STEP_REJECTS:
+    if len(draft.rejects) < _STEP_REJECTS:
         return None
     if draft.innovation_scale is None:
         message = f"a reject at {draft.interpolated_datetime} has no innovation scale"
@@ -1069,7 +1073,9 @@ def _consecutive(rejects: tuple[Reject, ...]) -> bool:
     )
 
 
-def acquire(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
+def acquire(
+    draft: RowDraft, z: int, series_params: SeriesParams, *, in_limit: bool = True
+) -> Row:
     """Buffer a dormant series' measurement; cold-start when it is consistent.
 
     Parameters
@@ -1084,11 +1090,16 @@ def acquire(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
         (see :func:`anchor_of`).
     series_params : SeriesParams
         The settings in force, whose ``sigma0`` sets the test.
+    in_limit : bool, optional
+        Whether a pair's reading is within its rms limit; a triple's always
+        is.
 
     Returns
     -------
     Row
-        A cold start from ``z`` (see :func:`cold_start`) when the buffer,
+        A dormant R row with an empty buffer when the reading is not within
+        its rms limit: it is never buffered, so it cannot start the series.
+        Otherwise a cold start from ``z`` (see :func:`cold_start`) when the buffer,
         with ``z`` added and the newest
         :data:`~masterclock.domain.series.MAX_REJECTS` kept, holds three
         measurements from consecutive epochs whose second difference
@@ -1102,13 +1113,15 @@ def acquire(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     FilterError
         If the finished row breaks a rule of :class:`Row`.
     """
+    draft.consecutive_rejects = 0
+    if not in_limit:
+        return dormant(draft, "R")
     buffer_entry = (draft.interpolated_datetime, float(z))
     draft.rejects = (*draft.rejects, buffer_entry)[-MAX_REJECTS:]
     if len(draft.rejects) == MAX_REJECTS and _consecutive(draft.rejects):
         z1, z2, z3 = (exact(buffered_z) for _, buffered_z in draft.rejects)
         if abs(z3 - 2 * z2 + z1) <= exact(_ACQUIRE_LIMIT * series_params.sigma0):
             return cold_start(draft, z, series_params)
-    draft.consecutive_rejects = 0
     return dormant(draft, "R", keep_buffer=True)
 
 
@@ -1299,8 +1312,9 @@ def filter_step(
         :func:`start_segment`); the row then also carries the outcome.
         With no measurement, the row holds the prediction (see :func:`hold`).
         A series with no prediction, or a triple one of whose pairs
-        cold-started, acquires (see :func:`acquire`). Otherwise the
-        measurement goes through the gate.
+        cold-started, acquires (see :func:`acquire`), a pair's reading over
+        its rms limit never buffered. Otherwise the measurement goes through
+        the gate.
 
     Raises
     ------
@@ -1329,7 +1343,12 @@ def filter_step(
         draft.rejects = ()
         prediction = None
     if prediction is None:
-        row = acquire(draft, measurement.z, series_params)
+        row = acquire(
+            draft,
+            measurement.z,
+            series_params,
+            in_limit=_within_rms_limit(measurement, series_params),
+        )
         return StepResult(row=row, cold_started="D" not in row.flags)
     row = _gate(draft, prediction, measurement, series_params, excluded=excluded)
     return StepResult(row=row, cold_started=False)
@@ -1363,10 +1382,11 @@ def _gate(
     Row
         Accepted when the measurement passes the gate and is not excluded.
         Held as X when it is excluded inside the gate, not counted.
-        Otherwise a counted reject: accepted after a step when the rejects
-        show one (see :func:`accept_step`); else, once the rejects reach
-        ``n_break``, a dormant row whose measurement starts the acquisition
-        buffer; else held as R.
+        Otherwise a counted reject, which empties the buffer when a pair's
+        reading is over its rms limit: accepted after a step when the
+        rejects show one (see :func:`accept_step`); else, once the rejects
+        reach ``n_break``, a dormant row whose measurement starts the
+        acquisition buffer, unless it is over the rms limit; else held as R.
 
     Raises
     ------
@@ -1383,14 +1403,14 @@ def _gate(
         _log.error(message)
         raise FilterError(message)
     in_gate = within_gate(innovation, draft.innovation_scale)
-    rms_passes = measurement.rms is None or rms_ok(
-        measurement.rms, series_params.rms_max
-    )
-    if in_gate and rms_passes and not excluded:
+    in_limit = _within_rms_limit(measurement, series_params)
+    if in_gate and in_limit and not excluded:
         return accept(draft, prediction, innovation, measurement.scale_floor, nu=nu)
     if in_gate and excluded:
         return hold(draft, prediction, "X", series_params)
     count_reject(draft, innovation)
+    if not in_limit:
+        draft.rejects = ()
     step_row = accept_step(
         draft, prediction, measurement.z, measurement.scale_floor, series_params
     )
@@ -1398,5 +1418,24 @@ def _gate(
         return step_row
     if draft.consecutive_rejects >= series_params.n_break:
         draft.rejects = ()
-        return acquire(draft, measurement.z, series_params)
+        return acquire(draft, measurement.z, series_params, in_limit=in_limit)
     return hold(draft, prediction, "R", series_params)
+
+
+def _within_rms_limit(measurement: FilterInput, series_params: SeriesParams) -> bool:
+    """Tell whether a measurement is within its rms limit; a triple's always is.
+
+    Parameters
+    ----------
+    measurement : FilterInput
+        The measurement.
+    series_params : SeriesParams
+        The settings in force, whose ``rms_max`` is a pair's limit.
+
+    Returns
+    -------
+    bool
+        Whether the measurement has no rms, being a triple's, or its rms is
+        within the limit (see :func:`rms_ok`).
+    """
+    return measurement.rms is None or rms_ok(measurement.rms, series_params.rms_max)

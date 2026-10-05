@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 14:34:32 UTC
+**Date:** 2026-10-05 20:53:32 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -1730,7 +1730,7 @@ das_processor tells them apart by waiting: one reading far from the prediction i
 
 Every measurement of a series with a valid prediction passes through one gate.
 A rejected measurement gives no update.
-After three counted rejects in a row, the rejected innovations are classified as a phase step, a frequency step, or continued outliers.
+After three counted rejects in a row, the rejected innovations are classified as a phase step, a frequency step, or continued outliers, as long as none of the three was over its pair's RMS limit.
 
 ### 9.1 Gate
 
@@ -1739,6 +1739,8 @@ A measurement is accepted when all of these hold:
 1. It is not excluded by screening or by the slip check (§10, §11).
 2. For pairs only, its rms is no more than the pair's RMS limit (§15.2).
 3. |ν| ≤ k_out σ_ν, with k_out = <!-- figure: K_OUT -->5<!-- end figure -->, compared exactly.
+
+A pair's measurement whose RMS is over its limit is never accepted, not after a step (§9.4) and not by acquisition (§13.3).
 
 ### 9.2 Innovation scale
 
@@ -1759,13 +1761,16 @@ M_σ sets how precise σ_ν is: an average with weight 1/M_σ has a relative err
 | --- | --- | --- | --- |
 | Accepted (A) | 0 | emptied | 0 |
 | Counted reject (R) | + 1 | push (epoch, ν); keep the newest three, oldest first | + 1 |
+| Counted reject over the pair's RMS limit (R) | + 1 | emptied | + 1 |
 | Excluded, not counted (X) | unchanged | unchanged | + 1 |
 | No measurement (P) | unchanged | unchanged | + 1 |
 | Dormant, measurement buffered (R with D) | 0 | push (epoch, z); keep the newest three, oldest first | unchanged |
+| Dormant, measurement over the pair's RMS limit (R with D) | 0 | emptied | unchanged |
 
 ### 9.4 Step classification
 
-Classification runs on a counted reject when consecutive_rejects ≥ 3.
+Classification runs on a counted reject when the buffer holds three rejects.
+A pair's reading over its RMS limit is never accepted, by a step or otherwise: it is a counted reject that empties the buffer, so it is never one of the three, and the three a step is found in each passed the RMS limit.
 It uses the buffer (e₁, ν₁), (e₂, ν₂), (e₃, ν₃), where ν₃ is the current innovation, and the times t_i from e₁ to e_i.
 The tests are applied in order, with k_step = <!-- figure: K_STEP -->3<!-- end figure -->.
 A 1-state series applies only the phase-step test, since it has no rate to correct.
@@ -1830,7 +1835,7 @@ flowchart TD
     G -- no --> EX{Excluded and<br/>inside the gate?}
     EX -- yes --> XR[Hold: X]
     EX -- no --> RJ[Counted reject: R]
-    RJ --> Q{consecutive_rejects ≥ 3?}
+    RJ --> Q{Three rejects in the buffer?<br/>An RMS failure empties it}
     Q -- no --> NB
     Q -- yes --> PS{Phase step?}
     PS -- yes --> PSA[step_offset += Δ<br/>accept: A]
@@ -1864,7 +1869,8 @@ def filter_step(
     if measurement.pair_cold_started:  # §12.6: a pair of the triple restarted
         draft.rejects, prediction = (), None
     if prediction is None:  # new or dormant: acquisition (§13.3)
-        row = acquire(draft, measurement.z, series_params)
+        in_limit = measurement.rms is None or measurement.rms <= series_params.rms_max
+        row = acquire(draft, measurement.z, series_params, in_limit)
         return StepResult(row, cold_started="D" not in row.flags)
     row = gate(draft, prediction, measurement, series_params, excluded)
     return StepResult(row, cold_started=False)
@@ -1876,20 +1882,22 @@ def gate(draft, prediction, measurement, series_params, excluded):
     # |innovation| <= K_OUT * scale, compared exactly.
     in_gate = within_gate(innovation, draft.innovation_scale)
     # A triple has no rms test.
-    rms_passes = measurement.rms is None or measurement.rms <= series_params.rms_max
-    if in_gate and rms_passes and not excluded:
+    in_limit = measurement.rms is None or measurement.rms <= series_params.rms_max
+    if in_gate and in_limit and not excluded:
         return accept(draft, prediction, innovation, measurement.scale_floor)
     if in_gate and excluded:
         return hold(draft, prediction, "X", series_params)  # §9.5
     count_reject(draft, innovation)
-    step_row = accept_step(
+    if not in_limit:  # never one of the three a step is found in (§9.4)
+        draft.rejects = ()
+    step_row = accept_step(  # only with three rejects in the buffer
         draft, prediction, measurement.z, measurement.scale_floor, series_params
     )
     if step_row is not None:
         return step_row
     if draft.consecutive_rejects >= series_params.n_break:  # dormant until it acquires
         draft.rejects = ()
-        return acquire(draft, measurement.z, series_params)
+        return acquire(draft, measurement.z, series_params, in_limit)
     return hold(draft, prediction, "R", series_params)
 
 
@@ -2325,6 +2333,7 @@ A new series starts in segment 0.
 
 Acquisition: a dormant series starts again only once its measurements agree with each other again.
 While it is dormant, its reject buffer holds its last measurements as (epoch, z) instead of innovations, and a pair decycles each new measurement against the last of them (§7.5).
+A pair's reading over its RMS limit is never buffered: it empties the buffer, so the three a series acquires from each passed the RMS limit.
 The series cold-starts (§8.6) from the current measurement when the buffer holds three measurements from consecutive epochs whose second difference passes:
 
 ```latex
@@ -2413,15 +2422,17 @@ def carry(epoch_start, last_row, series_params, slip=False, last_segment=None):
     return draft
 
 
-def acquire(draft, z, series_params):
+def acquire(draft, z, series_params, in_limit=True):
     """Buffer a dormant series' measurement; cold-start on three consistent ones."""
+    draft.consecutive_rejects = 0
+    if not in_limit:  # a pair's reading over its RMS limit is never buffered
+        return dormant(draft, "R")
     draft.rejects = (*draft.rejects, (draft.interpolated_datetime, float(z)))[-3:]
     if len(draft.rejects) == 3 and consecutive_epochs(draft.rejects):
         z1, z2, z3 = (exact(buffered_z) for _, buffered_z in draft.rejects)
         limit = exact(K_OUT * math.sqrt(6) * series_params.sigma0)  # compared exactly
         if abs(z3 - 2 * z2 + z1) <= limit:
             return cold_start(draft, z, series_params)
-    draft.consecutive_rejects = 0
     return dormant(draft, "R", keep_buffer=True)
 
 

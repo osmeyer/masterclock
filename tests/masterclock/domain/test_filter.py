@@ -39,7 +39,10 @@ to even, added to the step offset; three that lie on a line within three
 scales, fitted against the rejects' own epochs, are a frequency step,
 accepted in a new warm segment with the prediction moved onto the line;
 classifying needs three rejects, and a step a series with an innovation
-scale; a 1-state series takes only phase steps.
+scale; a 1-state series takes only phase steps. A pair's reading over its
+rms limit is never accepted: it is a counted reject that empties the step
+buffer, so a step needs three rejects in the buffer, each within the limit,
+and a dormant series never buffers it, so it never starts acquisition.
 
 A disabled series is not tracked: with a reading it writes a row of flag O
 alone, with no state, innovation, counters or buffer, in the segment of the
@@ -1641,6 +1644,85 @@ def test_an_rms_over_the_limit_is_a_counted_reject() -> None:
     assert (step_result.row.flags, step_result.row.consecutive_rejects) == ("R", 1)
 
 
+def test_rejects_over_the_rms_limit_are_never_a_step() -> None:
+    """Give R, R, R for three agreeing readings each over the pair's rms limit."""
+    previous_row = last_row(y=0.0)
+    step_rows = []
+    for _ in range(3):
+        previous_row = run_epoch(previous_row, WORKED_Z + 150, make_series_params(), 81)
+        step_rows.append(previous_row)
+    assert [row.flags for row in step_rows] == ["R", "R", "R"]
+    assert [row.consecutive_rejects for row in step_rows] == [1, 2, 3]
+    assert [row.rejects for row in step_rows] == [(), (), ()]
+
+
+def test_a_reject_over_the_rms_limit_empties_the_step_buffer() -> None:
+    """Give R, its buffer empty, for a third agreeing reject over the rms limit."""
+    previous_row = last_row(
+        flags="R",
+        consecutive_rejects=2,
+        rejects=buffer_ending_at_start(150.0, 150.0),
+        innovation=150.0,
+        epochs_since_accept=2,
+    )
+    prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
+    assert prediction is not None
+    row = filter_step_after(
+        previous_row, pair_input(round_even(prediction.x) + 150, rms=81)
+    ).row
+    assert (row.flags, row.consecutive_rejects, row.rejects) == ("R", 3, ())
+
+
+def test_a_step_needs_three_rejects_in_its_buffer() -> None:
+    """Look for no step while the buffer holds fewer than three, whatever the count."""
+    previous_row = last_row()
+    prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
+    assert prediction is not None
+    draft = moved_on(previous_row, rejects=reject_buffer(150.0), consecutive_rejects=4)
+    assert (
+        estimator.accept_step(draft, prediction, 1_234_724, 3, make_series_params())
+        is None
+    )
+
+
+def test_a_step_follows_three_rejects_within_the_rms_limit() -> None:
+    """Give a phase step on the third agreeing reject after one over the rms limit."""
+    previous_row = last_row(y=0.0)
+    previous_row = run_epoch(previous_row, WORKED_Z + 150, make_series_params(), 81)
+    step_rows = [run_epoch(previous_row, WORKED_Z + 150, make_series_params())]
+    for _ in range(2):
+        step_rows.append(run_epoch(step_rows[-1], WORKED_Z + 150, make_series_params()))
+    assert [row.flags for row in step_rows] == ["R", "R", "A"]
+    assert step_rows[-1].step_offset == WORKED_Z + 150 - 1_234_567
+
+
+def test_a_dormant_reading_over_the_rms_limit_is_not_buffered() -> None:
+    """Give D R with an empty buffer, never a cold start, for an over-limit reading."""
+    previous_row = dormant_row(1_000.0, 51_000.0)
+    step_result = filter_step_after(previous_row, pair_input(101_000, rms=81))
+    assert (step_result.row.flags, step_result.cold_started) == ("RD", False)
+    assert (step_result.row.rejects, step_result.row.consecutive_rejects) == ((), 0)
+    row = estimator.acquire(
+        moved_on(previous_row), 101_000, make_series_params(), in_limit=False
+    )
+    assert (row.flags, row.rejects) == ("RD", ())
+
+
+def test_a_reading_over_the_rms_limit_at_n_break_is_not_buffered() -> None:
+    """Give D R with an empty buffer when an over-limit reject reaches N_break."""
+    previous_row = last_row(
+        flags="R",
+        consecutive_rejects=4,
+        rejects=buffer_ending_at_start(100.0, -100.0, 300.0),
+        innovation=300.0,
+        epochs_since_accept=4,
+    )
+    row = filter_step_after(
+        previous_row, pair_input(WORKED_Z, rms=81), make_series_params(n_break=5)
+    ).row
+    assert (row.flags, row.rejects, row.consecutive_rejects) == ("RD", (), 0)
+
+
 def test_a_triple_has_no_rms_test_and_its_floor_is_sigma_dd() -> None:
     """Accept a triple with no rms limit, its scale held up by sigma_dd (12.5)."""
     step_result = filter_step_after(
@@ -1982,7 +2064,11 @@ def test_every_filter_error_is_logged_as_raised(
     failing_calls: list[Callable[[], object]] = [
         lambda: estimator.accept(no_scale_draft, prediction, mpq(0), 3),
         lambda: estimator.accept_step(
-            dataclasses.replace(no_scale_draft, consecutive_rejects=3),
+            dataclasses.replace(
+                no_scale_draft,
+                consecutive_rejects=3,
+                rejects=reject_buffer(1.0, 2.0, 3.0),
+            ),
             prediction,
             0,
             3,

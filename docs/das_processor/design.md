@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 21:12:57 UTC
+**Date:** 2026-10-05 21:30:55 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -2893,7 +2893,7 @@ The tests follow the project's layout and tools:
 - Property tests: Hypothesis covers decycling, formatting round trips and the gate's exact comparison.
   It also generates random deployments and runs each one in one run and one epoch per run; the data files must be byte-identical.
 - Mutation testing: mutmut, run by hand over `src`.
-- Timing, run by hand and not a test: `scripts/epoch_timing.py` builds an invented deployment and times das_processor on it, with logging off: a number of runs of one epoch each, as the scheduler starts them, and one run over the day's data, or the epochs asked for, against an epoch's <!-- figure: EPOCH_SECONDS -->600<!-- end figure --> s.
+- Timing, run by hand and not a test: `scripts/epoch_timing.py` builds an invented deployment, every reference steered hourly and, when asked, every clock measured by every reference, and times das_processor on it, logging at INFO to a file: a number of runs of one epoch each, as the scheduler starts them, and one run over the day's data, or the epochs asked for, against an epoch's <!-- figure: EPOCH_SECONDS -->600<!-- end figure --> s.
 - Test data: every test makes invented data in a temporary directory.
 
 A test that carries one of these identifiers in its docstring is a test of that row.

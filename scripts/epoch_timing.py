@@ -1,17 +1,24 @@
 """Time das_processor on an invented deployment, against the 600 s of an epoch.
 
-The script builds a deployment of invented DAS files and clock configuration
-in a new folder: R references, each measured against itself and every other
-reference, and C clocks, each measured against one reference, taken in turn.
-That gives R * R + C pair files and R * (R * R + C) triple files, one
-triple for each pair through each reference. No reference steers.
+The script builds a deployment of invented DAS files, steering files and
+clock configuration in a new folder: R references, each measured against
+itself and every other reference, and C clocks, each measured against one
+reference, taken in turn, or, with ``--every-reference``, against every
+reference, as the laboratory's DAS measures them. That gives R * R + C
+pair files, or R * R + R * C, and R times as many triple files, one triple
+for each pair through each reference. Every reference is steered every hour,
+half a picosecond in phase and a rate that the next two hours' steers take
+back, as a reference is steered in operation. Each run logs at INFO to a
+file in its folder, as a scheduled run does.
 
 It then runs das_processor as the scheduler does, one process per epoch,
 for the first epochs of a day whose DAS file is already whole, so each run
 reads the whole day's file; and, on a copy of the same data, one process for
 every epoch of the data. Give it a folder that does not exist yet or is empty::
 
-    uv run --frozen python scripts/epoch_timing.py FOLDER --references 3 --clocks 20
+    uv run --frozen python scripts/epoch_timing.py FOLDER --every-reference
+
+``--references`` and ``--clocks`` set how many of each there are.
 
 It prints how long the first one-epoch run took and the median and longest
 of the others, and the batch run's time in total and per epoch; each time
@@ -79,9 +86,20 @@ CLOCK_TYPES: Final = (
 )
 """The invented clock configuration, before its list of clocks."""
 
+STEER_TIME: Final = timedelta(seconds=30)
+"""When in each hour every reference is steered."""
 
-def measured_pairs_for(references: int, clocks: int) -> list[tuple[str, str]]:
-    """Give every pair measured, references first, each clock after its reference's.
+STEER_PHASES: Final = (0.5, -0.5)
+"""The phase steers, ps, taken in turn hour by hour."""
+
+STEER_RATES: Final = (1e-4, -2e-4, 1e-4)
+"""The rate steers, ps/s, taken in turn hour by hour; every three cancel."""
+
+
+def measured_pairs_for(
+    references: int, clocks: int, *, every_reference: bool = False
+) -> list[tuple[str, str]]:
+    """Give every pair measured, references first, then the clocks.
 
     Parameters
     ----------
@@ -89,24 +107,59 @@ def measured_pairs_for(references: int, clocks: int) -> list[tuple[str, str]]:
         How many references, from 1 to :data:`MAX_REFERENCES`.
     clocks : int
         How many other clocks.
+    every_reference : bool, optional
+        Whether every reference measures every clock.
 
     Returns
     -------
     list of (str, str)
         Each (reference, clock): ``mc<i>`` against every reference, then
-        ``hm<n>`` against reference ``n mod references``.
+        ``hm<n>`` against reference ``n mod references``, or against every
+        reference in turn when ``every_reference``.
     """
     reference_names = list(REFERENCE_NAMES[:references])
     measured_pairs = [(r, s) for r in reference_names for s in reference_names]
-    measured_pairs += [
-        (reference_names[clock_index % references], f"hm{clock_index:04d}")
-        for clock_index in range(clocks)
-    ]
+    for clock_index in range(clocks):
+        clock = f"hm{clock_index:04d}"
+        measuring = (
+            reference_names
+            if every_reference
+            else [reference_names[clock_index % references]]
+        )
+        measured_pairs += [(reference, clock) for reference in measuring]
     return measured_pairs
 
 
+def write_steering(folder: Path, reference_names: Sequence[str], epochs: int) -> None:
+    """Write each reference's steering file: a steer every hour of the data.
+
+    Parameters
+    ----------
+    folder : Path
+        The steering folder.
+    reference_names : Sequence of str
+        The references.
+    epochs : int
+        How many epochs the data cover, from :data:`DATA_START`.
+    """
+    hours = -(-epochs * EPOCH_LENGTH // timedelta(hours=1))
+    steering_text = "".join(
+        f"{datetime_to_mjd(DATA_START + timedelta(hours=hour) + STEER_TIME):.6f}"
+        f" {STEER_PHASES[hour % len(STEER_PHASES)]}"
+        f" {STEER_RATES[hour % len(STEER_RATES)]}\n"
+        for hour in range(hours)
+    )
+    for reference in reference_names:
+        (folder / f"steer_{reference}.dat").write_text(steering_text, encoding="ascii")
+
+
 def build_deployment(
-    folder: Path, references: int, clocks: int, epochs: int
+    folder: Path,
+    references: int,
+    clocks: int,
+    epochs: int,
+    *,
+    every_reference: bool = False,
 ) -> list[str]:
     """Write a deployment's input files in a new folder, and give its arguments.
 
@@ -120,15 +173,21 @@ def build_deployment(
         How many other clocks.
     epochs : int
         How many epochs of data, from the start of :data:`DATA_START`.
+    every_reference : bool, optional
+        Whether every reference measures every clock.
 
     Returns
     -------
     list of str
-        The das_processor arguments for the deployment, with logging off.
+        The das_processor arguments for the deployment, logging at INFO to
+        ``das_processor.log`` in ``folder``.
     """
     for subfolder in ("das", "steering", "processed"):
         (folder / subfolder).mkdir(parents=True)
-    measured_pairs = measured_pairs_for(references, clocks)
+    write_steering(folder / "steering", REFERENCE_NAMES[:references], epochs)
+    measured_pairs = measured_pairs_for(
+        references, clocks, every_reference=every_reference
+    )
     clock_names = sorted({clock for _, clock in measured_pairs})
     (folder / "clock_config.yaml").write_text(
         CLOCK_TYPES
@@ -173,8 +232,8 @@ def build_deployment(
         "--processed-path", str(folder / "processed"),
         "--clock-config-file", str(folder / "clock_config.yaml"),
         "--start-from-mjd", f"{datetime_to_mjd(DATA_START):.6f}",
-        "--log-file", "None",
-        "--log-level", "None",
+        "--log-file", str(folder / "das_processor.log"),
+        "--log-level", "INFO",
         "--backup-count", "None",
     ]  # fmt: skip
 
@@ -257,16 +316,31 @@ def timing_report(cli_options: argparse.Namespace) -> list[str]:
         cli_options.clocks,
         cli_options.epochs,
     )
+    every_reference = cli_options.every_reference
     stepped_arguments = build_deployment(
-        cli_options.folder / "stepped", references, clocks, epochs
+        cli_options.folder / "stepped",
+        references,
+        clocks,
+        epochs,
+        every_reference=every_reference,
     )
     batch_arguments = build_deployment(
-        cli_options.folder / "batch", references, clocks, epochs
+        cli_options.folder / "batch",
+        references,
+        clocks,
+        epochs,
+        every_reference=every_reference,
     )
+    pair_files = references * references + clocks * (
+        references if every_reference else 1
+    )
+    measured_by = "every reference" if every_reference else "one reference"
     report_lines = [
-        f"deployment: {references} references, {clocks} clocks, {epochs} epochs:"
-        f" {references * references + clocks} pair files,"
-        f" {references * (references * references + clocks)} triple files"
+        f"deployment: {references} references, {clocks} clocks"
+        f" each measured by {measured_by},"
+        f" {epochs} epochs: {pair_files} pair files,"
+        f" {references * pair_files} triple files;"
+        " every reference steered hourly, logging at INFO"
     ]
     one_epoch_times = [
         timed_run([*stepped_arguments, "--steps", "1"]) for _ in range(cli_options.runs)
@@ -350,6 +424,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--runs", type=_count(1), default=6, help="runs of one epoch to time"
+    )
+    parser.add_argument(
+        "--every-reference",
+        action="store_true",
+        help="have every reference measure every clock, as the DAS does",
     )
     cli_options = parser.parse_args(argv)
     if cli_options.runs > cli_options.epochs:

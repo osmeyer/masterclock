@@ -1,7 +1,10 @@
 """Tests for scripts/epoch_timing.py.
 
 The rules covered: the deployment holds every reference against itself and
-every other reference, and each clock against one reference in turn; its
+every other reference, and each clock against one reference in turn, or,
+when asked, against every reference; every reference is steered hourly,
+the steers cancelling every three hours; the timed runs log at INFO to a
+file, as a scheduled run does; its
 DAS files hold one block per epoch with every pair once and no line the
 reader refuses, however many pairs there are, and a clock configuration
 entry for every clock; the references are named from the digits
@@ -16,6 +19,7 @@ is a usage error.
 import logging
 import runpy
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -23,6 +27,7 @@ import pytest
 import epoch_timing
 from masterclock.das_processor.clock_config import read_clock_config
 from masterclock.das_processor.read_cd5m5m import read_all_blocks
+from masterclock.das_processor.read_steering import SteeringFiles
 
 
 def test_every_reference_meets_every_reference_and_each_clock_one() -> None:
@@ -36,6 +41,45 @@ def test_every_reference_meets_every_reference_and_each_clock_one() -> None:
         ("mc1", "hm0001"),
         ("mc0", "hm0002"),
     ]
+
+
+def test_every_reference_measures_every_clock_when_asked() -> None:
+    """Give each clock against every reference, as the laboratory's DAS measures."""
+    assert epoch_timing.measured_pairs_for(2, 2, every_reference=True) == [
+        ("mc0", "mc0"),
+        ("mc0", "mc1"),
+        ("mc1", "mc0"),
+        ("mc1", "mc1"),
+        ("mc0", "hm0000"),
+        ("mc1", "hm0000"),
+        ("mc0", "hm0001"),
+        ("mc1", "hm0001"),
+    ]
+
+
+def test_every_reference_is_steered_every_hour(tmp_path: Path) -> None:
+    """Steer each reference hourly over the data, the steers cancelling in 3 h."""
+    epoch_timing.build_deployment(tmp_path, 2, 1, 18)
+    steering_files = SteeringFiles(tmp_path / "steering")
+    for reference in ("mc0", "mc1"):
+        steer_events = steering_files.events(
+            reference,
+            epoch_timing.DATA_START - epoch_timing.EPOCH_LENGTH,
+            epoch_timing.DATA_START + 18 * epoch_timing.EPOCH_LENGTH,
+        )
+        steer_times = [
+            steer_event.applied_datetime - epoch_timing.DATA_START
+            for steer_event in steer_events
+        ]
+        assert len(steer_times) == 3
+        for hour, steer_time in enumerate(steer_times):
+            # The MJD's six decimals hold the time to within 43.2 ms.
+            assert abs(steer_time - timedelta(hours=hour, seconds=30)) < timedelta(
+                milliseconds=44
+            )
+        assert [steer_event.dx for steer_event in steer_events] == [0.5, -0.5, 0.5]
+        assert sum(steer_event.dy for steer_event in steer_events) == pytest.approx(0)
+        assert all(steer_event.dy != 0 for steer_event in steer_events)
 
 
 def test_the_deployment_holds_every_pair_once_per_epoch(
@@ -61,6 +105,10 @@ def test_the_deployment_holds_every_pair_once_per_epoch(
         assert clock_config.entry_for(clock, epoch_timing.DATA_START) is not None
     assert das_arguments[das_arguments.index("--processed-path") + 1] == str(
         tmp_path / "processed"
+    )
+    assert das_arguments[das_arguments.index("--log-level") + 1] == "INFO"
+    assert das_arguments[das_arguments.index("--log-file") + 1] == str(
+        tmp_path / "das_processor.log"
     )
 
 
@@ -119,9 +167,24 @@ def test_the_timed_runs_write_the_deployment_s_files(
         )
     printed_output = capsys.readouterr().out
     assert "5 pair files, 10 triple files" in printed_output
+    assert "every reference steered hourly, logging at INFO" in printed_output
+    assert "epoch " in (timing_folder / "batch" / "das_processor.log").read_text()
     assert "median of the next 2" in printed_output
     assert "batch run of 4 epochs" in printed_output
     assert "% of 600 s" in printed_output
+
+
+def test_a_deployment_of_every_reference_counts_its_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Count R * R + R * C pairs when every reference measures every clock."""
+    timing_folder = tmp_path / "timing"
+    assert epoch_timing.main(
+        [str(timing_folder), "--references", "2", "--clocks", "1", "--epochs", "4",
+         "--runs", "1", "--every-reference"]
+    ) == 0  # fmt: skip
+    assert "6 pair files, 12 triple files" in capsys.readouterr().out
+    assert len(data_file_rows(timing_folder / "batch")) == 6 + 2 * 6
 
 
 def test_one_run_of_one_epoch_has_no_median(

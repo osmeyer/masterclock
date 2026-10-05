@@ -26,6 +26,8 @@ from typing import TYPE_CHECKING, Final
 
 from gmpy2 import mpq
 
+from masterclock.app.log import MasterClockLogger, get_logger
+from masterclock.domain.exceptions import PhaseError
 from masterclock.domain.phase import EPOCH_SECONDS, exact, seconds
 from masterclock.domain.references import is_reference
 
@@ -34,6 +36,9 @@ if TYPE_CHECKING:
 
 _EPOCH: Final[timedelta] = timedelta(seconds=EPOCH_SECONDS)
 """One epoch, T."""
+
+_log: Final[MasterClockLogger] = get_logger(__name__)
+"""Logger for this module."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +102,27 @@ def signs(series_key: Sequence[str]) -> dict[str, int]:
     }
 
 
+def _aware(instant: datetime, instant_name: str) -> None:
+    """Refuse a datetime with no timezone, which names no one instant.
+
+    Parameters
+    ----------
+    instant : datetime
+        The datetime.
+    instant_name : str
+        What it is, for the message.
+
+    Raises
+    ------
+    PhaseError
+        If ``instant`` has no timezone.
+    """
+    if instant.tzinfo is None:
+        message = f"{instant_name} {instant} has no timezone"
+        _log.error(message)
+        raise PhaseError(message)
+
+
 def _signed_events(
     steering: Mapping[str, Sequence[SteerEvent]],
     series_key: Sequence[str],
@@ -121,9 +147,18 @@ def _signed_events(
     tuple of (int, SteerEvent)
         The sign of each event's reference in the series, and the event, by
         reference in the order :func:`signs` gives and then in time order.
+
+    Raises
+    ------
+    PhaseError
+        If either end of the interval, or an event's instant, has no
+        timezone, since it then names no one instant.
     """
+    _aware(window_start, "the start of a steering window")
+    _aware(window_end, "the end of a steering window")
     for reference, sign in signs(series_key).items():
         for steer_event in steering.get(reference, ()):
+            _aware(steer_event.applied_datetime, f"a steering event of {reference} at")
             if window_start < steer_event.applied_datetime <= window_end:
                 yield sign, steer_event
 
@@ -154,7 +189,8 @@ def steer_u(
     Raises
     ------
     PhaseError
-        If ``epoch_start`` or an event's instant has no timezone.
+        If ``epoch_start`` or the instant of an event of the series'
+        references has no timezone; the error is logged first.
 
     Examples
     --------
@@ -205,7 +241,8 @@ def steer_w(
     Raises
     ------
     PhaseError
-        If ``measured_at`` or an event's instant has no timezone.
+        If ``epoch_start``, ``measured_at`` or the instant of an event of
+        the series' references has no timezone; the error is logged first.
     """
     w = mpq(0)
     for sign, steer_event in _signed_events(

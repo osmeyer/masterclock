@@ -1,18 +1,21 @@
 """Tests for src/masterclock/domain/steering.py.
 
-The rules covered: a steering event holds its changes of phase and rate
-and the instant they were applied, and is frozen; a series is steered by every reference
-in its effective difference, with the signs of design 7.1 and none for a
-self pair; the input over the previous epoch counts the events in
-(E - T, E], moved on to E; the steering inside an epoch counts the events
-in (E, t], moved on to the measurement time t; every phase term is exact;
-and an event inside an epoch, before the measurement, leaves the decycled
-phase at E as it was, and enters the next epoch's input in full.
+The rules covered: a steering event holds its changes of phase and rate and
+the instant they were applied, and is frozen; a series is steered by every
+reference in its effective difference, with the signs of design 7.1 and none
+for a self pair; the input over the previous epoch counts the events in
+(E - T, E], moved on to E; the steering inside an epoch counts the events in
+(E, t], moved on to the measurement time t; every phase term is exact; an
+event inside an epoch, before the measurement, leaves the decycled phase at
+E as it was, and enters the next epoch's input in full; and a mark, event or
+measurement time with no timezone is refused with PhaseError, logged,
+whether or not there are events.
 
 w adds up every event inside the epoch.
 """
 
 import dataclasses
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
@@ -20,6 +23,7 @@ import pytest
 from gmpy2 import mpq
 
 from masterclock.domain import phase, steering
+from masterclock.domain.exceptions import PhaseError
 from masterclock.domain.series import State
 
 EPOCH_START: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
@@ -211,3 +215,34 @@ def test_w_adds_up_every_event_inside_the_epoch() -> None:
     assert (
         steering.steer_w(("mc1", "mc2"), EPOCH_START, steering_events, measured_at) == 5
     )
+
+
+@pytest.mark.parametrize(
+    "naive_one",
+    ["mark", "mark, no events", "mark, w", "event", "measurement time"],
+)
+def test_a_datetime_with_no_timezone_is_refused(
+    naive_one: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Raise PhaseError, logged, for a datetime with no timezone, events or not."""
+    aware_mark = datetime(2025, 9, 23, 6, tzinfo=UTC)
+    mark = (
+        aware_mark.replace(tzinfo=None) if naive_one.startswith("mark") else aware_mark
+    )
+    event_at = aware_mark - timedelta(minutes=5)
+    if naive_one == "event":
+        event_at = event_at.replace(tzinfo=None)
+    events = {"mc1": (steering.SteerEvent(applied_datetime=event_at, dx=1.0, dy=0.0),)}
+    if naive_one == "mark, no events":
+        events = {}
+    measured_at = aware_mark + timedelta(minutes=2)
+    with caplog.at_level(logging.ERROR), pytest.raises(PhaseError, match="no timezone"):
+        if naive_one == "measurement time":
+            steering.steer_w(
+                ("mc1", "ox23"), mark, events, measured_at.replace(tzinfo=None)
+            )
+        elif naive_one == "mark, w":
+            steering.steer_w(("mc1", "ox23"), mark, events, measured_at)
+        else:
+            steering.steer_u(("mc1", "ox23"), mark, events)
+    assert [log_record.levelno for log_record in caplog.records] == [logging.ERROR]

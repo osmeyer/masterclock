@@ -107,3 +107,10 @@ repos:
         pass_filenames: false
         always_run: true
         verbose: true
+      - id: check-documents
+        name: documents hold what the code gives, dated as git says
+        entry: uv run --frozen python scripts/documents.py --check .
+        language: system
+        pass_filenames: false
+        always_run: true
+        verbose: true

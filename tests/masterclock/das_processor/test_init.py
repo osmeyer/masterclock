@@ -8,11 +8,13 @@ logged too when logging can start; logging starts from its own settings
 first, so a setting or path that cannot be used is logged at ERROR with exit
 1, printed on standard error instead only when it keeps logging from
 starting or logging is set to None; any later MasterClockError exits 1,
-logged once where it was raised; a second run of the same channel is refused
-by the run lock; a redo first undoes a write that stopped part way, then
-deletes the rows from its epoch before the run, which computes them again;
-``--steps`` limits the run to that many epochs; and logging set to None logs
-nothing.
+logged once where it was raised; any other error, while the settings are
+read or during the run, exits 1, logged at ERROR with its traceback, or
+printed with it on standard error when logging is set to None; a second run
+of the same channel is refused by the run lock; a redo first undoes a write
+that stopped part way, then deletes the rows from its epoch before the run,
+which computes them again; ``--steps`` limits the run to that many epochs;
+and logging set to None logs nothing.
 
 A usage error ends with the missing setting; the logging settings reach the
 logging; and a redo computes its rows again with the settings in force now.
@@ -220,6 +222,54 @@ def test_an_error_during_the_run_exits_one_logged_once(
     ]
     assert len(error_records) == 1
     assert "steer_mc1.dat" in error_records[0].getMessage()
+
+
+class InventedFaultError(Exception):
+    """An error that is not a MasterClockError, raised on purpose."""
+
+
+def raise_invented_fault(*_args: object, **_kwargs: object) -> None:
+    """Raise an error no part of das_processor raises."""
+    raise InventedFaultError("an invented fault")
+
+
+@pytest.mark.parametrize("failing_step", ["run_channel", "build_config"])
+def test_an_unexpected_error_is_logged_with_its_traceback_and_exits_one(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_step: str,
+) -> None:
+    """Log an error that is not a MasterClockError at ERROR, traceback and all."""
+    argv = make_deployment(tmp_path)
+    monkeypatch.setattr(das_processor, failing_step, raise_invented_fault)
+    assert das_processor.main(argv) == 1
+    error_records = [
+        log_record for log_record in caplog.records if log_record.levelname == "ERROR"
+    ]
+    assert [log_record.getMessage() for log_record in error_records] == [
+        "stopped on an unexpected error: InventedFaultError: an invented fault"
+    ]
+    assert error_records[0].exc_info is not None
+    assert error_records[0].exc_info[0] is InventedFaultError
+
+
+def test_with_logging_silenced_an_unexpected_error_is_printed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Print an unexpected error and its traceback when the log level is None."""
+    argv = make_deployment(tmp_path)
+    argv[argv.index("--log-level") + 1] = "None"
+    monkeypatch.setattr(das_processor, "run_channel", raise_invented_fault)
+    assert das_processor.main(argv) == 1
+    stderr_text = capsys.readouterr().err
+    assert stderr_text.startswith(
+        "das_processor: error: stopped on an unexpected error:"
+        " InventedFaultError: an invented fault\nTraceback"
+    )
+    assert stderr_text.rstrip().endswith("InventedFaultError: an invented fault")
 
 
 def test_a_second_run_of_the_channel_is_refused(

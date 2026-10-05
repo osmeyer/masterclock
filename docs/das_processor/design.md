@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 20:58:47 UTC
+**Date:** 2026-10-05 21:03:12 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -994,12 +994,15 @@ def main(argv=None):
                     run(config, clock_config, cli_options.steps, shutdown, worker_pool)
     except MasterClockError:
         return 1  # logged where it was raised
+    except Exception:  # an error no part of das_processor raises on purpose
+        log_with_traceback_at_error()  # or print it, when nothing logs at ERROR
+        return 1
     return 0
 ```
 
 - Lock: `RunLock` holds `das_processor_<rf>.lock` in `processed_path` for the whole run. A second run of the same channel stops at once with `RunLockError`, naming the holder's process. The operating system releases the lock however a run ends, so a crash never leaves a stale lock.
 - Signals: `ShutdownHandler` turns SIGINT, SIGTERM and SIGHUP into a request that the run checks between epochs, so a signal never interrupts an epoch. The run then writes its day buffer (§5.8) and stops.
-- Exit status: 0 for a run that finished; 2 for a usage error, above all a required setting given by neither source, after the full help; 1 for any other failure, which was logged where it happened. Logging starts from the logging settings alone, before anything else is checked, so every later error is logged at ERROR. An error that keeps logging from starting is printed on standard error, and so is an error in a setting or path when the log level is `None`, which logs nothing; any later failure is then shown by the exit status alone.
+- Exit status: 0 for a run that finished; 2 for a usage error, above all a required setting given by neither source, after the full help; 1 for any other failure, which was logged where it happened; an error that is not one of the project's own is logged at ERROR with its traceback by the entry point. Logging starts from the logging settings alone, before anything else is checked, so every later error is logged at ERROR. An error that keeps logging from starting is printed on standard error, and so is an error in a setting or path when the log level is `None`, which logs nothing; any later failure is then shown by the exit status alone.
 
 ### 6.2 Where a run stops
 
@@ -2634,6 +2637,7 @@ It searches G_max up to a fixed limit, and gives −1 when even a gap of no epoc
 
 Every error the project defines is a subclass of `MasterClockError`, kept in its package's `exceptions` module, and logged at ERROR where it is raised, but for two kinds: a refused DAS line, logged at WARNING where it is skipped, and the errors in the settings, which the entry point logs, or prints when logging cannot start.
 The entry point turns a failure into exit status 1, saying nothing more, and a required setting given by neither source into exit status 2 (§6.1).
+Any other exception, which no part of das_processor raises on purpose, the entry point logs at ERROR with its traceback, or prints with it on standard error when nothing logs at ERROR, and turns into exit status 1.
 
 <!-- generated: errors -->
 

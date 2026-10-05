@@ -12,11 +12,14 @@ finished, 2 for a usage error such as a required setting given by neither
 the INI file nor the command line, and 1 for any other failure. Logging
 starts from the logging settings before anything else is checked, so a
 failure is logged; only one that keeps logging from starting, or any when
-the log level is None, is printed on standard error instead.
+the log level is None, is printed on standard error instead. An error that
+is not one of the project's own, which no part of das_processor raises on
+purpose, is logged at ERROR with its traceback, and also exits 1.
 """
 
 import logging
 import sys
+import traceback
 from collections.abc import Sequence
 from typing import Final
 
@@ -146,12 +149,46 @@ def _start_logging(cli_options: CliOptions) -> bool | None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run das_processor and give its exit status (design 6.1).
+    """Run das_processor and give its exit status, whatever goes wrong (design 6.1).
 
     Parameters
     ----------
     argv : Sequence of str or None, optional
         The arguments, without the program name; ``None``, the default, for
+        :data:`sys.argv`.
+
+    Returns
+    -------
+    int
+        What :func:`_run` gives; :data:`FAILURE` when it raised an error that
+        is not a MasterClockError, which is logged at ERROR with its
+        traceback, or printed with it on standard error when nothing logs
+        at ERROR.
+
+    Raises
+    ------
+    SystemExit
+        As :func:`_run` does.
+    """
+    try:
+        return _run(argv)
+    except Exception as exc:  # every failure ends logged, with exit status 1
+        message = f"stopped on an unexpected error: {type(exc).__name__}: {exc}"
+        if logging.getLogger().isEnabledFor(logging.ERROR):
+            _log.exception(message)
+        else:
+            print(f"das_processor: error: {message}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+        return FAILURE
+
+
+def _run(argv: Sequence[str] | None) -> int:
+    """Run das_processor and give its exit status (design 6.1).
+
+    Parameters
+    ----------
+    argv : Sequence of str or None
+        The arguments, without the program name; ``None`` for
         :data:`sys.argv`.
 
     Returns

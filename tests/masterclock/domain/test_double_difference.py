@@ -1,17 +1,19 @@
 """Tests for src/masterclock/domain/double_difference.py.
 
 The rules covered: a triple (r, s, c) has a value only when its clock pair
-(s, c) is accepted; with both link directions accepted it is
-z(s,c) + (z(r,s) - z(s,r)) / 2, with variance sigma_sc**2 plus a quarter of
-the links' variances; with one direction accepted, the other is replaced
-through the links' predicted round trip, with the variance of the two
-pairs used; with neither, or with the round trip needed and a prediction
-missing, there is no value; the value is summed exactly and rounded once;
-a local triple (r, r, c) needs only (r, c), collapses to z(r, c) exactly and
-stops with PhaseError when it does not; the value is marked cold when any
-component cold-started; a constant link offset keeps the value continuous
-as the components used change; and a component has its z and rms exactly
-when it was accepted, and is refused otherwise, logged as raised.
+(s, c) is accepted; with both link directions accepted it is z(s,c) +
+(z(r,s) - z(s,r)) / 2, with variance sigma_sc**2 plus a quarter of the
+links' variances; with one direction accepted, the other is replaced through
+the links' predicted round trip, with the variance of the two pairs used;
+with neither, or with the round trip needed and a prediction missing, there
+is no value; the value is summed exactly and rounded once; a local triple
+(r, r, c) needs only (r, c), collapses to z(r, c) exactly and stops with
+PhaseError when it does not; a pair whose value the triple uses restarted
+when any of its three pairs cold-started, or, for a local triple, its pair
+(r, c), the self pair cancelling, whether or not the triple has a value, and
+the value is then marked cold; a constant link offset keeps the value
+continuous as the components used change; and a component has its z and rms
+exactly when it was accepted, and is refused otherwise, logged as raised.
 
 The 110 sigma combines the clock pair's and the forward link's rms in
 quadrature, and a local triple that does not collapse says so in full.
@@ -27,6 +29,7 @@ from masterclock.domain.double_difference import (
     Component,
     TripleValue,
     double_difference,
+    pair_restarted,
 )
 from masterclock.domain.exceptions import PhaseError
 from masterclock.domain.phase import round_even
@@ -257,6 +260,46 @@ def test_a_component_cold_start_marks_the_value_cold(cold_pair: str) -> None:
     triple_value = double_difference(REMOTE_TRIPLE, sc, rs, sr)
     assert triple_value is not None
     assert triple_value.pair_cold_started is True
+
+
+def test_a_local_triple_is_not_cold_when_its_self_pair_is() -> None:
+    """Leave a local triple warm when only its self pair cold-started (12.6)."""
+    rr = link_component(5_432_101, cold_started=True)
+    triple_value = double_difference(LOCAL_TRIPLE, SC, rr, rr)
+    assert triple_value is not None
+    assert triple_value.pair_cold_started is False
+
+
+@pytest.mark.parametrize(
+    ("triple", "cold_pair", "restarted"),
+    [
+        (REMOTE_TRIPLE, "sc", True),
+        (REMOTE_TRIPLE, "rs", True),
+        (REMOTE_TRIPLE, "sr", True),
+        (REMOTE_TRIPLE, None, False),
+        (LOCAL_TRIPLE, "sc", True),
+        (LOCAL_TRIPLE, "rs", False),
+        (LOCAL_TRIPLE, None, False),
+    ],
+)
+def test_a_pair_restart_is_one_of_a_pair_the_triple_uses(
+    triple: tuple[str, str, str], cold_pair: str | None, restarted: bool
+) -> None:
+    """Count any pair of a remote triple, and only (r, c) of a local one (12.6)."""
+    sc = Component(accepted=True, z=1_234_577, rms=3, cold_started=cold_pair == "sc")
+    rs = link_component(5_432_100, cold_started=cold_pair == "rs")
+    sr = link_component(-5_432_080, cold_started=cold_pair == "sr")
+    if triple == LOCAL_TRIPLE:
+        rs = sr = link_component(5_432_100, cold_started=cold_pair == "rs")
+    assert pair_restarted(triple, sc, rs, sr) is restarted
+
+
+def test_a_link_restart_counts_without_the_clock_pair() -> None:
+    """Count a link's restart at an epoch whose (s, c) was not accepted (12.6)."""
+    sc = Component(accepted=False, predicted_phase=mpq(1_234_574))
+    rs = link_component(5_432_100, cold_started=True)
+    assert double_difference(REMOTE_TRIPLE, sc, rs, link_component(-5_432_080)) is None
+    assert pair_restarted(REMOTE_TRIPLE, sc, rs, link_component(-5_432_080))
 
 
 def test_a_local_triple_is_cold_when_its_pair_is() -> None:

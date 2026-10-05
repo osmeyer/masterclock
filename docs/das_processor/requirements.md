@@ -1,6 +1,6 @@
 # das_processor requirements
 
-**Date:** 2026-10-05 20:53:32 UTC
+**Date:** 2026-10-05 20:58:47 UTC
 
 This document lists what `das_processor` must do, as numbered requirements a test or a reader can check.
 The [design](design.md) says how it does each one, and the [user manual](user_manual.md) says how to use it.
@@ -131,7 +131,7 @@ flowchart LR
 | PR-11 | Other than as a step (PR-13), it accepts a measurement that has a prediction only when screening and the slip check did not exclude it, it is within <!-- figure: K_OUT -->5<!-- end figure --> innovation scales of the prediction, and, for a pair, its RMS is no more than the pair's RMS limit. It never accepts a pair's measurement whose RMS is over the limit, by a step, a restart or otherwise. | §9.1, §9.4, §13.3 |
 | PR-12 | It updates the innovation scale on accepted rows only, by an exponential average with weight 1/M_σ, never below the measurement's own RMS for a pair or σ_dd for a triple. | §9.2 |
 | PR-13 | After three counted rejects in a row, each of a pair's within its RMS limit, it accepts the third as a phase step when the three innovations agree within <!-- figure: K_STEP -->3<!-- end figure --> innovation scales of their mean, or, for a 2- or 3-state series, as a frequency step when they lie that close to a fitted line, starting a new segment. | §9.4 |
-| PR-14 | A series goes dormant when its counted rejects in a row reach the configured number, when it has gone more epochs than its gap limit without an accepted measurement, or, for a triple, when a pair it was built from restarts. | §13.3, §12.6 |
+| PR-14 | A series goes dormant when its counted rejects in a row reach the configured number, when it has gone more epochs than its gap limit without an accepted measurement, or, for a triple, when a pair whose value it uses restarts, whether or not the triple has a measurement at that epoch: any of its three pairs for a remote triple, and only (r, c) for a local triple (r, r, c), whose self pair cancels. | §13.3, §12.6 |
 | PR-15 | A dormant series restarts from its current measurement once it has three measurements from consecutive epochs, each of a pair's within its RMS limit, whose second difference is within 5√6 times its initial innovation scale. | §13.3 |
 | PR-16 | A change to a clock's time constants starts a new segment of each of its series at the change's epoch, carrying the estimate across. | §8.7 |
 | PR-17 | A row of a 2- or 3-state series is marked unsettled while its segment has run fewer than <!-- figure: SETTLE_FACTOR -->5<!-- end figure --> times M rows. | §8.8 |

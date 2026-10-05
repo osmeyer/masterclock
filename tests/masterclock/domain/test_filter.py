@@ -61,8 +61,8 @@ a dormant series, and unchanged settings start none; a measurement is a
 pair's, with an rms, or a triple's, with sigma_dd and no rms test, and that
 value is the floor of the innovation scale; a prediction for a series with
 no scale is refused; then every path of the decision flow gives its row, a
-component cold start makes a triple dormant, and the result says whether
-the row cold-started.
+component cold start makes a triple dormant, with or without a measurement
+at the epoch, and the result says whether the row cold-started.
 
 The classification and acquisition limits hold exactly at their values, the
 slope is fitted as the design writes it, gains exist for M = 1, the drift is
@@ -1823,6 +1823,27 @@ def test_a_component_cold_start_makes_a_triple_dormant() -> None:
     )
     assert (step_result.row.flags, step_result.cold_started) == ("RD", False)
     assert step_result.row.rejects == ((NEXT_EPOCH_START, float(WORKED_Z)),)
+
+
+def test_a_pair_restart_without_a_measurement_makes_a_triple_dormant() -> None:
+    """Give an unwritten D P row, the buffer empty, when a pair restarted (12.6)."""
+    previous_row = last_row(
+        rejects=buffer_ending_at_start(90.0),
+        consecutive_rejects=1,
+        flags="R",
+        innovation=90.0,
+    )
+    step_result = estimator.filter_step(
+        NEXT_EPOCH_START,
+        make_series_params(rms_max=None),
+        previous_row,
+        estimator.predict(previous_row, NO_STEERING_INPUT),
+        None,
+        pair_cold_started=True,
+    )
+    assert (step_result.row.flags, step_result.cold_started) == ("PD", False)
+    assert step_result.row.rejects == ()
+    assert not estimator.writes_row(step_result.row)
 
 
 def test_a_slip_corrected_measurement_carries_s() -> None:

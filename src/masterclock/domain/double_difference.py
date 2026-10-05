@@ -12,6 +12,12 @@ links' predictions give, rho = x-(r, s) + x-(s, r). A local triple (r, r, c)
 uses the self pair (r, r) for both directions, so the link term cancels and
 the value is z(r, c) exactly; that is checked every time, and a mismatch is
 a fault. Every value is summed exactly and rounded once, a tie to even.
+
+A pair whose value the triple uses may restart (cold-start) at an epoch,
+its cycle count starting again, so the triple's value can jump: any of the
+three pairs of a remote triple, and only (r, c) of a local one, whose self
+pair cancels. :func:`pair_restarted` says so whether or not the triple has a
+value at the epoch, and the triple then starts again (design 12.6).
 """
 
 import math
@@ -123,7 +129,8 @@ def double_difference(
         (110), or z(s,c) - z(s,r) + rho/2 with
         sigma_dd**2 = sigma_sc**2 + sigma_sr**2 (101). A
         local triple needs only (r, c), and is z(r, c) with sigma_rc. Cold
-        when any pair cold-started. ``None`` when (s, c) is not accepted,
+        when a pair it uses cold-started (see :func:`pair_restarted`).
+        ``None`` when (s, c) is not accepted,
         neither link is, or rho is needed and a prediction is missing.
 
     Raises
@@ -145,12 +152,49 @@ def double_difference(
     clock_measurement = _measured(sc)
     if clock_measurement is None:
         return None
-    pair_cold_started = sc.cold_started or rs.cold_started or sr.cold_started
+    pair_cold_started = pair_restarted(triple, sc, rs, sr)
     if r == s:
         return _local(
             triple, *clock_measurement, rs, sr, pair_cold_started=pair_cold_started
         )
     return _remote(*clock_measurement, rs, sr, pair_cold_started=pair_cold_started)
+
+
+def pair_restarted(
+    triple: TripleKey, sc: Component, rs: Component, sr: Component
+) -> bool:
+    """Tell whether a pair whose value a triple uses cold-started (design 12.6).
+
+    Parameters
+    ----------
+    triple : (str, str, str)
+        The triple (r, s, c).
+    sc : Component
+        The clock pair (s, c).
+    rs, sr : Component
+        The link pairs (r, s) and (s, r); for a local triple (r, r, c),
+        the self pair (r, r) for both.
+
+    Returns
+    -------
+    bool
+        For a remote triple, whether any of the three pairs cold-started;
+        for a local one, whether (r, c) did, since its self pair cancels.
+        Whether or not the triple has a value at the epoch.
+
+    Examples
+    --------
+    >>> rr = Component(accepted=False, cold_started=True)
+    >>> sc = Component(accepted=False)
+    >>> pair_restarted(("mc2", "mc2", "ox23"), sc, rr, rr)
+    False
+    >>> pair_restarted(("mc1", "mc2", "ox23"), sc, rr, sc)
+    True
+    """
+    r, s, _ = triple
+    if r == s:
+        return sc.cold_started
+    return sc.cold_started or rs.cold_started or sr.cold_started
 
 
 def _measured(component: Component) -> tuple[int, int] | None:

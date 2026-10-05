@@ -24,8 +24,10 @@ reference missing from the block are predicted. The triples are built from
 the pairs' accepted measurements of the same epoch, a link direction not
 measured taken from the links' predictions and an rms of 0 giving a sigma
 of 0, the local triple given its self pair for both links, marked cold when
-a pair cold-started, and filtered. Each pair's part in the triples is worked
-out once an epoch, and a pair the epoch does not hold gives no accepted part.
+a pair cold-started, and filtered; a triple whose link restarted at an
+epoch its clock pair has no accepted measurement goes dormant, with no row.
+Each pair's part in the triples is worked out once an epoch, and a pair the
+epoch does not hold gives no accepted part.
 
 The run's events are logged at the design's levels: each epoch with its
 counts of rows written at INFO; steps, cold starts, dormancy, a series that
@@ -104,7 +106,13 @@ from masterclock.das_processor.registry import ExistingSeries
 from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.measurements import DisabledReading, PairMeasurement
 from masterclock.domain.phase import PHASE_PERIOD
-from masterclock.domain.series import Row, SeriesKey, TripleKey, check_row
+from masterclock.domain.series import (
+    Row,
+    SeriesKey,
+    SeriesParams,
+    TripleKey,
+    check_row,
+)
 from masterclock.domain.steering import steer_u
 
 E: Final = datetime(2025, 9, 23, 6, 0, tzinfo=UTC)
@@ -808,6 +816,36 @@ def test_a_component_cold_start_makes_the_triple_dormant(tmp_path: Path) -> None
     assert triple_step.measurements[("mc2", "mc2", "ox23")].pair_cold_started is True
     row = triple_step.step_results[("mc2", "mc2", "ox23")].row
     assert (row.flags, row.rejects) == ("RD", ((E, 1_234_579.0),))
+
+
+def test_a_link_restart_without_the_clock_pair_makes_the_triple_dormant() -> None:
+    """Write no row for a triple whose link restarted while (s, c) had none (12.6)."""
+    triple = ("mc1", "mc2", "ox23")
+    triple_step = run.work_triples(
+        E,
+        {},
+        [triple],
+        {
+            triple: SeriesParams(
+                filter_states=3,
+                M=100.0,
+                M_sigma=50.0,
+                sigma0=5.0,
+                gmax=432,
+                n_break=36,
+                rms_max=None,
+            )
+        },
+        {triple: triple_last_row()},
+        {},
+        {
+            ("mc2", "ox23"): Component(accepted=False),
+            ("mc1", "mc2"): Component(accepted=True, z=1, rms=2, cold_started=True),
+            ("mc2", "mc1"): Component(accepted=True, z=-1, rms=2),
+        },
+    )
+    assert triple not in triple_step.measurements
+    assert triple_step.step_results[triple].row.flags == "PD"
 
 
 def test_a_triple_without_its_clock_pair_holds(tmp_path: Path) -> None:

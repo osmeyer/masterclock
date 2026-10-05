@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 20:53:32 UTC
+**Date:** 2026-10-05 20:58:47 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -422,7 +422,7 @@ class TripleMeasurement:  # one double-difference file row (§5.5)
     z: int
     double_difference_sigma: float
     components_used: Literal["111", "110", "101"]
-    pair_cold_started: bool  # a pair it was built from restarted this epoch
+    pair_cold_started: bool  # a pair whose value it uses restarted this epoch
 
 
 @dataclass(frozen=True, slots=True)
@@ -1229,6 +1229,13 @@ def process_triples(epoch, last_rows, pair_step, last_segments):
             prediction,
             triple_value,
             last_segment=last_segments.get((r, s, c)),
+            # With a value or without one (§12.6).
+            pair_cold_started=pair_restarted(
+                (r, s, c),
+                components.get((s, c)),
+                components.get((r, s)),
+                components.get((s, r)),
+            ),
         )
 ```
 
@@ -1825,7 +1832,7 @@ flowchart TD
     CFG -- yes --> W[Warm segment start]
     CFG -- no --> MQ
     W --> MQ{Measurement?}
-    MQ -- no --> PR[Predicted row P,<br/>or no row when dormant]
+    MQ -- no --> PR[Predicted row P,<br/>or no row when dormant<br/>or a pair of a triple restarted]
     MQ -- yes --> VQ{Valid prediction and<br/>no pair cold start?}
     VQ -- no --> AQ{Acquisition:<br/>three consistent<br/>measurements buffered?}
     AQ -- yes --> CS[Cold start: A N U]
@@ -1857,6 +1864,7 @@ def filter_step(
     measurement,
     excluded=False,
     last_segment=None,
+    pair_cold_started=False,  # a triple: a pair it uses restarted (§12.6)
 ):
     slip = measurement is not None and measurement.slip
     # epochs_in_segment + 1.
@@ -1865,6 +1873,8 @@ def filter_step(
     if tracked and params_changed(series_params, last_row):
         start_segment(draft, series_params, keep_offset=True)  # §8.7
     if measurement is None:  # §13.1
+        if pair_cold_started:  # §12.6: dormant, not written
+            return StepResult(dormant(draft, "P"), False)
         return StepResult(hold(draft, prediction, "P", series_params), False)
     if measurement.pair_cold_started:  # §12.6: a pair of the triple restarted
         draft.rejects, prediction = (), None
@@ -2227,10 +2237,12 @@ A triple runs `filter_step` (§9.7) with these differences from a pair:
 
 ### 12.6 A pair's cold start passed on to its triples
 
-When a pair that gave a value to a triple's dd cold-starts at an epoch, either (s, c) or a link pair whose z or prediction was used, that pair's cycle count starts again and dd jumps by an arbitrary amount.
-The triple then goes dormant at that epoch and acquires again from its own measurements (§13.3).
+When a pair whose value a triple uses cold-starts at an epoch, that pair's cycle count may start again, so dd can jump by an arbitrary amount.
+For a remote triple (r, s, c) that is any of (s, c), (r, s) and (s, r); for a local triple (r, r, c) only (r, c), since its self pair cancels (§12.4).
+The triple then goes dormant at that epoch, whether or not it has a measurement there, and acquires again from its own measurements (§13.3).
+With a measurement, the row is dormant with that measurement in its acquisition buffer; without one, the row is dormant with an empty buffer and is not written, so the triple starts again at its next measurement, in its next segment.
 Warm starts are not passed on, because z stays continuous.
-Whether a row cold-started is not written: `filter_step` gives it beside the row, and the triple's measurement carries it on.
+Whether a row cold-started is not written: `filter_step` gives it beside the row, and `pair_restarted` in `domain/double_difference.py` gives it to the triple.
 
 ### 12.7 Pseudocode
 
@@ -2253,7 +2265,10 @@ def double_difference(triple, sc, rs, sr):
     r, s, c = triple
     if not sc.accepted:
         return None
-    pair_cold_started = sc.cold_started or rs.cold_started or sr.cold_started
+    # Any of its pairs; for a local triple, (r, c) alone (§12.6).
+    pair_cold_started = sc.cold_started or (
+        r != s and (rs.cold_started or sr.cold_started)
+    )
     if r == s:  # §12.4
         dd = round_even(sc.z + mpq((rs.z or 0) - (sr.z or 0), 2))
         if dd != sc.z:
@@ -2323,7 +2338,7 @@ It becomes dormant:
 - when it is created;
 - when a held row's epochs_since_accept exceeds G_max (§13.2);
 - when consecutive_rejects reaches N_break (§9.4);
-- for a triple, when a pair it was built from cold-starts (§12.6).
+- for a triple, when a pair whose value it uses cold-starts, with or without a measurement of the triple at that epoch (§12.6).
 
 A dormant row writes x, y, d and innovation_scale as `-`.
 It carries flag D, with R when it has a measurement, or X or P as the outcome was.

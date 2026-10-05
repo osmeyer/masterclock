@@ -56,7 +56,11 @@ from masterclock.das_processor.registry import (
     refs_of,
     series_file,
 )
-from masterclock.domain.double_difference import Component, double_difference
+from masterclock.domain.double_difference import (
+    Component,
+    double_difference,
+    pair_restarted,
+)
 from masterclock.domain.filter import (
     StepResult,
     anchor_of,
@@ -1201,7 +1205,8 @@ def work_triples(
         local triple (r, r, c) is given its self pair for both links, so
         the check that it collapses to its pair runs every epoch; a pair
         with no part given takes part as one not accepted, with no
-        prediction.
+        prediction. A triple a pair of which it uses cold-started starts
+        again, with a measurement at the epoch or without one.
 
     Raises
     ------
@@ -1215,12 +1220,12 @@ def work_triples(
     predictions: dict[TripleKey, State | None] = {}
     for triple in triples:
         r, s, c = triple
-        triple_value = double_difference(
-            triple,
+        parts = (
             components.get((s, c), _NO_COMPONENT),
             components.get((r, s), _NO_COMPONENT),
             components.get((s, r), _NO_COMPONENT),
         )
+        triple_value = double_difference(triple, *parts)
         measurement = (
             None
             if triple_value is None
@@ -1239,6 +1244,7 @@ def work_triples(
             prediction,
             None if measurement is None else measurement.filter_input(),
             last_segment=last_segments.get(triple),
+            pair_cold_started=pair_restarted(triple, *parts),
         )
     return TripleStep(
         step_results=step_results, measurements=measurements, predictions=predictions

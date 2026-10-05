@@ -1280,6 +1280,7 @@ def filter_step(
     *,
     excluded: bool = False,
     last_segment: int | None = None,
+    pair_cold_started: bool = False,
 ) -> StepResult:
     """Give a series' row at an epoch: the whole of the decision flow (design 9.6).
 
@@ -1303,6 +1304,9 @@ def filter_step(
         that ``last_row`` is ``None``, the segment of its last row in its
         file, the series starting in the next (see :func:`carry`); ``None``
         for a new series.
+    pair_cold_started : bool, optional
+        For a triple, whether a pair it uses cold-started at E, whether or
+        not the triple has a measurement there (design 12.6).
 
     Returns
     -------
@@ -1310,11 +1314,12 @@ def filter_step(
         The row, and whether it cold-started. First, a tracked series whose
         time constants changed starts a warm segment (see
         :func:`start_segment`); the row then also carries the outcome.
-        With no measurement, the row holds the prediction (see :func:`hold`).
-        A series with no prediction, or a triple one of whose pairs
-        cold-started, acquires (see :func:`acquire`), a pair's reading over
-        its rms limit never buffered. Otherwise the measurement goes through
-        the gate.
+        With no measurement, the row holds the prediction (see :func:`hold`),
+        or, for a triple one of whose pairs cold-started, is dormant with an
+        empty buffer, and not written. A series with no prediction, or a
+        triple one of whose pairs cold-started, acquires (see
+        :func:`acquire`), a pair's reading over its rms limit never
+        buffered. Otherwise the measurement goes through the gate.
 
     Raises
     ------
@@ -1336,6 +1341,8 @@ def filter_step(
     ):
         start_segment(draft, series_params, keep_offset=True)
     if measurement is None:
+        if pair_cold_started:
+            return StepResult(row=dormant(draft, "P"), cold_started=False)
         return StepResult(
             row=hold(draft, prediction, "P", series_params), cold_started=False
         )

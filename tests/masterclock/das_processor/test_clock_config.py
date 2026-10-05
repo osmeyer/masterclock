@@ -357,11 +357,12 @@ def test_a_pair_takes_its_second_clock_s_settings(tmp_path: Path) -> None:
     )
 
 
-def test_a_self_or_link_pair_takes_the_reference_s_settings(tmp_path: Path) -> None:
+@pytest.mark.parametrize("series_key", [("mc1", "mc1"), ("mc1", "mc2")])
+def test_a_self_or_link_pair_takes_the_reference_s_settings(
+    tmp_path: Path, series_key: SeriesKey
+) -> None:
     """Give (r, r) and (r, s) the reference's 1-state entry."""
-    series_params = read_config_text(tmp_path).params_for(
-        ("mc1", "mc2"), MJD_60980_START
-    )
+    series_params = read_config_text(tmp_path).params_for(series_key, MJD_60980_START)
     assert (
         series_params.filter_states,
         series_params.M,

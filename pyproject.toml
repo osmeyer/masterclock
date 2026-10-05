@@ -1,7 +1,7 @@
 [project]
 name = "masterclock"
 version = "0.1.0"
-description = "Add your description here"
+description = "Software for a timekeeping laboratory that turns raw clock comparisons into clean data for a timescale"
 readme = "README.md"
 authors = [
     { name = "Donald Osmeyer", email = "d_osmeyer@hotmail.com" }

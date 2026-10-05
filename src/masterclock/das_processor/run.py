@@ -438,24 +438,6 @@ class PairStep:
     slips: Slips
 
 
-def _steered(epoch: Epoch) -> bool:
-    """Tell whether any steering event falls in an epoch's steering window.
-
-    Parameters
-    ----------
-    epoch : Epoch
-        The epoch.
-
-    Returns
-    -------
-    bool
-        Whether any reference has an event in (E - T, E + T]. When none
-        has, every series' steering input and steering inside the epoch is
-        zero, and is not worked out series by series.
-    """
-    return any(epoch.steering.values())
-
-
 def _steering_input(
     series_key: SeriesKey,
     epoch_start: datetime,

@@ -1995,7 +1995,7 @@ def test_no_steering_is_worked_out_when_no_event_falls_near(
     """Give each series a zero steering input, calling neither steer_u nor steer_w."""
     epoch_done, last_rows = worked_epoch_done(tmp_path)
     epoch = epoch_done.epoch
-    assert not run._steered(epoch)
+    assert not any(epoch.steering.values())
     series_keys: list[SeriesKey] = [*epoch.pairs, *epoch.triples]
     for series_key in series_keys:
         assert run._steering_input(series_key, E, epoch.steering) == steer_u(

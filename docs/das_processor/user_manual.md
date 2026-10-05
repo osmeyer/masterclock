@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-05 09:31:48 UTC
+**Date:** 2026-10-05 14:34:32 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -36,6 +36,7 @@ flowchart LR
 | Triple (r, s, c) | Clock c compared with reference r, through s, the reference in c's own building. Its rows go to a *double-difference file*, and are what the timescale reads. |
 | Steering | A deliberate change made to a reference, logged in that reference's steering file, so das_processor can allow for it. |
 | Building | Where a clock is. Triples are built only for clocks in the same building as their reference s, so every clock needs its building in the clock configuration. |
+| Disabled | A clock set aside by the clock configuration from a date, for example while it is being repaired. Nothing tracks it, and its readings are never used. |
 
 A run processes epochs in order, starting just after the last epoch its files hold, and stops at the end of the DAS data.
 Run every ten minutes, it does one epoch each time.
@@ -170,7 +171,11 @@ ignore: [gps9]
 
 clocks:
   mc1:  [{type: mc, location: 3}]
-  cs3:  [{type: cesium}, {effective_mjd: 60950.0, location: 7}]
+  cs3:
+    - {type: cesium}
+    - {effective_mjd: 60950.0, location: 7}
+    - {effective_mjd: 60960.0, disabled: true}
+    - {effective_mjd: 60965.0, enabled: true}
   ox6:  [{filter_states: 2, time_constant: 60.0, scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432, location: 9}]
   hm7:
     - {type: maser, location: 7}
@@ -182,6 +187,7 @@ Each clock has a list of *entries*:
 
 - The first entry gives the clock's type, and usually its `location`, the number of the building it is in. A clock that fits no type gives every setting itself in its first entry, with no type and no date, as `ox6` does.
 - A later entry has an `effective_mjd`, and changes the settings it names from the first epoch at or after that MJD: a new time constant (`hm7` at MJD 60980), or a move to another building (`hm7` at MJD 61000). A later entry never gives a type and never changes `filter_states`.
+- A later entry can also disable a clock from its `effective_mjd`, with `disabled: true`, and a still later one enable it again, with `disabled: false`; `enabled: false` and `enabled: true` say the same the other way round, as `cs3` does. An entry gives one of the two, never both. While a clock is disabled, nothing tracks it: each of its pairs, and every pair of a disabled reference, writes a row with the flag O and the reading as the DAS gave it, and its triples carry on as if it was not measured. When it is enabled again, its pairs start afresh, as a new clock's do.
 - A clock with no `location` gets no triples.
 - `ignore` lists clocks the DAS measures that are of no use. Their readings are left out with nothing logged.
 - A clock the DAS measures that the file neither lists nor ignores is left out too, with a warning in the log when a run first sees it, and again whenever it comes back after an epoch without it.
@@ -409,7 +415,7 @@ The header says what the file is and what every column holds:
 #   filter_states           estimator states: 1, 2 or 3
 #   time_constant           estimator time constant, epochs
 #   scale_time_constant     innovation-scale averaging constant, epochs
-#   flags                   A accepted, R rejected, X excluded, P predicted, D dormant, S slip corrected, N new segment, U unsettled
+#   flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->
@@ -451,6 +457,7 @@ The columns most users want:
 | `R` | rejected |
 | `X` | excluded |
 | `P` | predicted |
+| `O` | disabled |
 | `D` | dormant |
 | `S` | slip corrected |
 | `N` | new segment |
@@ -458,12 +465,13 @@ The columns most users want:
 
 <!-- end generated -->
 
-Every row carries exactly one of A, R, X and P:
+Every row carries exactly one of A, R, X, P and O:
 
 - **A**: the reading was accepted and updated the estimate.
 - **R**: the reading was too far from the prediction, or too noisy, and was rejected.
 - **X**: the reading was set aside because another check found a fault in a reference or a slip of a whole period.
 - **P**: there was no reading this epoch; the row holds the prediction.
+- **O**: the pair is disabled in the clock configuration. The row holds the reading as the DAS gave it, no `cycle_count`, the last `z` the pair had, and no estimate, and carries no other flag.
 
 The others are added to it:
 
@@ -478,6 +486,7 @@ A row is a usable measurement when its flags hold A and not U.
 
 A series writes a row every epoch while it has an estimate, carrying the prediction through short gaps in its readings with P rows.
 When its readings stop for longer than its `gap_limit`, it stops writing rows; when they come back, it starts again in a new segment.
+A disabled pair writes a row only at an epoch with a reading.
 So the files of a channel can end at different epochs, and a file can have gaps.
 The log says when a series stops writing.
 
@@ -501,7 +510,7 @@ The log file starts a new file at midnight UTC and keeps `backup_count` old ones
 | --- | --- |
 | ERROR | Every failure, and each damaged output file |
 | WARNING | Refused DAS lines, unknown clocks, rejected readings, reference faults, undecided slips, files cut back |
-| INFO | Each epoch's counts, and every step, restart, dormancy, stop, configuration change, corrected slip and redo |
+| INFO | Each epoch's counts, and every step, restart, dormancy, stop, configuration change, clock disabled or enabled again, corrected slip and redo |
 | DEBUG | Each series' flags at each epoch |
 | TRACE | Each series' prediction and update; very large |
 
@@ -516,6 +525,7 @@ The log file starts a new file at midnight UTC and keeps `backup_count` old ones
 | `… rejected: innovation … ps, scale … ps, … consecutive` | A reading was far from the prediction | Nothing; three that agree are taken as a step |
 | `self-measurement of … failed`, `reciprocity of … failed`, `closure of link … failed` | A reference's measurements disagree with the others | Look at the reference's hardware if it repeats |
 | `… phase step of … ps`, `… frequency step`, `… cold start`, `… dormant`, `… stops: no row until it is measured again` | The estimator followed a change in a clock | Nothing; worth a look if a clock does it often |
+| `clock … disabled from …`, `clock … enabled again from …` | The clock configuration disabled the clock, or enabled it again, from that epoch | Nothing; this is what the configuration asked for |
 | `cut back the files of channel … after a write that stopped part way` | The last run stopped before flushing; the files were put back to before its first epoch | Nothing; the rows are computed again |
 | `data file … is damaged …` | A file holds a line that is not a row das_processor wrote | Find out what changed the file; das_processor has cut every file of the channel back to that file's last good row, and computes the rows after it again |
 | `cut back the files of channel … after damaged files, each logged at ERROR` | The files were put back to the last good row of a damaged file | Nothing more than for the damaged file above |

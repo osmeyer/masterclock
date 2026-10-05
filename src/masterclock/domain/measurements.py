@@ -6,7 +6,8 @@ steering since the epoch start taken off. It holds the plain values it was
 made from, the measurement's MJD, its phase and its rms, not the DAS's line;
 its measurement time and epoch start are worked out from the MJD. A triple
 measurement is a double difference built from its pairs' accepted
-measurements.
+measurements. A disabled pair's reading is kept as the DAS gave it, with the
+z of the pair's newest row carried beside it, and is never decycled.
 
 Both give the filter step their plain values
 (:meth:`PairMeasurement.filter_input`, :meth:`TripleMeasurement.filter_input`).
@@ -142,6 +143,50 @@ class PairMeasurement:
             z, the rms and the slip mark.
         """
         return FilterInput(z=self.z, rms=self.rms, slip=self.slip)
+
+
+@dataclass(frozen=True, slots=True)
+class DisabledReading:
+    """A disabled pair's reading at an epoch: a row of its measurement file.
+
+    Nothing tracks a disabled pair, so its reading is not decycled: it has
+    no cycle count, and the z beside it is carried from the pair's newest
+    row.
+
+    Parameters
+    ----------
+    measurement_mjd : float
+        The measurement time as the DAS gave it, MJD.
+    measured_phase : int
+        The DAS reading, ps, from 0 to
+        :data:`~masterclock.domain.phase.PHASE_MAX`.
+    rms : int
+        Its rms, ps, at least 0.
+    z : int or None
+        The z of the pair's newest row, ps; ``None`` when that row has none.
+
+    Attributes
+    ----------
+    measurement_datetime : datetime
+        The measurement time, from the MJD.
+    interpolated_datetime : datetime
+        The start of the epoch the measurement falls in.
+    """
+
+    measurement_mjd: float
+    measured_phase: int
+    rms: int
+    z: int | None
+
+    @property
+    def measurement_datetime(self) -> datetime:
+        """The measurement time, from the MJD."""
+        return mjd_to_datetime(self.measurement_mjd)
+
+    @property
+    def interpolated_datetime(self) -> datetime:
+        """The start of the epoch the measurement falls in."""
+        return epoch_start(self.measurement_datetime)
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 09:31:48 UTC
+**Date:** 2026-10-05 14:34:32 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -43,7 +43,7 @@ An invariant is a property the program keeps at all times.
 | ID | Invariant |
 | --- | --- |
 | I1 | Append-only. A row is never changed after it is written. A row is deleted only when the archives are kept in step: the rows of that epoch and of every later epoch are deleted from every file of the RF channel. |
-| I2 | Contiguous. Every series has at most one row per epoch, in time order. Rows are missing only while the series is dormant with no measurement (§13.3), while a triple's s and c are not both placed in one building, or while the series' clock side has no entry in the clock configuration or is ignored (§15.2). |
+| I2 | Contiguous. Every series has at most one row per epoch, in time order. Rows are missing only while the series is dormant with no measurement (§13.3), while a pair is disabled with no reading (§13.6), while a triple's s and c are not both placed in one building, or while the series' clock side has no entry in the clock configuration or is ignored (§15.2). |
 | I3 | Lock-step. Each epoch's rows enter the day buffer together, all or none (§5.8), so the files are written one whole epoch at a time; a series with no row at an epoch (I2) adds none. |
 | I4 | Self-contained rows. The work of epoch e reads only the DAS lines of epoch e, steering events in (E − T, E + T], the configuration, and the last row of each series: from its file, or from the day buffer when the same run processed epoch e − 1 (§5.8). |
 | I5 | Deterministic. Identical inputs give byte-identical data files, whether a series of epochs is processed one epoch per run or all in one run, whether or not a run was interrupted, and with or without worker processes. No state carries between epochs except what the rows hold. Log files are not compared. |
@@ -146,7 +146,7 @@ This section describes what the DAS measures and how das_processor names and org
 
 A reference is the steered output of a generator driven by a hydrogen maser, named <!-- figure: REFERENCE_PREFIX -->`mc`<!-- end figure --> and one digit.
 A reference is its own clock type, <!-- figure: REFERENCE_TYPE -->`mc`<!-- end figure -->, with noise distinct from that of the maser that drives it.
-At each epoch, the reference set REFS(e) is every clock in that epoch's DAS data whose name is a reference's.
+At each epoch, the reference set REFS(e) is every clock in that epoch's DAS data whose name is a reference's, but for a reference the clock configuration disables then (§13.6).
 A name that only starts with `mc` is not a reference's.
 
 ```python
@@ -371,6 +371,7 @@ class SeriesParams:  # everything one series needs this epoch (§8.1, §15.2)
     gmax: int
     n_break: int
     rms_max: int | None  # pairs only
+    disabled: bool  # a pair one of whose clocks is disabled; never a triple (§13.6)
 
 
 @dataclass(frozen=True, slots=True)
@@ -386,6 +387,7 @@ class Epoch:  # everything one epoch needs (§6.3)
     locations: dict[str, int | None]  # every clock's building at E (§15.2)
     # The clocks the configuration neither names nor ignores.
     clocks_without_entry: frozenset[str]
+    disabled: frozenset[str]  # the clocks disabled at E (§13.6)
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +395,14 @@ class State:
     x: mpq  # exact within the epoch; rounded once when stored (§2.5)
     y: float
     d: float = 0.0  # always 0.0 for a 1- or 2-state estimator
+
+
+@dataclass(frozen=True, slots=True)
+class DisabledReading:  # a disabled pair's reading, never decycled (§13.6)
+    measurement_mjd: float  # as the DAS gave it
+    measured_phase: int
+    rms: int
+    z: int | None  # carried from the pair's newest row
 
 
 @dataclass(frozen=True, slots=True)
@@ -557,7 +567,7 @@ One row per epoch holds the pair's measurement, decycled and referred to E (§7)
 | 4 | `measurement_mjd` | 13 | measurement time, MJD |
 | 5 | `measured_phase` | 6 | raw phase from the DAS, ps |
 | 6 | `rms` | 4 | RMS from the DAS, ps |
-| 7 | `cycle_count` | 12 | whole periods added in decycling |
+| 7 | `cycle_count` | 12 | whole periods added in decycling; - when disabled |
 | 8 | `z` | 16 | decycled phase interpolated to E, ps |
 | 9 | `x` | 20 | estimated phase at E, ps, to the femtosecond |
 | 10 | `y` | 23 | estimated rate, ps/s |
@@ -577,11 +587,12 @@ One row per epoch holds the pair's measurement, decycled and referred to E (§7)
 | 24 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
 | 25 | `time_constant` | 23 | estimator time constant, epochs |
 | 26 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
-| 27 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, D dormant, S slip corrected, N new segment, U unsettled |
+| 27 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled |
 
 <!-- end generated -->
 
 The measurement columns, from `measurement_datetime` to `z`, are empty on a row with no measurement.
+On a disabled pair's row (O), `cycle_count` is empty, since the reading is not decycled, and `z` is carried from the pair's newest row, or empty when that row has none (§13.6).
 `x`, `y`, `d` and `innovation_scale` are empty on a dormant row.
 A reject slot not in use is empty.
 While a series is dormant, the reject slots hold the measurements it has gathered, as (epoch, z), instead of rejected innovations (§13.3).
@@ -596,6 +607,7 @@ The flags a row can carry, in the order a row writes them:
 | `R` | rejected |
 | `X` | excluded |
 | `P` | predicted |
+| `O` | disabled |
 | `D` | dormant |
 | `S` | slip corrected |
 | `N` | new segment |
@@ -603,7 +615,7 @@ The flags a row can carry, in the order a row writes them:
 
 <!-- end generated -->
 
-Every row carries exactly one of A, R, X and P, and D can stand with P, R or X.
+Every row carries exactly one of A, R, X, P and O; D can stand with P, R or X, and O stands alone.
 When each flag is set:
 
 | Flag | When it is set |
@@ -612,6 +624,7 @@ When each flag is set:
 | R | Rejected by the gate, and counted (§9); with D, the measurement went to the acquisition buffer (§13.3) |
 | X | Excluded by screening or the slip check, inside the gate, and not counted (§9.5) |
 | P | No measurement at this epoch |
+| O | The pair is disabled (§13.6): no state, no innovation, and no other flag |
 | D | No valid state: x, y, d and innovation_scale are empty |
 | S | The slip check corrected the cycle count (§11) |
 | N | A new segment starts at this row |
@@ -634,7 +647,7 @@ The header of a measurement file:
 #   measurement_mjd         measurement time, MJD
 #   measured_phase          raw phase from the DAS, ps
 #   rms                     RMS from the DAS, ps
-#   cycle_count             whole periods added in decycling
+#   cycle_count             whole periods added in decycling; - when disabled
 #   z                       decycled phase interpolated to E, ps
 #   x                       estimated phase at E, ps, to the femtosecond
 #   y                       estimated rate, ps/s
@@ -654,7 +667,7 @@ The header of a measurement file:
 #   filter_states           estimator states: 1, 2 or 3
 #   time_constant           estimator time constant, epochs
 #   scale_time_constant     innovation-scale averaging constant, epochs
-#   flags                   A accepted, R rejected, X excluded, P predicted, D dormant, S slip corrected, N new segment, U unsettled
+#   flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->
@@ -694,7 +707,7 @@ One row per epoch holds the triple's double difference (§12) and its estimator 
 | 22 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
 | 23 | `time_constant` | 23 | estimator time constant, epochs |
 | 24 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
-| 25 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, D dormant, S slip corrected, N new segment, U unsettled |
+| 25 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled |
 
 <!-- end generated -->
 
@@ -736,7 +749,7 @@ The header of a double-difference file:
 #   filter_states           estimator states: 1, 2 or 3
 #   time_constant           estimator time constant, epochs
 #   scale_time_constant     innovation-scale averaging constant, epochs
-#   flags                   A accepted, R rejected, X excluded, P predicted, D dormant, S slip corrected, N new segment, U unsettled
+#   flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->
@@ -865,6 +878,7 @@ class DayBuffer:
     journal: Path | None  # das_processor_<rf>.writing
     file_lines: dict[Path, list[str]]  # joined only when written
     last_rows: dict[SeriesKey, Row]
+    last_z: dict[PairKey, int | None]  # each pair's newest z, for a disabled row
     earliest_epoch: datetime | None  # the earliest epoch buffered since the last write
     rows_added: int  # rows added since the buffer was made
     journal_written: bool
@@ -1068,9 +1082,11 @@ def build_epoch(
     """Everything epoch E needs, with all configuration resolved."""
     # §15.2: leave out every measurement and series of an unnamed clock.
     das_block, earlier_series = configured_only(das_block, earlier_series, clock_config)
-    refs = refs_of(das_block) if das_block is not None else frozenset()  # §3.1
     # Kept from the last epoch while no clock's entry takes effect.
     locations = clock_config.locations_at(epoch_start)
+    # Each clock disabled or enabled again since E - T is logged at INFO.
+    disabled = clock_config.disabled_at(epoch_start)  # §13.6
+    refs = (refs_of(das_block) if das_block else frozenset()) - disabled  # §3.1
     pairs, triples = build_registry(das_block, refs, earlier_series, locations)
     steering_refs = sorted(
         {mc for series_key in pairs + triples for mc in signs(series_key)}
@@ -1105,13 +1121,14 @@ def process_epoch(
     last_rows = {
         key: row
         for key, row in newest_rows.items()
-        if row.interpolated_datetime == epoch_start - T
+        if row.interpolated_datetime == epoch_start - T and "O" not in row.flags
     }
-    # The others start cold, in the segment after their newest row's (§6.7).
+    # The others start cold, in the segment after their newest row's (§6.7);
+    # a disabled pair's newest row is never a last row (§13.6).
     last_segments = {
         key: row.segment for key, row in newest_rows.items() if key not in last_rows
     }
-    pair_step = process_pairs(epoch, last_rows, last_segments)  # §7 to §11
+    pair_step = process_pairs(epoch, last_rows, last_segments, day_buffer.last_z)
     triple_step = process_triples(epoch, last_rows, pair_step, last_segments)  # §12
     epoch_buffer = DayBuffer(day_buffer.channel)  # the epoch's rows, all or none
     # A dormant row with no measurement gives no record.
@@ -1123,14 +1140,26 @@ def process_epoch(
     return epoch
 
 
-def process_pairs(epoch, last_rows, last_segments):
-    predictions = {  # §8.3
-        pair: predict(last_rows.get(pair), steer_u(pair, epoch)) for pair in epoch.pairs
+def process_pairs(epoch, last_rows, last_segments, last_z):  # §7 to §11
+    disabled = {pair for pair in epoch.pairs if epoch.series_params[pair].disabled}
+    predictions = {  # §8.3; a disabled pair has none (§13.6)
+        pair: None
+        if pair in disabled
+        else predict(last_rows.get(pair), steer_u(pair, epoch))
+        for pair in epoch.pairs
     }
-    measurements = {}
+    measurements, disabled_readings = {}, {}
     readings = epoch.das_block.measurements if epoch.das_block else ()
     for reading in readings:  # §7
         pair = (reading.reference, reading.clock)
+        if pair in disabled:  # kept as it is, with the z it carries
+            disabled_readings[pair] = DisabledReading(
+                reading.measurement_mjd,
+                reading.measured_phase,
+                reading.rms,
+                last_z.get(pair),
+            )
+            continue
         measurements[pair] = measure_pair(
             reading,
             prediction=predictions[pair],
@@ -1156,7 +1185,15 @@ def process_pairs(epoch, last_rows, last_segments):
         measurements[pair] = measurements[pair].corrected(cycles)
     excluded_pairs = screening.excluded | slips.excluded
     step_results = {  # §9, §13
-        pair: filter_step(
+        pair: disabled_step(  # §13.6: an O row with a reading, else no row
+            epoch.interpolated_datetime,
+            epoch.series_params[pair],
+            last_rows.get(pair),
+            measured=pair in disabled_readings,
+            last_segment=last_segments.get(pair),
+        )
+        if pair in disabled
+        else filter_step(
             epoch.interpolated_datetime,
             epoch.series_params[pair],
             last_rows.get(pair),
@@ -1167,7 +1204,9 @@ def process_pairs(epoch, last_rows, last_segments):
         )
         for pair in epoch.pairs
     }
-    return PairStep(step_results, measurements, predictions, screening, slips)
+    return PairStep(
+        step_results, measurements, predictions, screening, slips, disabled_readings
+    )
 
 
 def process_triples(epoch, last_rows, pair_step, last_segments):
@@ -1253,7 +1292,7 @@ flowchart TD
 - Check. Every file is checked (§5.2, §5.7) before any is changed. A sound file is good through its last row; it is not read further, so a line damaged in the middle of a file whose length and last row are good is not found. A damaged file is good through the row before its first line that is not a good row. A file with no good first row, one holding no whole row included, cannot be placed in time: it raises `DataFileError`, the run stops without changing anything, and an operator resolves it. The write journal is read before any file is checked, and when it is there the case differs: such a file is one the stopped write was creating, so it holds nothing good, and it is deleted, to be made again.
 - Cut epoch. Every file keeps its rows only up to the earliest of two limits: the epoch before the journal's, when the journal is there, and the last good row of every damaged file (`cut_epoch` in `das_processor/files.py`). A damaged file with nothing good sets no limit. So every file of the channel is cut back to the same epoch, and the files stay in step, as I1 requires.
 - Roll-back. Each file is truncated just after its last row up to the cut epoch, which removes the damaged and torn lines, and a file with no such row is deleted. The rows written from there on are byte-identical to those of a run that never failed (I5). Each damaged file is logged once at ERROR, naming where it is damaged and why. The roll-back is logged once at WARNING when it changed a file or followed a stopped write: why, how many files it cut, deleted and left, and the newest row left. When the journal is there, it is deleted once every file is cut.
-- Newest epoch. The run goes on one epoch after the newest row left among all files of the channel, measurement and double-difference. Files may end at different epochs: a series writes a row only for an epoch it is in, and not while it is dormant with no measurement (§13.3). A series whose newest row is not of the epoch before E starts cold at E, as a new series does, in the segment after its newest row's.
+- Newest epoch. The run goes on one epoch after the newest row left among all files of the channel, measurement and double-difference. Files may end at different epochs: a series writes a row only for an epoch it is in, and not while it is dormant with no measurement (§13.3) or disabled with no reading (§13.6). A series whose newest row is not of the epoch before E starts cold at E, as a new series does, in the segment after its newest row's.
 - Next epoch. One epoch after the newest row left. With no file holding a row, the epoch containing `start_from_mjd`. While no pair exists yet, the run starts at the first DAS data at or after that instead: an epoch before the data holds no series and writes nothing, so a run of one epoch would otherwise never get past it, and a long run would differ from runs of one epoch each.
 
 ```python
@@ -1314,7 +1353,7 @@ Workers pay for long runs, such as a catch-up or reprocessing years of data.
 For one epoch a run, starting them costs more than they save, so a scheduled run leaves `num_workers` out.
 
 Each worker owns a fixed share of the series, chosen from each series' name alone (`owner_of` in `das_processor/workers.py`), so a series has the same owner in every run with as many workers.
-A worker keeps its series' newest rows and settings from epoch to epoch, so a series' state never crosses between processes, and it reads a series' last row from its file the first time it meets the series.
+A worker keeps its series' newest rows and settings from epoch to epoch, and each pair's newest z for a disabled row to carry (§13.6), so a series' state never crosses between processes, and it reads a series' last row from its file the first time it meets the series.
 Workers are started from a clean server process, never as a copy of the main process with its open files and lock.
 An epoch takes three exchanges with every worker:
 
@@ -1514,6 +1553,7 @@ A series takes its parameters from the configuration entry of its clock side:
 - Triple (r, s, c): the entry of c. A clock pair (s, c) and every triple (r, s, c) therefore share the same values.
 
 Entries default by clock type, and a clock can override its type's default (§15.2).
+A pair is disabled while either of its clocks is, and then runs no estimator (§13.6).
 The model is set when the series is created and never changes: a 2-state series stays 2-state for the life of its file.
 M and M_σ are copied into the row when a segment starts; every later row of the segment carries them, and each run reads them from the last row.
 A change of M or M_σ takes effect through a warm segment start (§8.7).
@@ -1773,7 +1813,10 @@ Screening (§10) and the slip check (§11) can exclude a pair measurement at one
 
 ```mermaid
 flowchart TD
-    S[Row for epoch e] --> CFG{Time constants<br/>changed?}
+    S[Row for epoch e] --> DIS{Pair disabled?}
+    DIS -- "yes, with a reading" --> OR[Disabled row: O]
+    DIS -- "yes, no reading" --> NR[No row]
+    DIS -- no --> CFG{Time constants<br/>changed?}
     CFG -- yes --> W[Warm segment start]
     CFG -- no --> MQ
     W --> MQ{Measurement?}
@@ -2241,7 +2284,7 @@ The one place a pair's estimator enters a triple is a missing link direction (§
 Clocks are switched off, moved, repaired and restarted, and the DAS has its own outages.
 A series must carry on through short gaps, notice when a gap has lasted too long for its prediction to be trusted, and start again cleanly afterwards.
 
-A series gets a row at every epoch that holds it, except while it is dormant with no measurement (I2, §13.3).
+A series gets a row at every epoch that holds it, except while it is dormant with no measurement (I2, §13.3), or disabled with no reading (§13.6).
 An epoch without a usable measurement gives a held row that carries the prediction forward.
 When the prediction has run past G_max epochs, the state is no longer trustworthy for decycling, and the series goes dormant until it acquires again.
 
@@ -2311,6 +2354,10 @@ stateDiagram-v2
     Held --> Dormant: N_break rejects, or the gap limit passed with a measurement
     Held --> Stopped: the gap limit passed with no measurement
     Settled --> Unsettled: configuration change (warm)
+    Held --> Disabled: a clock of the pair disabled
+    Settled --> Disabled: a clock of the pair disabled
+    Dormant --> Disabled: a clock of the pair disabled
+    Disabled --> Dormant: enabled again, in the next segment
 ```
 
 | Event | segment | State after | step_offset | Flags on the row |
@@ -2322,6 +2369,7 @@ stateDiagram-v2
 | Slip correction | same | updated from the corrected z_E | unchanged | S and the outcome |
 | Held | same | X⁻ | unchanged | P, X or R |
 | Dormant | same | none | unchanged | D and P, R or X |
+| Disabled (§13.6) | same | none | 0 | O |
 
 Besides these, every row of a 2- or 3-state series that is not dormant carries U while its segment is unsettled (§8.8); a 1-state row never does.
 
@@ -2385,6 +2433,24 @@ def dormant(draft, outcome, keep_buffer=False):
     return finish(draft, outcome)
 ```
 
+### 13.6 Disabled clocks
+
+A clock can be set aside from a date by its entries in the clock configuration (§15.2), and taken back from a later one.
+While it is disabled, das_processor does not track it, and never uses its measurements.
+
+- Pairs. A pair is disabled while either of its clocks is: a disabled clock's pairs, and every pair of a disabled reference, its self pair and links included. A disabled pair is not predicted, decycled, screened, checked for slips, gated or updated (`disabled_step` in `domain/filter.py`).
+- Rows. At an epoch with a reading, a disabled pair writes a row of flag O alone. The row holds the reading's time, phase and RMS as the DAS gave them, no cycle count, and the z of the pair's newest row, or none when that row has none, so z runs on unchanged through the disabled epochs. It holds no state and no innovation, its counters are zero and its buffer empty, and it keeps the segment of the row before it. At an epoch with no reading, it writes no row.
+- Everything else. Triples, screening and the slip check see a disabled clock as missing from the epoch's DAS data. A disabled reference is not in REFS(e), and a disabled pair is never accepted and has no prediction, so it gives a triple nothing (§12): a triple through it holds its prediction (P) up to its gap limit, and then stops (§13.3), as it does when its clock is not measured.
+- Enabled again. A disabled pair's row is never a last row (§6.3), so when its clocks are enabled again the pair starts afresh, as a new series does, dormant in the segment after its O rows', until it acquires (§13.3).
+- Log. Each clock is logged once at INFO at the epoch it is disabled, and at the one it is enabled again, from the configuration at that epoch and the one before, so a run of one epoch logs what a run of many does.
+
+```mermaid
+flowchart LR
+    T1[Tracked rows] -- clock disabled --> O1[O rows: the reading,<br/>z carried, no state]
+    O1 -- enabled again --> D1[Dormant rows,<br/>next segment]
+    D1 -- three readings agree --> T2[Cold start, tracked]
+```
+
 ## 14. Timescale interface
 
 The timescale reads the double-difference archive of both RF channels, and nothing from the measurement archive.
@@ -2398,7 +2464,7 @@ The same triple in `das_a` and `das_b` gives two independent measurements.
 - Usable rows: a row is used as a measurement only when its flags contain A and not U.
 - Phase free of steps: x − step_offset.
 - A new segment value starts a new series for that measurement, and the timescale starts its phase again for it.
-- P, R, X and D rows are never used as measurements; P, R and X rows still carry the state forward.
+- P, R, X, D and O rows are never used as measurements; P, R and X rows still carry the state forward.
 - Correlation: triples (r, s, c) with the same (r, s), s ≠ r, share that link's error, so the timescale groups them by (r, s). Local triples share no link.
 
 ## 15. Configuration
@@ -2460,6 +2526,7 @@ A clock that fits no type gives every setting in its first entry instead, with n
 It then applies, in order of `effective_mjd`, every entry for that clock in force at the mark: an entry without `effective_mjd` from the start, one with it from the first mark at or after it.
 Each entry overrides only the fields it gives.
 An entry may also give the clock's location, the number of the building it is in; a type never gives one.
+An entry may disable the clock from its date, with `disabled: true` or `enabled: false`, and a later one enable it again, with `disabled: false` or `enabled: true`; an entry gives one of the two keys, not both, and a type gives neither (§13.6).
 A clock that moves gets an entry with its new building from the MJD of the move, and a clock no entry in force places has no location (§3.3).
 
 A clock the file does not name has no settings, so das_processor leaves out every measurement of it as the measured clock, and every series whose clock side, its last name, it is. It logs the clock at WARNING when it first finds it so in a run, and again whenever it returns after an epoch without it; the run goes on.
@@ -2474,6 +2541,7 @@ A clock listed under `ignore` is left out the same way, with nothing logged.
 - `filter_states` is not 1, 2 or 3; `time_constant` is missing or below 1 for a 2- or 3-state clock, or given for a 1-state clock; or `scale_time_constant` is below 1;
 - `initial_innovation_scale` is not above zero, or a location is not a whole number above zero;
 - a clock under `ignore` is named twice, or also has entries;
+- an entry gives both `disabled` and `enabled`, or either as other than `true` or `false`;
 - `rejects_before_restart` is below 3, or above the gap limit of any type or of any clock at any date;
 - an RMS limit is not a whole number above zero, a reference under `references` is not named as a reference, or a pair under `pairs` is not written `reference.clock`.
 
@@ -2597,7 +2665,7 @@ Besides the standard levels there is TRACE, below DEBUG.
 | --- | --- |
 | ERROR | Every error, where it is raised; each damaged data file, once, with where and why (§6.7) |
 | WARNING | Refused DAS lines; a DAS directory with no data files; a clock with no entry in the clock configuration and not ignored, once when found (§15.2); counted rejects; missing or failed self-measurements, reciprocity and closure failures; undecided slips; a roll-back, once for all its files (§6.7) |
-| INFO | Each epoch processed, with its counts of rows written, accepted and held; corrected slips; phase steps, frequency steps, cold starts, dormancy, a series that stops writing rows, configuration changes; a redo, once for all its files (§6.5) |
+| INFO | Each epoch processed, with its counts of rows written, accepted and held; corrected slips; phase steps, frequency steps, cold starts, dormancy, a series that stops writing rows, configuration changes; a clock disabled or enabled again, once at the epoch it happens (§13.6); a redo, once for all its files (§6.5) |
 | DEBUG | Each series' flags at each epoch; a DAS directory entry passed over; the run lock taken and freed |
 | TRACE | Each series' prediction, innovation and update |
 
@@ -2653,8 +2721,9 @@ A test that carries one of these identifiers in its docstring is a test of that 
 | U26 | File length | A file cut inside its last row; cut inside its header; holding only its header; with a row of the wrong length inside it; with a first row that does not parse | Every file cut back to the damaged file's last good row, the damage logged at ERROR, and the data files then byte-identical to an uninterrupted run's; a file with no whole row, or a damaged first row, raises `DataFileError` and changes no file |
 | U27 | Exact phase | Prediction, referring back, update and double difference with phases beyond 2⁵³, and sums ending in exactly ½ | Every stored phase equals the same sum done exactly and rounded half to even |
 | U28 | Series that stop | A clock's measurements stop for longer than G_max, then come back; a data gap no series writes; run in one go and one epoch per run, with and without workers | P rows up to G_max, then no row, and one INFO line when it stops; on its return, rows again in the next segment; an epoch that writes no row is not counted as a step; data files byte-identical every way |
+| U29 | Disabled clocks | A clock disabled for three epochs, then enabled again; a disabled reference; run in one go and one epoch per run, with and without workers | O rows holding the reading and the carried z; the triples, screening and the other pairs as if the clock was missing; dormant in the next segment once enabled; one INFO line at each change; data files byte-identical every way |
 
-Each invariant of §1.3 is held by these tests: I1 by U21 and U26, I2 by U13 and U28, I3 and I8 by U21, I4 and I5 by U22, U28 and the property tests, I6 by the epoch-loop tests, and I7 by U2 and U27.
+Each invariant of §1.3 is held by these tests: I1 by U21 and U26, I2 by U13, U28 and U29, I3 and I8 by U21, I4 and I5 by U22, U28, U29 and the property tests, I6 by the epoch-loop tests, and I7 by U2 and U27.
 
 ### 17.2 Synthetic data
 
@@ -2760,7 +2829,7 @@ The constants this document names, with their values and meanings as the code gi
 | `FS_PER_PS` | domain.phase | 1000 | Femtoseconds in one picosecond. |
 | `EPOCH_SECONDS` | domain.phase | 600 | How long one epoch lasts, in seconds: from one ten-minute mark to the next. |
 | `REFERENCE_PREFIX` | domain.references | `mc` | What every reference clock's name begins with. |
-| `FLAG_ORDER` | domain.series | `ARXPDSNU` | Every flag a row can carry, in the order they are written in a row. |
+| `FLAG_ORDER` | domain.series | `ARXPODSNU` | Every flag a row can carry, in the order they are written in a row. |
 | `MAX_REJECTS` | domain.series | 3 | How many entries a row's reject buffer holds at most. |
 | `K_OUT` | domain.filter | 5 | How many innovation scales wide the gate is, either way. |
 | `K_STEP` | domain.filter | 3 | How many innovation scales each of three rejects may lie from a step's fit. |

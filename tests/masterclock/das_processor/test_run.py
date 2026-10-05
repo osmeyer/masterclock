@@ -67,6 +67,14 @@ stop writes predicted rows up to its gap limit and then none, and on its
 return starts again in its next segment, in one go or epoch by epoch; and
 an epoch that writes no row is not counted as a step, so a run of one step
 at a time gets past a gap no series writes.
+
+A disabled clock's pair writes a row of flag O alone at each epoch with a
+reading, holding the reading and the z of its newest row, and starts
+dormant in its next segment once enabled again; the triples and the other
+pairs are written as if the clock was not measured; a disabled reference is
+not one of the epoch's references, and every pair it is in is disabled; a
+clock disabled or enabled again is logged once at INFO at that epoch; and a
+run gives the same files in one go or epoch by epoch.
 """
 
 import dataclasses
@@ -94,6 +102,7 @@ from masterclock.das_processor.read_cd5m5m import (
 from masterclock.das_processor.read_steering import STEERING_FILE_TEMPLATE
 from masterclock.das_processor.registry import ExistingSeries
 from masterclock.domain.double_difference import Component, double_difference
+from masterclock.domain.measurements import DisabledReading, PairMeasurement
 from masterclock.domain.phase import PHASE_PERIOD
 from masterclock.domain.series import Row, SeriesKey, TripleKey, check_row
 from masterclock.domain.steering import steer_u
@@ -1778,14 +1787,19 @@ def test_an_epoch_s_log_names_the_series_of_its_channel(
 
 
 def test_each_series_last_row_is_read_from_its_file(tmp_path: Path) -> None:
-    """Give each series' last row, as its file holds it, for every series."""
+    """Give each series' last row, and each pair's last z, as its file holds them."""
     config, clock_config = make_loop_deployment(tmp_path)
     write_das_files(tmp_path, [LATE_START + i * T for i in range(3)])
     run.run(config, clock_config, None, ShutdownHandler())
-    last_rows = run.read_last_state(config)
+    last_rows, last_z = run.read_last_state(config)
     assert sorted(last_rows) == sorted(LOOP_SERIES)
     for series_key in LOOP_SERIES:
         assert last_rows[series_key] == rows_of(config, series_key)[-1], series_key
+    assert last_z == {
+        pair: files.record_z(meas_records_of(config, pair)[-1])
+        for pair in (("mc1", "mc1"), ("mc1", "ox23"))
+    }
+    assert None not in last_z.values()
 
 
 def write_das_day(
@@ -2476,3 +2490,171 @@ def test_a_series_that_stops_is_logged_once_at_info(
         message.startswith("das_a.mc1.mc1")
         for message in messages_at(restarted_entries, "INFO")
     )
+
+
+# ------------------------------------------------------------ disabled clocks
+
+DISABLED_CLOCK_CONFIG_YAML: Final = CLOCK_CONFIG_YAML.replace(
+    "  ox23: [{type: maser, location: 1}]\n",
+    "  ox23:\n"
+    "    - {type: maser, location: 1}\n"
+    f"    - {{effective_mjd: {datetime_to_mjd(LATE_START + 4 * T)}, disabled: true}}\n"
+    f"    - {{effective_mjd: {datetime_to_mjd(LATE_START + 7 * T)}, enabled: true}}\n",
+)
+"""The clock configuration, with ox23 disabled for three epochs from the fifth."""
+
+DISABLING_READINGS: Final = [("mc1", "mc1", 1000), ("mc1", "ox23", 50_000)]
+"""mc1 measured against itself, and ox23 against mc1."""
+
+
+def disabling_deployment(
+    tmp_path: Path, clock_config_yaml: str = DISABLED_CLOCK_CONFIG_YAML
+) -> tuple[AppConfig, ClockConfig]:
+    """Give ten epochs from LATE_START, ox23 measured at every one."""
+    config, _ = make_loop_deployment(tmp_path)
+    clock_config_file = tmp_path / "disabled.yaml"
+    clock_config_file.write_text(clock_config_yaml, encoding="utf-8")
+    write_das_day(tmp_path, [DISABLING_READINGS] * 10)
+    return config, read_clock_config(clock_config_file)
+
+
+def meas_records_of(config: AppConfig, pair: tuple[str, str]) -> list[files.MeasRecord]:
+    """Read every record of a pair's measurement file."""
+    series_file_path = registry.series_file(config.processed.processed_path, "a", pair)
+    line_size = files.MEAS_WIDTH + 1
+    row_bytes = series_file_path.read_bytes()[files.MEAS_HEADER_LINES * line_size :]
+    return [
+        files.parse_meas_row(
+            row_bytes[line_start : line_start + line_size - 1].decode()
+        )
+        for line_start in range(0, len(row_bytes), line_size)
+    ]
+
+
+def test_a_disabled_clock_s_pair_writes_o_rows_and_starts_afresh_when_enabled(
+    tmp_path: Path,
+) -> None:
+    """Write O, the reading and the last z; start dormant next segment (U29)."""
+    config, clock_config = disabling_deployment(tmp_path)
+    run.run(config, clock_config, None, ShutdownHandler())
+    pair_records = meas_records_of(config, ("mc1", "ox23"))
+    assert epoch_indexes([record.row for record in pair_records], LATE_START) == list(
+        range(10)
+    )
+    tracked_record = pair_records[3]
+    assert "A" in tracked_record.row.flags
+    assert isinstance(tracked_record.measurement, PairMeasurement)
+    for disabled_record in pair_records[4:7]:
+        assert isinstance(disabled_record.measurement, DisabledReading)
+        assert (disabled_record.row.flags, disabled_record.row.segment) == (
+            "O",
+            tracked_record.row.segment,
+        )
+        assert disabled_record.measurement == DisabledReading(
+            measurement_mjd=disabled_record.measurement.measurement_mjd,
+            measured_phase=50_000,
+            rms=3,
+            z=tracked_record.measurement.z,
+        )
+    assert [(record.row.flags, record.row.segment) for record in pair_records[7:]] == [
+        ("RD", tracked_record.row.segment + 1),
+        ("RD", tracked_record.row.segment + 1),
+        ("ANU", tracked_record.row.segment + 2),
+    ]
+
+
+def test_triples_screening_and_other_pairs_see_a_disabled_clock_as_missing(
+    tmp_path: Path,
+) -> None:
+    """Write what a run with ox23 not measured writes, but for its pair (U29)."""
+    disabled_config, clock_config = disabling_deployment(tmp_path / "disabled")
+    run.run(disabled_config, clock_config, None, ShutdownHandler())
+    missing_config, missing_clock_config = make_loop_deployment(tmp_path / "missing")
+    write_das_day(
+        tmp_path / "missing",
+        [DISABLING_READINGS] * 4 + [DISABLING_READINGS[:1]] * 3,
+    )
+    run.run(missing_config, missing_clock_config, None, ShutdownHandler())
+    triple_key = ("mc1", "mc1", "ox23")
+    disabled_rows = rows_of(disabled_config, triple_key)
+    assert rows_of(missing_config, triple_key) == [
+        row for row in disabled_rows if row.interpolated_datetime < LATE_START + 7 * T
+    ]
+    assert all(
+        "P" in row.flags and "D" not in row.flags
+        for row in disabled_rows
+        if LATE_START + 4 * T <= row.interpolated_datetime < LATE_START + 7 * T
+    )
+    for series_key in (("mc1", "mc1"), ("mc1", "mc1", "mc1")):
+        assert [
+            row
+            for row in rows_of(disabled_config, series_key)
+            if row.interpolated_datetime < LATE_START + 7 * T
+        ] == rows_of(missing_config, series_key), series_key
+
+
+def test_a_run_with_a_disabled_clock_writes_the_same_files_stepped(
+    tmp_path: Path,
+) -> None:
+    """Give the same files, in one go or epoch by epoch, a clock disabled (U29)."""
+    batch_config, clock_config = disabling_deployment(tmp_path / "batch")
+    run.run(batch_config, clock_config, None, ShutdownHandler())
+    stepped_config, clock_config = disabling_deployment(tmp_path / "stepped")
+    for _ in range(10):
+        run.run(stepped_config, clock_config, 1, ShutdownHandler())
+    batch_files = run.data_series(batch_config)
+    assert len(batch_files) == 4
+    for batch_file, _, series_key in batch_files:
+        stepped_file = registry.series_file(
+            stepped_config.processed.processed_path, "a", series_key
+        )
+        assert batch_file.read_bytes() == stepped_file.read_bytes(), series_key
+
+
+def test_a_clock_disabled_and_enabled_again_is_logged_at_info(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Log a clock at the epoch it is disabled and the one it is enabled (U29)."""
+    config, clock_config = disabling_deployment(tmp_path)
+    with caplog.at_level(logging.INFO, logger=RUN_LOGGER):
+        run.run(config, clock_config, None, ShutdownHandler())
+    clock_messages = [
+        log_record.getMessage()
+        for log_record in caplog.records
+        if log_record.name == RUN_LOGGER and log_record.getMessage().startswith("clock")
+    ]
+    assert clock_messages == [
+        f"clock ox23 disabled from {LATE_START + 4 * T}",
+        f"clock ox23 enabled again from {LATE_START + 7 * T}",
+    ]
+
+
+def test_a_disabled_reference_leaves_the_epoch_s_references(tmp_path: Path) -> None:
+    """Leave out a disabled reference, and disable every pair it is in (U29)."""
+    config, _ = make_deployment(tmp_path)
+    clock_config_file = tmp_path / "disabled.yaml"
+    clock_config_file.write_text(
+        CLOCK_CONFIG_YAML.replace(
+            "  mc2: [{type: mc, location: 1}]",
+            "  mc2: [{type: mc, location: 1, disabled: true}]",
+        ),
+        encoding="utf-8",
+    )
+    clock_config = read_clock_config(clock_config_file)
+    epoch = run.build_epoch(
+        E, das_block_of(MEASURED_PAIRS), NO_SERIES, config, clock_config
+    )
+    assert epoch.refs == frozenset({"mc1"})
+    assert epoch.disabled == frozenset({"mc2"})
+    pair_step = run.process_pairs(epoch, {})
+    assert {
+        pair: step_result.row.flags
+        for pair, step_result in pair_step.step_results.items()
+    } == {
+        ("mc1", "mc1"): "RD",
+        ("mc1", "mc2"): "O",
+        ("mc2", "mc1"): "O",
+        ("mc2", "mc2"): "O",
+        ("mc2", "ox23"): "O",
+    }
+    assert pair_step.measurements.keys() == {("mc1", "mc1")}

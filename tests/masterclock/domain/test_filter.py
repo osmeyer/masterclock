@@ -26,7 +26,7 @@ cold start begins segment + 1 at the measurement with sigma0; a warm
 segment start keeps the state and the step offset and takes the new time
 constants, never a new model; a row of a 2- or 3-state series is unsettled
 while its segment is younger than five time constants, a dormant or 1-state
-row never; flags are written in the order ARXPDSNU; a finished draft that
+row never; flags are written in the order ARXPODSNU; a finished draft that
 is not a valid row is refused; and a 1-state series passes its
 measurements through.
 
@@ -40,6 +40,11 @@ scales, fitted against the rejects' own epochs, are a frequency step,
 accepted in a new warm segment with the prediction moved onto the line;
 classifying needs three rejects, and a step a series with an innovation
 scale; a 1-state series takes only phase steps.
+
+A disabled series is not tracked: with a reading it writes a row of flag O
+alone, with no state, innovation, counters or buffer, in the segment of the
+row before it, segment 0 for a new series, and its settings' model and time
+constants; with none it writes no row; it never cold-starts.
 
 Acquisition: a series with no valid state buffers its measurements and
 cold-starts from the third of three from consecutive epochs whose second
@@ -809,6 +814,7 @@ def test_a_gap_past_the_gap_limit_goes_dormant(gmax: int) -> None:
         ("RD", True),
         ("XD", True),
         ("PD", False),
+        ("O", True),
     ],
 )
 def test_only_a_dormant_row_without_a_measurement_is_not_written(
@@ -817,10 +823,10 @@ def test_only_a_dormant_row_without_a_measurement_is_not_written(
     """Write every row but a dormant one with no measurement (13.3)."""
     state_fields = (
         {"x_fs": None, "y": None, "d": None, "innovation_scale": None}
-        if "D" in flags
+        if {"D", "O"} & set(flags)
         else {}
     )
-    innovation = None if "P" in flags else 0.0
+    innovation = None if {"P", "O"} & set(flags) else 0.0
     row = last_row(flags=flags, innovation=innovation, **state_fields)
     assert estimator.writes_row(row) is written
 
@@ -973,7 +979,7 @@ def test_a_dormant_row_is_never_unsettled() -> None:
 
 
 def test_flags_are_written_in_their_order() -> None:
-    """Order slip, new segment and outcome as ARXPDSNU, whatever was added first."""
+    """Order slip, new segment and outcome as ARXPODSNU, whatever was added first."""
     previous_row = last_row()
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
@@ -2013,3 +2019,76 @@ def test_every_filter_error_is_logged_as_raised(
     assert (
         str(raised_error.value) == "no gains for a 2-state model with time constant 0.5"
     )
+
+
+# ----------------------------------------------------------- disabled series
+
+
+@pytest.mark.parametrize(
+    ("previous_row", "last_segment", "segment"),
+    [
+        (last_row(), None, 4),
+        (None, 4, 4),
+        (None, None, 0),
+    ],
+)
+def test_a_disabled_series_with_a_reading_writes_an_o_row(
+    previous_row: Row | None, last_segment: int | None, segment: int
+) -> None:
+    """Write O alone, no state, in the segment of the row before it (13.6)."""
+    step_result = estimator.disabled_step(
+        NEXT_EPOCH_START,
+        make_series_params(disabled=True),
+        previous_row,
+        measured=True,
+        last_segment=last_segment,
+    )
+    assert step_result == estimator.StepResult(
+        row=Row(
+            interpolated_datetime=NEXT_EPOCH_START,
+            innovation=None,
+            x_fs=None,
+            y=None,
+            d=None,
+            innovation_scale=None,
+            segment=segment,
+            step_offset=0,
+            epochs_in_segment=0,
+            epochs_since_accept=0,
+            consecutive_rejects=0,
+            rejects=(),
+            filter_states=3,
+            time_constant=100.0,
+            scale_time_constant=50.0,
+            flags="O",
+        ),
+        cold_started=False,
+    )
+    assert estimator.writes_row(step_result.row)
+
+
+def test_a_disabled_series_takes_its_settings_model() -> None:
+    """Give a 1-state disabled series' row no time constant."""
+    row = estimator.disabled_step(
+        NEXT_EPOCH_START,
+        make_series_params(filter_states=1, M=None, disabled=True),
+        None,
+        measured=True,
+    ).row
+    assert (row.filter_states, row.time_constant, row.flags) == (1, None, "O")
+
+
+@pytest.mark.parametrize("previous_row", [last_row(), None])
+def test_a_disabled_series_without_a_reading_writes_no_row(
+    previous_row: Row | None,
+) -> None:
+    """Give a row that is not written, and no cold start."""
+    step_result = estimator.disabled_step(
+        NEXT_EPOCH_START,
+        make_series_params(disabled=True),
+        previous_row,
+        measured=False,
+        last_segment=None if previous_row else 4,
+    )
+    assert not estimator.writes_row(step_result.row)
+    assert not step_result.cold_started

@@ -6,7 +6,9 @@ time constants, its initial innovation scale and its gap limit. A clock can
 then override any of those except its number of states, from the start or
 from a given MJD. A clock's entries may also give its location, the number
 of the building it is in, which a type never gives: a clock that moves gets
-an entry with the new building from the MJD of the move. The file also gives
+an entry with the new building from the MJD of the move. An entry may also
+disable a clock from its date, or enable it again: while a clock is
+disabled, no series tracks it. The file also gives
 how many counted rejects make a series dormant, the RMS limit of the pairs'
 gate, and the clocks to ignore: measured, but of no use.
 
@@ -214,6 +216,17 @@ class Entry(BaseModel):
     location : int or None, optional
         The building the clock is in from the entry's date, a positive
         whole number; ``None`` to keep the location.
+    disabled : bool or None, optional
+        Whether the clock is disabled from the entry's date; ``None`` to
+        keep it as it was.
+    enabled : bool or None, optional
+        The opposite of ``disabled``, for an entry that reads better so;
+        ``None`` to keep it as it was.
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If the entry gives both ``disabled`` and ``enabled``.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
@@ -226,16 +239,43 @@ class Entry(BaseModel):
     initial_innovation_scale: _Scale | None = None
     gap_limit: int | None = None
     location: _Location | None = None
+    disabled: bool | None = None
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def _check_disabled(self) -> Self:
+        """Refuse an entry that says both whether the clock is disabled and enabled.
+
+        Returns
+        -------
+        Self
+            The entry, unchanged.
+
+        Raises
+        ------
+        ValueError
+            If both ``disabled`` and ``enabled`` are given.
+        """
+        if self.disabled is not None and self.enabled is not None:
+            message = "an entry gives disabled or enabled, not both"
+            raise ValueError(message)
+        return self
 
     def overrides(self) -> dict[str, object]:
-        """Give the estimator values the entry sets.
+        """Give the values the entry sets.
 
         Returns
         -------
         dict of str to object
-            Every value the entry gives other than its type and date.
+            Every value the entry gives other than its type and date, with
+            ``enabled`` given as the ``disabled`` it means.
         """
-        return self.model_dump(exclude_none=True, exclude={"type", "effective_mjd"})
+        entry_values = self.model_dump(
+            exclude_none=True, exclude={"type", "effective_mjd", "enabled"}
+        )
+        if self.enabled is not None:
+            entry_values["disabled"] = not self.enabled
+        return entry_values
 
 
 class ClockEntry(BaseModel):
@@ -256,6 +296,8 @@ class ClockEntry(BaseModel):
     location : int or None, optional
         The building the clock is in; ``None`` when no entry in force gives
         one.
+    disabled : bool, optional
+        Whether the clock is disabled; false when no entry in force says.
 
     Raises
     ------
@@ -272,6 +314,7 @@ class ClockEntry(BaseModel):
     initial_innovation_scale: _Scale
     gap_limit: int
     location: _Location | None = None
+    disabled: bool = False
 
     @model_validator(mode="after")
     def _check_time_constant(self) -> Self:
@@ -588,6 +631,7 @@ class ClockConfig(BaseModel):
             raise ValueError(message)
         own_settings = first_entry.overrides()
         own_settings.pop("location", None)
+        own_settings.pop("disabled", None)
         return TypeDefault.model_validate(own_settings)
 
     def _check_gap(self, settled_entry: ClockEntry, settings_owner: str) -> None:
@@ -716,6 +760,40 @@ class ClockConfig(BaseModel):
             locations[clock] = location
         return locations
 
+    def disabled_at(self, epoch_start: datetime) -> frozenset[str]:
+        """Give the clocks disabled at a mark.
+
+        Parameters
+        ----------
+        epoch_start : datetime
+            The epoch start; must carry a timezone.
+
+        Returns
+        -------
+        frozenset of str
+            Every clock the file names whose entries in force at
+            ``epoch_start``, applied in the order :meth:`entry_for` applies
+            them, leave it disabled.
+
+        Raises
+        ------
+        ConfigError
+            If ``epoch_start`` has no timezone.
+        """
+        epoch_start = _aware(epoch_start)
+        disabled_clocks: set[str] = set()
+        for clock, clock_entries in self.clocks.items():
+            disabled = False
+            for clock_entry in _in_order(clock_entries):
+                if clock_entry.effective_mjd is not None and (
+                    mjd_to_datetime(clock_entry.effective_mjd) > epoch_start
+                ):
+                    break
+                disabled = bool(clock_entry.overrides().get("disabled", disabled))
+            if disabled:
+                disabled_clocks.add(clock)
+        return frozenset(disabled_clocks)
+
     def rms_limit(self, pair: PairKey) -> int:
         """Give a pair's RMS limit (design 9.1).
 
@@ -749,7 +827,9 @@ class ClockConfig(BaseModel):
         Returns
         -------
         SeriesParams
-            The series' settings.
+            The series' settings; a pair is disabled when either of its
+            clocks is, a triple never: to a triple a disabled clock is
+            missing.
 
         Raises
         ------
@@ -758,7 +838,9 @@ class ClockConfig(BaseModel):
             ``epoch_start`` has no timezone; the error is logged first.
         """
         return self._series_params(
-            series_key, self.entry_for(series_key[-1], epoch_start)
+            series_key,
+            self.entry_for(series_key[-1], epoch_start),
+            self.disabled_at(epoch_start),
         )
 
     def params_for_series(
@@ -785,18 +867,22 @@ class ClockConfig(BaseModel):
             ``epoch_start`` has no timezone; the error is logged first.
         """
         clock_entries: dict[str, ClockEntry] = {}
+        disabled_clocks = self.disabled_at(epoch_start)
         series_params = {}
         for series_key in series_keys:
             clock = series_key[-1]
             if clock not in clock_entries:
                 clock_entries[clock] = self.entry_for(clock, epoch_start)
             series_params[series_key] = self._series_params(
-                series_key, clock_entries[clock]
+                series_key, clock_entries[clock], disabled_clocks
             )
         return series_params
 
     def _series_params(
-        self, series_key: SeriesKey, clock_entry: ClockEntry
+        self,
+        series_key: SeriesKey,
+        clock_entry: ClockEntry,
+        disabled_clocks: frozenset[str],
     ) -> SeriesParams:
         """Give a series its settings from its clock's entry.
 
@@ -806,17 +892,17 @@ class ClockConfig(BaseModel):
             The series.
         clock_entry : ClockEntry
             The entry of its clock side at the mark.
+        disabled_clocks : frozenset of str
+            The clocks disabled at the mark.
 
         Returns
         -------
         SeriesParams
-            The entry's values, N_break and, for a pair, its RMS limit.
+            The entry's values, N_break and, for a pair, its RMS limit and
+            whether either of its clocks is disabled.
         """
-        rms_max = (
-            self.rms_limit((series_key[0], series_key[1]))
-            if len(series_key) == _PAIR
-            else None
-        )
+        is_pair = len(series_key) == _PAIR
+        rms_max = self.rms_limit((series_key[0], series_key[1])) if is_pair else None
         return SeriesParams(
             filter_states=clock_entry.filter_states,
             M=clock_entry.time_constant,
@@ -825,6 +911,7 @@ class ClockConfig(BaseModel):
             gmax=clock_entry.gap_limit,
             n_break=self.rejects_before_restart,
             rms_max=rms_max,
+            disabled=is_pair and not disabled_clocks.isdisjoint(series_key),
         )
 
 

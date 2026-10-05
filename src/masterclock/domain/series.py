@@ -2,10 +2,12 @@
 
 A series is the run of rows of one pair or one triple, one row for each
 epoch it is in. A row dormant with no measurement (D and P) is not written,
-so a series' file can have gaps. Each row is the whole state of the series
-at its epoch: the estimate, the counters and the reject buffer the next
-epoch starts from. Across a gap only the segment number carries: the series
-starts cold, in the segment after its last written row's.
+so a series' file can have gaps. A row of a pair whose clock or reference is
+disabled (O) holds the epoch's reading and no state: nothing tracks it. Each
+row is the whole state of the series at its epoch: the estimate, the
+counters and the reject buffer the next epoch starts from. Across a gap
+only the segment number carries: the series starts cold, in the segment
+after its last written row's.
 
 Every type here is a plain frozen dataclass, built without checks: its
 values come from code or from data already checked where it entered the
@@ -44,11 +46,14 @@ type TripleKey = tuple[str, str, str]
 type SeriesKey = PairKey | TripleKey
 """Either kind of series."""
 
-FLAG_ORDER: Final[str] = "ARXPDSNU"
+FLAG_ORDER: Final[str] = "ARXPODSNU"
 """Every flag a row can carry, in the order they are written in a row."""
 
-OUTCOMES: Final[frozenset[str]] = frozenset("ARXP")
+OUTCOMES: Final[frozenset[str]] = frozenset("ARXPO")
 """The flags of which every row carries exactly one: what the epoch did."""
+
+_NO_STATE: Final[frozenset[str]] = frozenset("DO")
+"""The flags of a row with no state: dormant, or disabled."""
 
 MAX_REJECTS: Final[int] = 3
 """How many entries a row's reject buffer holds at most."""
@@ -106,6 +111,9 @@ class SeriesParams:
     rms_max : int or None
         RMS limit of the gate, ps, above zero, for a pair; ``None`` for a
         triple, whose gate has no RMS test.
+    disabled : bool, optional
+        Whether the series is disabled: a pair one of whose clocks the
+        configuration disables; never a triple.
     """
 
     filter_states: FilterStates
@@ -115,6 +123,7 @@ class SeriesParams:
     gmax: int
     n_break: int
     rms_max: int | None
+    disabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,15 +142,16 @@ class Row:
         measurement or without a prediction.
     x_fs : int or None
         Estimated phase at E, in whole femtoseconds (see
-        :data:`~masterclock.domain.phase.FS_PER_PS`); ``None`` when dormant.
+        :data:`~masterclock.domain.phase.FS_PER_PS`); ``None`` when dormant
+        or disabled.
     y : float or None
-        Estimated rate, ps/s; ``None`` when dormant, 0.0 for a 1-state
-        series.
+        Estimated rate, ps/s; ``None`` when dormant or disabled, 0.0 for a
+        1-state series.
     d : float or None
-        Estimated drift, ps/s²; ``None`` when dormant, 0.0 for a 1- or
-        2-state series.
+        Estimated drift, ps/s²; ``None`` when dormant or disabled, 0.0 for
+        a 1- or 2-state series.
     innovation_scale : float or None
-        The innovation scale, ps; ``None`` when dormant.
+        The innovation scale, ps; ``None`` when dormant or disabled.
     segment : int
         Segment number, at least 0; 0 until the first cold start.
     step_offset : int
@@ -164,13 +174,14 @@ class Row:
     scale_time_constant : float
         Averaging constant M_sigma of this segment.
     flags : str
-        Letters of :data:`FLAG_ORDER`, in that order: exactly one of A, R, X
-        and P; D never with A, U never with D or on a 1-state series.
+        Letters of :data:`FLAG_ORDER`, in that order: exactly one of A, R,
+        X, P and O; D never with A, U never with D or on a 1-state series,
+        and O alone.
 
-    Every float is finite. A dormant row (D) holds none of ``x_fs``, ``y``,
-    ``d`` and ``innovation_scale``, and every other row all four; a P row
-    holds no innovation; a 2-state row has no drift other than 0.0, and a
-    1-state row no rate or drift other than 0.0.
+    Every float is finite. A dormant row (D) or a disabled one (O) holds
+    none of ``x_fs``, ``y``, ``d`` and ``innovation_scale``, and every other
+    row all four; a P or O row holds no innovation; a 2-state row has no
+    drift other than 0.0, and a 1-state row no rate or drift other than 0.0.
     """
 
     interpolated_datetime: datetime
@@ -211,7 +222,7 @@ class Row:
 
 
 _STATE_FIELDS: Final[tuple[str, ...]] = ("x_fs", "y", "d", "innovation_scale")
-"""The fields a dormant row leaves empty and every other row fills."""
+"""The fields a dormant or disabled row leaves empty and every other row fills."""
 
 
 def check_row(row: Row) -> None:
@@ -232,9 +243,9 @@ def check_row(row: Row) -> None:
         Naming the first rule the row breaks: a float that is not finite, a
         counter below 0, a reject buffer too long or out of order, flags
         that are unknown, repeated, out of order or not one outcome, D with
-        A or U, a state that does not fit the flags or the model, an
-        innovation on a P row, or a time constant given for a 1-state series
-        or missing for another.
+        A or U, O with any other flag, a state that does not fit the flags
+        or the model, an innovation on a P or O row, or a time constant
+        given for a 1-state series or missing for another.
 
     Examples
     --------
@@ -332,8 +343,8 @@ def _check_flags(row_flags: str) -> None:
     ------
     ValueError
         If a letter is not one of :data:`FLAG_ORDER`, appears twice or out
-        of order, the flags hold other than exactly one of A, R, X and P,
-        or D stands with A or U.
+        of order, the flags hold other than exactly one of A, R, X, P and
+        O, D stands with A or U, or O does not stand alone.
     """
     ordered_flags = "".join(letter for letter in FLAG_ORDER if letter in row_flags)
     if row_flags != ordered_flags:
@@ -342,7 +353,10 @@ def _check_flags(row_flags: str) -> None:
         )
         raise ValueError(message)
     if len(OUTCOMES & set(row_flags)) != 1:
-        message = f"flags {row_flags!r} hold other than exactly one of A, R, X and P"
+        message = f"flags {row_flags!r} hold other than exactly one of A, R, X, P and O"
+        raise ValueError(message)
+    if "O" in row_flags and row_flags != "O":
+        message = f"flags {row_flags!r}: a disabled row's O stands alone"
         raise ValueError(message)
     if "D" in row_flags and ("A" in row_flags or "U" in row_flags):
         message = f"flags {row_flags!r}: a dormant row is never accepted or unsettled"
@@ -360,22 +374,27 @@ def _check_state(row: Row) -> None:
     Raises
     ------
     ValueError
-        If a dormant row holds any part of a state, another row lacks one,
-        a row without a measurement holds an innovation, or the row breaks
-        a rule of its model (see :func:`_check_model`).
+        If a dormant or disabled row holds any part of a state, another row
+        lacks one, a row without a measurement or a disabled row holds an
+        innovation, or the row breaks a rule of its model (see
+        :func:`_check_model`).
     """
-    is_dormant = "D" in row.flags
+    has_no_state = not _NO_STATE.isdisjoint(row.flags)
     empty_fields = [
         field_name for field_name in _STATE_FIELDS if getattr(row, field_name) is None
     ]
-    if empty_fields != (list(_STATE_FIELDS) if is_dormant else []):
+    if empty_fields != (list(_STATE_FIELDS) if has_no_state else []):
         message = (
-            "a dormant row has no x_fs, y, d or innovation_scale and every other"
-            f" row has all four; flags {row.flags!r}, empty {empty_fields}"
+            "a dormant or disabled row has no x_fs, y, d or innovation_scale and"
+            f" every other row has all four; flags {row.flags!r}, empty"
+            f" {empty_fields}"
         )
         raise ValueError(message)
-    if "P" in row.flags and row.innovation is not None:
-        message = "a row with no measurement (P) has no innovation"
+    if not {"P", "O"}.isdisjoint(row.flags) and row.innovation is not None:
+        message = (
+            "a row with no measurement (P) or of a disabled series (O) has no"
+            " innovation"
+        )
         raise ValueError(message)
     _check_model(row)
 

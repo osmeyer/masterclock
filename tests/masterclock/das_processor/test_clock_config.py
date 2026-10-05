@@ -27,6 +27,13 @@ wherever listed; rejects_before_restart may equal the gap limit; a gap
 limit has no lower bound of its own; and the clocks to ignore are listed,
 none when the file names none, each once and never with entries of its
 own.
+
+A clock is disabled from the mark an entry giving disabled true or enabled
+false falls on, until one giving disabled false or enabled true, from the
+start when its first entry says so; an entry gives one of the two keys, as
+a bool, and a type neither; every clock disabled at a mark is given, with
+the mark's timezone needed; and a pair is disabled when either of its
+clocks is, a triple never.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -796,3 +803,161 @@ def test_a_clock_with_its_own_settings_keeps_its_number_of_states(
         "  cs7: [{type: cesium}]", f"  rb9:\n    - {OWN_SETTINGS_ENTRY}\n{later_entry}"
     )
     assert_refused(tmp_path, yaml_text, "changes the filter_states of rb9")
+
+
+# ---------------------------------------------------------- disabled clocks
+
+DISABLED_YAML: Final = BASE_YAML.replace(
+    "    - {effective_mjd: 60980.0, time_constant: 150.0}\n",
+    "    - {effective_mjd: 60980.0, time_constant: 150.0}\n"
+    "    - {effective_mjd: 60980.0, disabled: true}\n"
+    "    - {effective_mjd: 60990.0, enabled: true}\n",
+)
+"""BASE_YAML with ox23 disabled from MJD 60980 and enabled again at MJD 60990."""
+
+
+def test_a_clock_is_disabled_from_its_entry_s_mjd_and_enabled_by_a_later_one(
+    tmp_path: Path,
+) -> None:
+    """Disable a clock from the mark its entry falls on, until it is enabled."""
+    loaded_config = read_config_text(tmp_path, DISABLED_YAML)
+    assert [
+        loaded_config.entry_for("ox23", mark).disabled
+        for mark in (MARK_BEFORE_MJD_60980, MJD_60980_START, MJD_60990_START)
+    ] == [False, True, False]
+    assert loaded_config.entry_for("cs7", MJD_60980_START).disabled is False
+
+
+@pytest.mark.parametrize(
+    ("disabled_entry", "enabled_entry"),
+    [
+        (
+            "{effective_mjd: 60980.0, enabled: false}",
+            "{effective_mjd: 60990.0, disabled: false}",
+        ),
+        (
+            "{effective_mjd: 60980.0, disabled: true}",
+            "{effective_mjd: 60990.0, enabled: true}",
+        ),
+    ],
+)
+def test_enabled_false_is_disabled_true_and_the_other_way_round(
+    tmp_path: Path, disabled_entry: str, enabled_entry: str
+) -> None:
+    """Read enabled as the opposite of disabled, either way round."""
+    yaml_text = BASE_YAML.replace(
+        "  cs7: [{type: cesium}]",
+        f"  cs7: [{{type: cesium}}, {disabled_entry}, {enabled_entry}]",
+    )
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    assert [
+        loaded_config.entry_for("cs7", mark).disabled
+        for mark in (MARK_BEFORE_MJD_60980, MJD_60980_START, MJD_60990_START)
+    ] == [False, True, False]
+
+
+def test_a_clock_may_be_disabled_from_the_start(tmp_path: Path) -> None:
+    """Disable a clock whose undated first entry says so, with a type or without."""
+    own_entry = OWN_SETTINGS_ENTRY.replace("}", ", disabled: true}")
+    yaml_text = BASE_YAML.replace(
+        "  cs7: [{type: cesium}]",
+        f"  cs7: [{{type: cesium, disabled: true}}]\n  rb9: [{own_entry}]",
+    )
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    assert loaded_config.entry_for("cs7", MARK_BEFORE_MJD_60980).disabled
+    assert loaded_config.entry_for("rb9", MARK_BEFORE_MJD_60980).disabled
+
+
+def test_every_clock_disabled_at_a_mark(tmp_path: Path) -> None:
+    """Give the clocks disabled at a mark, a disabled reference among them."""
+    yaml_text = DISABLED_YAML.replace(
+        "  mc2: [{type: mc}]",
+        "  mc2: [{type: mc}, {effective_mjd: 60990.0, disabled: true}]",
+    )
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    assert loaded_config.disabled_at(MARK_BEFORE_MJD_60980) == frozenset()
+    assert loaded_config.disabled_at(MJD_60980_START) == frozenset({"ox23"})
+    assert loaded_config.disabled_at(MJD_60990_START) == frozenset({"mc2"})
+    assert loaded_config.changes_between(MARK_BEFORE_MJD_60980, MJD_60980_START)
+
+
+def test_disabled_clocks_need_a_mark_with_a_timezone(tmp_path: Path) -> None:
+    """Refuse a mark that names no one instant."""
+    with pytest.raises(ConfigError, match="no timezone"):
+        read_config_text(tmp_path, DISABLED_YAML).disabled_at(
+            MJD_60980_START.replace(tzinfo=None)
+        )
+
+
+@pytest.mark.parametrize(
+    ("series_key", "disabled"),
+    [
+        (("mc2", "ox23"), True),
+        (("mc2", "mc2"), False),
+        (("mc2", "cs7"), False),
+        (("mc1", "mc2", "ox23"), False),
+    ],
+)
+def test_a_pair_is_disabled_when_its_clock_is(
+    tmp_path: Path, series_key: SeriesKey, disabled: bool
+) -> None:
+    """Disable a pair whose clock is disabled; never a triple (the clock is missing)."""
+    loaded_config = read_config_text(tmp_path, DISABLED_YAML)
+    assert loaded_config.params_for(series_key, MJD_60980_START).disabled is disabled
+    assert (
+        loaded_config.params_for_series([series_key], MJD_60980_START)[
+            series_key
+        ].disabled
+        is disabled
+    )
+
+
+@pytest.mark.parametrize(
+    "series_key", [("mc2", "mc2"), ("mc2", "mc1"), ("mc1", "mc2"), ("mc2", "cs7")]
+)
+def test_a_pair_is_disabled_when_its_reference_is(
+    tmp_path: Path, series_key: SeriesKey
+) -> None:
+    """Disable every pair of a disabled reference, as reference or as clock."""
+    yaml_text = BASE_YAML.replace(
+        "  mc2: [{type: mc}]",
+        "  mc2: [{type: mc}, {effective_mjd: 60980.0, disabled: true}]",
+    )
+    loaded_config = read_config_text(tmp_path, yaml_text)
+    assert loaded_config.params_for(series_key, MJD_60980_START).disabled
+    assert not loaded_config.params_for(series_key, MARK_BEFORE_MJD_60980).disabled
+    assert not loaded_config.params_for(("mc1", "mc1"), MJD_60980_START).disabled
+
+
+@pytest.mark.parametrize(
+    ("yaml_old", "yaml_new", "error_pattern"),
+    [
+        (
+            "  cs7: [{type: cesium}]",
+            "  cs7: [{type: cesium}, {effective_mjd: 60980.0, disabled: true,"
+            " enabled: false}]",
+            "disabled or enabled, not both",
+        ),
+        (
+            "  cs7: [{type: cesium}]",
+            "  cs7: [{type: cesium}, {effective_mjd: 60980.0, disabled: 1}]",
+            "disabled",
+        ),
+        (
+            "  cs7: [{type: cesium}]",
+            "  cs7: [{type: cesium}, {effective_mjd: 60980.0, enabled: yes please}]",
+            "enabled",
+        ),
+        (
+            "  mc: {filter_states: 1,",
+            "  mc: {disabled: true, filter_states: 1,",
+            "disabled",
+        ),
+    ],
+)
+def test_an_entry_says_disabled_or_enabled_as_one_bool(
+    tmp_path: Path, yaml_old: str, yaml_new: str, error_pattern: str
+) -> None:
+    """Refuse both keys in one entry, a value that is not a bool, and a type's own."""
+    assert yaml_old in BASE_YAML
+    assert_refused(tmp_path, BASE_YAML.replace(yaml_old, yaml_new), error_pattern)

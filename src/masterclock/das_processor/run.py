@@ -6,11 +6,13 @@ processes each epoch in turn, and logs what each epoch did.
 Only the functions that read files take the configuration.
 :func:`build_epoch` resolves everything one epoch needs into an
 :class:`Epoch` of plain values: its references, every pair and triple, the
-steering of every reference that steers a series, and each series'
-settings, kept from the last epoch while they cannot have changed.
+steering of every reference that steers a series, the clocks disabled at
+it, and each series' settings, kept from the last epoch while they cannot
+have changed.
 Everything below it receives that epoch or plain values.
 """
 
+import dataclasses
 import logging
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -39,7 +41,8 @@ from masterclock.das_processor.files import (
     cut_epoch,
     ensure_archives,
     read_journal,
-    read_last_row,
+    read_last_record,
+    record_z,
     roll_back,
     write_buffer,
     write_final,
@@ -57,11 +60,13 @@ from masterclock.domain.double_difference import Component, double_difference
 from masterclock.domain.filter import (
     StepResult,
     anchor_of,
+    disabled_step,
     filter_step,
     predict,
     writes_row,
 )
 from masterclock.domain.measurements import (
+    DisabledReading,
     PairMeasurement,
     TripleMeasurement,
     measure_pair,
@@ -126,6 +131,9 @@ class Epoch:
         configuration has no entry for and does not ignore; their
         measurements and series are left out of the epoch, as an ignored
         clock's are.
+    disabled : frozenset of str, optional
+        The clocks the clock configuration disables at E. A disabled
+        reference is not among the epoch's references.
 
     Raises
     ------
@@ -143,6 +151,7 @@ class Epoch:
     series_params: dict[SeriesKey, SeriesParams]
     locations: dict[str, int | None]
     clocks_without_entry: frozenset[str] = frozenset()
+    disabled: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         """Refuse a block of another epoch, or settings for other series.
@@ -202,7 +211,8 @@ def build_epoch(
     Epoch
         The epoch, every measurement and series of a clock the clock
         configuration has no entry for left out (see
-        :func:`_configured_only`): its references, every pair and triple (see
+        :func:`_configured_only`): its references, a disabled one left out,
+        every pair and triple (see
         :func:`~masterclock.das_processor.registry.build_registry`), the
         steering of every reference any series is steered by, read over
         (E - T, E + T] (I4), and each series' settings at E. The settings
@@ -219,18 +229,20 @@ def build_epoch(
     Notes
     -----
     A clock with no entry that the configuration does not ignore is logged
-    at WARNING when it is first found (see :func:`_configured_only`).
+    at WARNING when it is first found (see :func:`_configured_only`). A
+    clock disabled or enabled again at E is logged at INFO (see
+    :func:`_disabled_clocks`).
     """
     das_block, earlier_series, clocks_without_entry = _configured_only(
         das_block, earlier_series, clock_config, last_epoch
     )
-    refs = refs_of(das_block)
     kept_epoch = _configuration_kept(last_epoch, epoch_start, clock_config)
-    locations = (
-        clock_config.locations_at(epoch_start)
-        if kept_epoch is None
-        else dict(kept_epoch.locations)
-    )
+    if kept_epoch is None:
+        locations = clock_config.locations_at(epoch_start)
+        disabled = _disabled_clocks(clock_config, epoch_start)
+    else:
+        locations, disabled = dict(kept_epoch.locations), kept_epoch.disabled
+    refs = refs_of(das_block) - disabled
     pairs, triples = build_registry(das_block, refs, earlier_series, locations)
     series_keys: list[SeriesKey] = [*pairs, *triples]
     steering_refs = sorted(
@@ -259,7 +271,41 @@ def build_epoch(
         series_params=series_params,
         locations=locations,
         clocks_without_entry=clocks_without_entry,
+        disabled=disabled,
     )
+
+
+def _disabled_clocks(
+    clock_config: ClockConfig, epoch_start: datetime
+) -> frozenset[str]:
+    """Give the clocks disabled at an epoch, logging each change from the one before.
+
+    Parameters
+    ----------
+    clock_config : ClockConfig
+        The clock configuration.
+    epoch_start : datetime
+        The epoch start E.
+
+    Returns
+    -------
+    frozenset of str
+        The clocks disabled at E.
+
+    Notes
+    -----
+    Each clock disabled at E and not at E - T, and each disabled then and
+    not now, is logged once at INFO. The epoch before is taken from the
+    configuration, not from the run, so a run of one epoch logs what a run
+    of many does.
+    """
+    disabled = clock_config.disabled_at(epoch_start)
+    disabled_before = clock_config.disabled_at(epoch_start - _EPOCH)
+    for clock in sorted(disabled - disabled_before):
+        _log.info("clock %s disabled from %s", clock, epoch_start)
+    for clock in sorted(disabled_before - disabled):
+        _log.info("clock %s enabled again from %s", clock, epoch_start)
+    return disabled
 
 
 def _configured_only(
@@ -430,6 +476,8 @@ class PairStep:
         What reference screening decided.
     slips : Slips
         What the slip check decided.
+    disabled_readings : dict of (str, str) to DisabledReading, optional
+        Each disabled pair's reading, which is not decycled.
     """
 
     step_results: dict[PairKey, StepResult]
@@ -437,6 +485,9 @@ class PairStep:
     predictions: dict[PairKey, State | None]
     screening: Screening
     slips: Slips
+    disabled_readings: dict[PairKey, DisabledReading] = dataclasses.field(
+        default_factory=dict
+    )
 
 
 def _steering_input(
@@ -628,6 +679,8 @@ class PairStart:
         Each innovation scale they use.
     last_flags : dict of (str, str) to str
         The flags of each pair's last row, in the pairs' order.
+    disabled_readings : dict of (str, str) to DisabledReading
+        Each disabled pair's reading, in the readings' order.
     """
 
     predictions: dict[PairKey, State | None]
@@ -635,6 +688,7 @@ class PairStart:
     innovations: dict[PairKey, mpq]
     scales: dict[PairKey, float]
     last_flags: dict[PairKey, str]
+    disabled_readings: dict[PairKey, DisabledReading]
 
 
 def start_pairs(
@@ -643,6 +697,8 @@ def start_pairs(
     pairs: Iterable[PairKey],
     readings: Iterable[PairReading],
     last_rows: Mapping[SeriesKey, Row],
+    series_params: Mapping[SeriesKey, SeriesParams] | None = None,
+    last_z: Mapping[PairKey, int | None] | None = None,
 ) -> PairStart:
     """Predict and decycle some pairs: their part of an epoch before screening.
 
@@ -658,12 +714,21 @@ def start_pairs(
         Their readings, in the block's order.
     last_rows : Mapping of series key to Row
         Each series' row of the epoch before E.
+    series_params : Mapping of series key to SeriesParams or None, optional
+        Each pair's settings at E, which say whether it is disabled; no pair
+        is when ``None``.
+    last_z : Mapping of (str, str) to int or None, optional
+        Each pair's newest z, which a disabled pair's row carries; none
+        when ``None``.
 
     Returns
     -------
     PairStart
         Each pair's prediction, each measurement, and the innovations,
-        scales and last flags screening and the slip check use.
+        scales and last flags screening and the slip check use. A disabled
+        pair has no prediction, and its reading is kept as it is, with the
+        z it carries, not decycled, so screening and the slip check do not
+        see it.
 
     Raises
     ------
@@ -671,13 +736,19 @@ def start_pairs(
         If a reading or its offset is out of range.
     """
     pairs = tuple(pairs)
-    predictions = {
-        pair: predict(last_rows.get(pair), _steering_input(pair, epoch_start, steering))
-        for pair in pairs
-    }
-    measurements = _measured_pairs(
-        epoch_start, steering, readings, last_rows, predictions
+    disabled_pairs = frozenset(
+        pair for pair in pairs if series_params and series_params[pair].disabled
     )
+    predictions = _predictions(epoch_start, steering, pairs, last_rows, disabled_pairs)
+    readings = tuple(readings)
+    measurements = _measured_pairs(
+        epoch_start,
+        steering,
+        [reading for reading in readings if reading.pair not in disabled_pairs],
+        last_rows,
+        predictions,
+    )
+    disabled_readings = _disabled_readings(readings, disabled_pairs, last_z or {})
     innovations, scales = _innovations(measurements, predictions, last_rows)
     last_flags = {pair: last_rows[pair].flags for pair in pairs if pair in last_rows}
     return PairStart(
@@ -686,7 +757,82 @@ def start_pairs(
         innovations=innovations,
         scales=scales,
         last_flags=last_flags,
+        disabled_readings=disabled_readings,
     )
+
+
+def _predictions(
+    epoch_start: datetime,
+    steering: Mapping[str, tuple[SteerEvent, ...]],
+    pairs: tuple[PairKey, ...],
+    last_rows: Mapping[SeriesKey, Row],
+    disabled_pairs: frozenset[PairKey],
+) -> dict[PairKey, State | None]:
+    """Predict some pairs at an epoch, none of the disabled ones.
+
+    Parameters
+    ----------
+    epoch_start : datetime
+        The epoch start E.
+    steering : Mapping of str to tuple of SteerEvent
+        The epoch's steering events.
+    pairs : tuple of (str, str)
+        The pairs, sorted.
+    last_rows : Mapping of series key to Row
+        Each series' row of the epoch before E.
+    disabled_pairs : frozenset of (str, str)
+        The pairs disabled at E.
+
+    Returns
+    -------
+    dict of (str, str) to State or None
+        Each pair's prediction at E, in the pairs' order (see
+        :func:`~masterclock.domain.filter.predict`); ``None`` for a disabled
+        pair, which nothing tracks.
+    """
+    predictions: dict[PairKey, State | None] = {}
+    for pair in pairs:
+        if pair in disabled_pairs:
+            predictions[pair] = None
+        else:
+            predictions[pair] = predict(
+                last_rows.get(pair), _steering_input(pair, epoch_start, steering)
+            )
+    return predictions
+
+
+def _disabled_readings(
+    readings: Iterable[PairReading],
+    disabled_pairs: frozenset[PairKey],
+    last_z: Mapping[PairKey, int | None],
+) -> dict[PairKey, DisabledReading]:
+    """Keep the disabled pairs' readings as they are, each with the z it carries.
+
+    Parameters
+    ----------
+    readings : Iterable of PairReading
+        The epoch's readings.
+    disabled_pairs : frozenset of (str, str)
+        The pairs disabled at the epoch.
+    last_z : Mapping of (str, str) to int or None
+        Each pair's newest z.
+
+    Returns
+    -------
+    dict of (str, str) to DisabledReading
+        Each disabled pair's reading, in the readings' order, with its
+        pair's newest z, or none.
+    """
+    return {
+        reading.pair: DisabledReading(
+            measurement_mjd=reading.measurement_mjd,
+            measured_phase=reading.measured_phase,
+            rms=reading.rms,
+            z=last_z.get(reading.pair),
+        )
+        for reading in readings
+        if reading.pair in disabled_pairs
+    }
 
 
 def finish_pairs(
@@ -723,7 +869,8 @@ def finish_pairs(
     -------
     tuple of (dict, dict)
         Each measurement, its slip corrected, and each pair's row and
-        whether it cold-started, in the pairs' order.
+        whether it cold-started, in the pairs' order; a disabled pair's row
+        is not filtered (see :func:`~masterclock.domain.filter.disabled_step`).
 
     Raises
     ------
@@ -735,6 +882,15 @@ def finish_pairs(
         measurements[pair] = measurements[pair].corrected(cycles)
     step_results = {}
     for pair, prediction in pair_start.predictions.items():
+        if series_params[pair].disabled:
+            step_results[pair] = disabled_step(
+                epoch_start,
+                series_params[pair],
+                last_rows.get(pair),
+                measured=pair in pair_start.disabled_readings,
+                last_segment=last_segments.get(pair),
+            )
+            continue
         measurement = measurements.get(pair)
         step_results[pair] = filter_step(
             epoch_start,
@@ -752,6 +908,7 @@ def process_pairs(
     epoch: Epoch,
     last_rows: Mapping[SeriesKey, Row],
     last_segments: Mapping[SeriesKey, int] | None = None,
+    last_z: Mapping[PairKey, int | None] | None = None,
 ) -> PairStep:
     """Process an epoch's pairs: predict, decycle, screen, check slips, filter.
 
@@ -767,6 +924,9 @@ def process_pairs(
         after epochs it had no row for; such a series starts in the next
         segment (see :func:`~masterclock.domain.filter.carry`); none when
         ``None``.
+    last_z : Mapping of (str, str) to int or None, optional
+        Each pair's newest z, which a disabled pair's row carries; none
+        when ``None``.
 
     Returns
     -------
@@ -789,6 +949,8 @@ def process_pairs(
         epoch.pairs,
         pair_readings(epoch.das_block),
         last_rows,
+        epoch.series_params,
+        last_z,
     )
     screening, slips = screen_pairs(
         pair_start.innovations, pair_start.scales, pair_start.last_flags, epoch.refs
@@ -808,6 +970,44 @@ def process_pairs(
         predictions=pair_start.predictions,
         screening=screening,
         slips=slips,
+        disabled_readings=pair_start.disabled_readings,
+    )
+
+
+def pair_record(
+    pair: PairKey,
+    step_result: StepResult,
+    measurements: Mapping[PairKey, PairMeasurement],
+    disabled_readings: Mapping[PairKey, DisabledReading],
+) -> MeasRecord:
+    """Give a pair's record at an epoch: its measurement, or its disabled reading.
+
+    Parameters
+    ----------
+    pair : (str, str)
+        The pair.
+    step_result : StepResult
+        Its row at the epoch.
+    measurements : Mapping of (str, str) to PairMeasurement
+        The epoch's pair measurements.
+    disabled_readings : Mapping of (str, str) to DisabledReading
+        The epoch's disabled pairs' readings.
+
+    Returns
+    -------
+    MeasRecord
+        The row with the pair's measurement, its disabled reading, or
+        neither.
+
+    Raises
+    ------
+    DataFileError
+        If the measurement does not belong with the row.
+    """
+    measurement = measurements.get(pair)
+    return MeasRecord(
+        measurement=disabled_readings.get(pair) if measurement is None else measurement,
+        row=step_result.row,
     )
 
 
@@ -1113,8 +1313,8 @@ def next_epoch(config: AppConfig) -> datetime:
         One epoch after the newest row any file keeps; with no file
         holding a row, the epoch containing ``start_from_mjd``. A file may
         end earlier: its series was left out of the later epochs, or was
-        dormant with no measurement, and it starts cold when it is next in
-        an epoch.
+        dormant with no measurement or disabled with no reading, and it
+        starts cold when it is next in an epoch.
 
     Raises
     ------
@@ -1296,7 +1496,9 @@ def _log_roll_back(
     )
 
 
-def read_last_state(config: AppConfig) -> dict[SeriesKey, Row]:
+def read_last_state(
+    config: AppConfig,
+) -> tuple[dict[SeriesKey, Row], dict[PairKey, int | None]]:
     """Read every series' last row from its file (I4).
 
     Parameters
@@ -1306,18 +1508,23 @@ def read_last_state(config: AppConfig) -> dict[SeriesKey, Row]:
 
     Returns
     -------
-    dict of series key to Row
-        Each series' last row.
+    tuple of (dict, dict)
+        Each series' last row, and each pair's last z, ``None`` for a row
+        without one.
 
     Raises
     ------
     DataFileError
         If a file cannot be read or is not sound.
     """
-    return {
-        series_key: read_last_row(data_file, file_kind)
-        for data_file, file_kind, series_key in data_series(config)
-    }
+    last_rows: dict[SeriesKey, Row] = {}
+    last_z: dict[PairKey, int | None] = {}
+    for data_file, file_kind, series_key in data_series(config):
+        last_record = read_last_record(data_file, file_kind)
+        last_rows[series_key] = last_record.row
+        if isinstance(last_record, MeasRecord):
+            last_z[(series_key[0], series_key[1])] = record_z(last_record)
+    return last_rows, last_z
 
 
 def rows_before(
@@ -1336,14 +1543,18 @@ def rows_before(
     -------
     tuple of (dict, dict)
         The rows of the epoch before E, each its series' last row; and for
-        every series whose newest row is older, its segment. Such a series
-        had no row for the epoch before E, so it starts cold at E, as a new
-        series does, in the segment after its newest row's.
+        every series whose newest row is older, or is a disabled pair's (O),
+        its segment. Such a series has nothing to go on from, so it starts
+        cold at E, as a new series does, in the segment after its newest
+        row's, unless it is still disabled.
     """
     last_rows: dict[SeriesKey, Row] = {}
     last_segments: dict[SeriesKey, int] = {}
     for series_key, newest_row in newest_rows.items():
-        if newest_row.interpolated_datetime == epoch_start - _EPOCH:
+        if (
+            newest_row.interpolated_datetime == epoch_start - _EPOCH
+            and "O" not in newest_row.flags
+        ):
             last_rows[series_key] = newest_row
         else:
             last_segments[series_key] = newest_row.segment
@@ -1394,7 +1605,9 @@ def process_epoch(
         formatted; the buffer then holds none of the epoch's rows.
     """
     if not day_buffer.last_rows:
-        day_buffer.last_rows.update(read_last_state(config))
+        last_rows_read, last_z_read = read_last_state(config)
+        day_buffer.last_rows.update(last_rows_read)
+        day_buffer.last_z.update(last_z_read)
     newest_rows = dict(day_buffer.last_rows)
     earlier_series = ExistingSeries(
         pairs=frozenset(
@@ -1418,7 +1631,7 @@ def process_epoch(
         last_epoch,
         steering_files,
     )
-    pair_step = process_pairs(epoch, last_rows, last_segments)
+    pair_step = process_pairs(epoch, last_rows, last_segments, day_buffer.last_z)
     triple_step = process_triples(epoch, last_rows, pair_step, last_segments)
     epoch_buffer = DayBuffer(day_buffer.channel)
     processed_path = config.processed.processed_path
@@ -1458,9 +1671,11 @@ def _file_records(
     series_records: list[tuple[SeriesKey, MeasRecord | DdiffRecord]] = [
         (
             pair,
-            MeasRecord(
-                measurement=pair_step.measurements.get(pair),
-                row=pair_step.step_results[pair].row,
+            pair_record(
+                pair,
+                pair_step.step_results[pair],
+                pair_step.measurements,
+                pair_step.disabled_readings,
             ),
         )
         for pair in epoch.pairs

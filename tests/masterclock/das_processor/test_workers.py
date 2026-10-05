@@ -3,7 +3,8 @@
 The rules covered: every series has one owner among the workers, from its
 name alone; a run with worker processes writes byte-identical data files to
 a run without them, with one worker or several, in one batch or one epoch
-per run, a series that stops and a clock with no entry included, and logs
+per run, a series that stops, a clock with no entry and clocks disabled
+for a time included, and logs
 the same records in the same order; the pool counts a series as existing
 once it writes a row; the command line's num_workers starts the workers.
 
@@ -102,12 +103,14 @@ UNCONFIGURED_PAIR: Final = ("mc1", "xx9")
 """A pair measured every epoch whose clock has no entry in the configuration."""
 
 
-def write_deployment(deployment_directory: Path) -> AppConfig:
+def write_deployment(
+    deployment_directory: Path, clock_config_yaml: str = CLOCK_CONFIG_YAML
+) -> AppConfig:
     """Write the invented deployment's inputs in a new directory; give its config."""
     for directory_name in ("das", "steering", "processed"):
         (deployment_directory / directory_name).mkdir(parents=True)
     (deployment_directory / "clock_config.yaml").write_text(
-        CLOCK_CONFIG_YAML, encoding="utf-8"
+        clock_config_yaml, encoding="utf-8"
     )
     das_lines_by_day: dict[int, list[str]] = {}
     for epoch_index in range(EPOCH_COUNT):
@@ -177,18 +180,23 @@ def clock_config_of(config: AppConfig) -> ClockConfig:
     return read_clock_config(config.processed.clock_config_file)
 
 
-def run_without_workers(deployment_directory: Path) -> AppConfig:
+def run_without_workers(
+    deployment_directory: Path, clock_config_yaml: str = CLOCK_CONFIG_YAML
+) -> AppConfig:
     """Run the invented deployment in one batch, without workers; give its config."""
-    config = write_deployment(deployment_directory)
+    config = write_deployment(deployment_directory, clock_config_yaml)
     run.run(config, clock_config_of(config), None, ShutdownHandler())
     return config
 
 
 def run_with_workers(
-    deployment_directory: Path, num_workers: int, steps: int | None = None
+    deployment_directory: Path,
+    num_workers: int,
+    steps: int | None = None,
+    clock_config_yaml: str = CLOCK_CONFIG_YAML,
 ) -> AppConfig:
     """Run the invented deployment with worker processes; give its config."""
-    config = write_deployment(deployment_directory)
+    config = write_deployment(deployment_directory, clock_config_yaml)
     with workers.WorkerPool(
         num_workers, config.processed.processed_path, config.das.rf
     ) as worker_pool:
@@ -258,6 +266,69 @@ def test_workers_one_epoch_per_run_write_the_same_files(tmp_path: Path) -> None:
         ) as worker_pool:
             run.run(config, clock_config_of(config), 1, ShutdownHandler(), worker_pool)
     assert without_files
+    assert archived_files(config) == without_files
+
+
+EPOCH_6_MJD: Final = datetime_to_mjd(FIRST_EPOCH + 6 * T)
+"""The MJD of the seventh epoch's start."""
+
+EPOCH_10_MJD: Final = datetime_to_mjd(FIRST_EPOCH + 10 * T)
+"""The MJD of the eleventh epoch's start."""
+
+EPOCH_11_MJD: Final = datetime_to_mjd(FIRST_EPOCH + 11 * T)
+"""The MJD of the twelfth epoch's start."""
+
+DISABLED_CLOCK_CONFIG_YAML: Final = CLOCK_CONFIG_YAML.replace(
+    "  mc2: [{type: mc, location: 1}]\n",
+    "  mc2:\n"
+    "    - {type: mc, location: 1}\n"
+    f"    - {{effective_mjd: {EPOCH_10_MJD}, disabled: true}}\n"
+    f"    - {{effective_mjd: {EPOCH_11_MJD}, disabled: false}}\n",
+).replace(
+    "  cs1: [{type: cesium, location: 2}]\n",
+    "  cs1:\n"
+    "    - {type: cesium, location: 2}\n"
+    f"    - {{effective_mjd: {EPOCH_6_MJD}, enabled: false}}\n"
+    f"    - {{effective_mjd: {EPOCH_10_MJD}, enabled: true}}\n",
+)
+"""The clock configuration, with cs1 disabled for four epochs and mc2 for one."""
+
+
+def test_workers_write_the_files_of_disabled_clocks_a_run_without_them_writes(
+    tmp_path: Path,
+) -> None:
+    """Give the same files with workers, in one go or stepped, clocks disabled (U29)."""
+    without_files = archived_files(
+        run_without_workers(tmp_path / "without", DISABLED_CLOCK_CONFIG_YAML)
+    )
+    disabled_counts = {
+        file_name: disabled_count
+        for file_name, file_bytes in without_files.items()
+        if (
+            disabled_count := sum(
+                row_line.rsplit(", ", 1)[-1].strip() == "O"
+                for row_line in file_bytes.decode().splitlines()
+            )
+        )
+    }
+    assert disabled_counts == {
+        "meas/das_a.mc2.cs1.dat": 5,
+        "meas/das_a.mc1.mc2.dat": 1,
+        "meas/das_a.mc2.mc1.dat": 1,
+        "meas/das_a.mc2.mc2.dat": 1,
+    }
+    with_files = archived_files(
+        run_with_workers(
+            tmp_path / "with", 3, clock_config_yaml=DISABLED_CLOCK_CONFIG_YAML
+        )
+    )
+    assert with_files == without_files
+    config = write_deployment(tmp_path / "stepped", DISABLED_CLOCK_CONFIG_YAML)
+    for _ in range(EPOCH_COUNT + 1):
+        with workers.WorkerPool(
+            2, config.processed.processed_path, config.das.rf
+        ) as worker_pool:
+            run.run(config, clock_config_of(config), 1, ShutdownHandler(), worker_pool)
     assert archived_files(config) == without_files
 
 

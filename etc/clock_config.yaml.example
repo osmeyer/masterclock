@@ -31,12 +31,20 @@ ignore: [gps9]
 # fits, every setting itself, holding from the start; a later one overrides
 # values other than filter_states, from effective_mjd on. An entry may give
 # the clock's location, the number of the building it is in; a clock that
-# moves gets an entry with its new building from the MJD of the move.
+# moves gets an entry with its new building from the MJD of the move. An
+# entry may disable a clock from its date, with disabled: true or
+# enabled: false, and a later one enable it again, with disabled: false or
+# enabled: true; an entry gives one of the two, never both. Nothing tracks a
+# disabled clock.
 clocks:
   mc1:  [{type: mc, location: 3}]
   mc2:  [{type: mc, location: 7}]
   aog4: [{type: aog, location: 3}]
-  cs3:  [{type: cesium}, {effective_mjd: 60950.0, location: 7}]
+  cs3:
+    - {type: cesium}
+    - {effective_mjd: 60950.0, location: 7}
+    - {effective_mjd: 60960.0, disabled: true}
+    - {effective_mjd: 60965.0, enabled: true}
   rb5:  [{type: fountain}]
   ox6:  [{filter_states: 2, time_constant: 60.0, scale_time_constant: 50.0, initial_innovation_scale: 5.0, gap_limit: 432, location: 9}]
   hm7:

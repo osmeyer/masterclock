@@ -22,7 +22,8 @@ prediction standing (:func:`hold`); a series with no valid state is dormant
 against :func:`anchor_of`) until three agree, and starts again from the
 third alone (:func:`cold_start`). :func:`finish` builds the row from the
 draft once, and checks it. Every row goes into the series' file but a
-dormant one with no measurement (:func:`writes_row`).
+dormant one with no measurement (:func:`writes_row`). A disabled pair is not
+tracked at all: :func:`disabled_step` gives its row, of flag O alone.
 
 A measurement is accepted when it passes the gate (:func:`within_gate`,
 :func:`rms_ok`). One that fails is a counted reject (:func:`count_reject`),
@@ -235,7 +236,7 @@ def update(
 
 # ------------------------------------------------------------ row lifecycle
 
-type Outcome = Literal["A", "R", "X", "P"]
+type Outcome = Literal["A", "R", "X", "P", "O"]
 """What an epoch did to a series; every row carries exactly one."""
 
 type Held = Literal["R", "X", "P"]
@@ -411,7 +412,7 @@ def finish(draft: RowDraft, outcome: Outcome) -> Row:
     ----------
     draft : RowDraft
         The row as built so far.
-    outcome : {'A', 'R', 'X', 'P'}
+    outcome : {'A', 'R', 'X', 'P', 'O'}
         The outcome.
 
     Returns
@@ -419,8 +420,8 @@ def finish(draft: RowDraft, outcome: Outcome) -> Row:
     Row
         The checked row, its flags in
         :data:`~masterclock.domain.series.FLAG_ORDER`, with U added to a row
-        of a 2- or 3-state series that is not dormant while its segment has
-        run fewer than :data:`SETTLE_FACTOR` times M rows.
+        of a 2- or 3-state series that is neither dormant nor disabled while
+        its segment has run fewer than :data:`SETTLE_FACTOR` times M rows.
 
     Raises
     ------
@@ -431,6 +432,7 @@ def finish(draft: RowDraft, outcome: Outcome) -> Row:
     flags = draft.flags + outcome
     if (
         "D" not in flags
+        and outcome != "O"
         and draft.time_constant is not None
         and draft.epochs_in_segment < SETTLE_FACTOR * draft.time_constant
     ):
@@ -510,6 +512,72 @@ def writes_row(row: Row) -> bool:
         it is measured again.
     """
     return not ("D" in row.flags and "P" in row.flags)
+
+
+def disabled_step(
+    epoch_start: datetime,
+    series_params: SeriesParams,
+    last_row: Row | None,
+    *,
+    measured: bool,
+    last_segment: int | None = None,
+) -> StepResult:
+    """Give the row of a disabled series at an epoch: no tracking (design 13.6).
+
+    Parameters
+    ----------
+    epoch_start : datetime
+        The epoch start E.
+    series_params : SeriesParams
+        The settings in force at E, whose model and time constants the row
+        takes.
+    last_row : Row or None
+        The series' row of the epoch before E, when it was tracked then;
+        ``None`` otherwise.
+    measured : bool
+        Whether the series has a reading at E.
+    last_segment : int or None, optional
+        With no ``last_row``, the segment of the series' newest row;
+        ``None`` for a new series.
+
+    Returns
+    -------
+    StepResult
+        With a reading, a row of flag O alone: no state, innovation,
+        counters or buffer, in the segment of the row before it, 0 for a new
+        series, so a series enabled again starts in the next. With none, a
+        dormant row with no measurement, which is not written (see
+        :func:`writes_row`). Never a cold start.
+
+    Raises
+    ------
+    FilterError
+        If the row breaks a rule of :class:`Row`.
+    """
+    if last_row is not None:
+        segment = last_row.segment
+    else:
+        segment = 0 if last_segment is None else last_segment
+    draft = RowDraft(
+        interpolated_datetime=epoch_start,
+        innovation=None,
+        x_fs=None,
+        y=None,
+        d=None,
+        innovation_scale=None,
+        segment=segment,
+        step_offset=0,
+        epochs_in_segment=0,
+        epochs_since_accept=0,
+        consecutive_rejects=0,
+        rejects=(),
+        filter_states=series_params.filter_states,
+        time_constant=series_params.M,
+        scale_time_constant=series_params.M_sigma,
+        flags="",
+    )
+    row = finish(draft, "O") if measured else dormant(draft, "P")
+    return StepResult(row=row, cold_started=False)
 
 
 def hold(

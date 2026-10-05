@@ -8,7 +8,9 @@ epoch start are worked out from the MJD, the offset exactly from the
 datetimes, and none of them can be passed in; an epoch starts at midnight
 and every epoch after; a slip correction moves the cycle count and z by
 whole periods and marks it; a pair or triple measurement gives the filter
-step its plain values; and a triple's sigma may be zero.
+step its plain values; a triple's sigma may be zero; and a disabled pair's
+reading holds its MJD, phase and rms, with no cycle count, the z it carries
+or none, and its time and epoch worked out from the MJD.
 
 The ranges of a measurement's values are checked where a measurement is
 read back from a file, and tested there (das_processor/test_files.py).
@@ -24,6 +26,7 @@ from masterclock.app.timeutil import mjd_to_datetime
 from masterclock.domain.double_difference import TripleValue
 from masterclock.domain.filter import FilterInput
 from masterclock.domain.measurements import (
+    DisabledReading,
     PairMeasurement,
     TripleMeasurement,
     epoch_start,
@@ -195,3 +198,26 @@ def test_a_triple_sigma_may_be_zero() -> None:
         z=1, double_difference_sigma=0.0, components_used="111", pair_cold_started=False
     )
     assert triple_measurement.filter_input().scale_floor == 0.0
+
+
+@pytest.mark.parametrize("carried_z", [1_234_577, None])
+def test_a_disabled_reading_holds_the_reading_and_the_z_it_carries(
+    carried_z: int | None,
+) -> None:
+    """Keep the reading as the DAS gave it, and the carried z or none (5.4)."""
+    disabled_reading = DisabledReading(
+        measurement_mjd=60941.251588, measured_phase=34579, rms=3, z=carried_z
+    )
+    assert (
+        disabled_reading.measured_phase,
+        disabled_reading.rms,
+        disabled_reading.z,
+        disabled_reading.measurement_datetime,
+        disabled_reading.interpolated_datetime,
+    ) == (
+        34579,
+        3,
+        carried_z,
+        mjd_to_datetime(60941.251588),
+        datetime(2025, 9, 23, 6, 0, tzinfo=UTC),
+    )

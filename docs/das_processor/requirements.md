@@ -1,6 +1,6 @@
 # das_processor requirements
 
-**Date:** 2026-10-05 09:31:48 UTC
+**Date:** 2026-10-05 14:34:32 UTC
 
 This document lists what `das_processor` must do, as numbered requirements a test or a reader can check.
 The [design](design.md) says how it does each one, and the [user manual](user_manual.md) says how to use it.
@@ -64,6 +64,7 @@ Its record has gaps, restarted clocks, deliberate changes to the references, ins
 | Gate | The test a measurement must pass to be accepted |
 | Segment | A run of rows of a series between restarts of its estimator |
 | Dormant | Having no estimate to predict from, so measurements are only gathered |
+| Disabled | Set aside by the clock configuration from a date: a disabled clock is not tracked, and its measurements are never used |
 | Building | Where a clock is; a triple needs its s and c in the same building |
 
 ## 3. Context
@@ -109,8 +110,8 @@ flowchart LR
 | IN-9 | For a setting that accepts it, the literal `None`, from either source, sets no value; an option left off the command line takes the file's value. | §15.1 |
 | IN-10 | Before it changes anything, it refuses a run whose data or steering directory cannot be listed, whose clock configuration file cannot be read, or whose processed directory is there but is not a directory it can write into. | §6.1 |
 | IN-11 | It reads the clock configuration once, at the start of a run, and refuses a file with a key repeated in any mapping, a YAML merge key, or a key it does not read. | §15.2 |
-| IN-12 | It refuses a clock configuration in which a clock has no entry; a clock's first entry gives neither a type the file defines nor, undated, every setting itself; a later entry gives a type; a reference is not of type <!-- figure: REFERENCE_TYPE -->`mc`<!-- end figure -->; an entry changes a clock's number of estimator states; a time constant is missing for 2 or 3 states or given for 1; a value is out of its range; a clock is ignored twice or ignored and given entries; or the rejects that make a series dormant are fewer than 3 or more than any clock's gap limit at any date. | §15.2 |
-| IN-13 | A clock's settings at an epoch are its type's default, or its first entry's own, with every entry in force at the epoch applied in date order; an entry's location places the clock in a building from the entry's date. | §15.2 |
+| IN-12 | It refuses a clock configuration in which a clock has no entry; a clock's first entry gives neither a type the file defines nor, undated, every setting itself; a later entry gives a type; an entry gives both `disabled` and `enabled`; a reference is not of type <!-- figure: REFERENCE_TYPE -->`mc`<!-- end figure -->; an entry changes a clock's number of estimator states; a time constant is missing for 2 or 3 states or given for 1; a value is out of its range; a clock is ignored twice or ignored and given entries; or the rejects that make a series dormant are fewer than 3 or more than any clock's gap limit at any date. | §15.2 |
+| IN-13 | A clock's settings at an epoch are its type's default, or its first entry's own, with every entry in force at the epoch applied in date order; an entry's location places the clock in a building from the entry's date, and an entry's `disabled: true` or `enabled: false` disables the clock from its date, until an entry's `disabled: false` or `enabled: true` enables it again. | §15.2 |
 | IN-14 | It leaves out every measurement and series of a clock the clock configuration does not name: silently when the configuration lists the clock to ignore, and otherwise logging the clock at WARNING when it is first found so in a run and whenever it returns after an epoch without it. A series is left out when its clock side, its last name, is such a clock. | §15.2, §16.2 |
 
 ### 4.2 Processing (PR)
@@ -138,6 +139,9 @@ flowchart LR
 | PR-19 | When a clock measured against two or more references shows a whole number of periods between its pairs, it corrects the pair that slipped and marks its row, or, when it cannot tell which, excludes those pairs for the epoch. | §11 |
 | PR-20 | A triple's value is the accepted measurement of (s, c) plus half the difference of the accepted measurements of (r, s) and (s, r); with one link direction missing, the predicted round trip of the link stands in for it. A triple is built only from accepted pair measurements, never from the pairs' estimates. | §12 |
 | PR-21 | A local triple's value is its pair's measurement exactly; any other value stops the run before the epoch is written. | §12.4 |
+| PR-22 | A pair is disabled at an epoch when either of its clocks is. A disabled pair is not predicted, decycled, screened, checked for slips, gated or updated, and its reading is never accepted. | §13.6 |
+| PR-23 | Triples, screening and the slip check treat a disabled clock as if it was missing from the epoch's DAS data; a disabled reference is not one of the epoch's references. | §13.6 |
+| PR-24 | A pair whose clocks are enabled again starts afresh, dormant, in the segment after its last row's. | §13.6 |
 
 ### 4.3 Output (OUT)
 
@@ -147,10 +151,11 @@ flowchart LR
 | OUT-2 | Every line of an output file, its header included, is ASCII text of one fixed width for its kind of file, ending in a newline. | §5.2 |
 | OUT-3 | A file's header, written with its first row, says what the file holds and what every column means, and warns that only das_processor may change it. | §5.2 |
 | OUT-4 | Each row of a series holds the series' epoch, its measurement when it has one, its estimate, its counters and its flags, in the columns of its kind of file; every value read back from a row gives the same row again exactly. | §5.4, §5.5 |
-| OUT-5 | A series writes one row for every epoch it is in, except while it is dormant with no measurement. | §13.3 |
+| OUT-5 | A series writes one row for every epoch it is in, except while it is dormant with no measurement or disabled with no reading. | §13.3, §13.6 |
 | OUT-6 | A row is never changed once written. Rows are removed only by a redo, a recovery from a stopped write, or the cut-back that follows a damaged file, and each removes the same epochs from every file of the channel. | §1.3, §6.5, §6.7 |
 | OUT-7 | The data files are byte-for-byte the same whether the epochs were processed in one run or one epoch per run, whether or not a run was interrupted and resumed, and with or without worker processes. | §1.3, §6.4, §6.8 |
 | OUT-8 | It writes rows to the files once a UTC day, after the day's last epoch, and when a run stops, and flushes the files to the storage device only when the run stops. | §5.8 |
+| OUT-9 | A disabled pair's row holds the reading's time, phase and RMS, no cycle count, the z of the pair's newest row or none when that row has none, no estimate, and the single flag O. | §5.4, §13.6 |
 
 ### 4.4 Operation (OP)
 
@@ -175,7 +180,7 @@ flowchart LR
 | ER-1 | It exits with status 0 when a run finishes, 2 for a usage error such as a required setting given by neither source, and 1 for any other failure. | §6.1 |
 | ER-2 | It starts logging from the logging settings before checking any other setting, so every later failure is logged at ERROR. A failure that keeps logging from starting, or a failure in a setting or path when the log level is `None`, is printed on standard error. | §6.1, §16 |
 | ER-3 | Every log record is one line, timed in UTC with the MJD beside it; the log file rolls over at midnight UTC and keeps the configured number of old files, or all of them. | §16.2 |
-| ER-4 | It logs at WARNING each refused DAS line, each counted reject that ends in neither a step nor dormancy, each screening and undecided slip finding, and each cut-back of files; at INFO each epoch's counts and each step, restart, dormancy, stop, configuration change, corrected slip and redo; at DEBUG each series' outcome; and at TRACE each prediction and update. | §16.2 |
+| ER-4 | It logs at WARNING each refused DAS line, each counted reject that ends in neither a step nor dormancy, each screening and undecided slip finding, and each cut-back of files; at INFO each epoch's counts and each step, restart, dormancy, stop, configuration change, clock disabled or enabled again, corrected slip and redo; at DEBUG each series' outcome; and at TRACE each prediction and update. | §16.2 |
 | ER-5 | A failure before an epoch's rows are written changes no file. | §5.8, §6.6 |
 | ER-6 | It checks that every value fits its column, every file it will append to is whole, and the free space covers every byte, before writing any byte. | §5.8 |
 

@@ -2,10 +2,11 @@
 
 Each worker process owns a fixed share of the series, the pairs and the
 triples whose name falls to it (:func:`owner_of`), and keeps their newest
-rows and settings from epoch to epoch, so a series' state never crosses
-between processes. The main process builds each epoch, screens it and
-checks it for slips, and writes the rows; the workers do the rest of each
-series' work, with the same functions a run without workers uses
+rows and settings from epoch to epoch, with each pair's newest z for a
+disabled row to carry, so a series' state never crosses between processes.
+The main process builds each epoch, screens it and checks it for slips, and
+writes the rows; the workers do the rest of each series' work, with the
+same functions a run without workers uses
 (:mod:`masterclock.das_processor.run`), so every series is worked out the
 same way whichever process works it.
 
@@ -62,8 +63,9 @@ from masterclock.das_processor.files import (
     DdiffRecord,
     FileKind,
     MeasRecord,
-    read_last_row,
+    read_last_record,
     record_line,
+    record_z,
 )
 from masterclock.das_processor.read_cd5m5m import DASData
 from masterclock.das_processor.read_steering import SteeringFiles
@@ -229,6 +231,9 @@ class RecordCapture(logging.Handler):
 class SeriesShard:
     """A share of the series: their newest rows, settings and epoch's work.
 
+    Each pair's newest z is kept beside its newest row, for a disabled
+    pair's row to carry.
+
     Parameters
     ----------
     processed_path : Path
@@ -252,6 +257,7 @@ class SeriesShard:
         self._channel: RfChannel = channel
         self._capture = capture
         self._newest_rows: dict[SeriesKey, Row] = {}
+        self._newest_z: dict[PairKey, int | None] = {}
         self._series_params: dict[SeriesKey, SeriesParams] = {}
         self._task: EpochTask | None = None
         self._last_rows: dict[SeriesKey, Row] = {}
@@ -298,6 +304,8 @@ class SeriesShard:
             task.pairs,
             task.readings,
             self._last_rows,
+            self._series_params,
+            self._newest_z,
         )
         return PairsStarted(
             innovations=self._pair_start.innovations,
@@ -351,7 +359,9 @@ class SeriesShard:
             step_results,
             pair_start.predictions,
             {
-                pair: MeasRecord(measurements.get(pair), step_result.row)
+                pair: run.pair_record(
+                    pair, step_result, measurements, pair_start.disabled_readings
+                )
                 for pair, step_result in step_results.items()
                 if writes_row(step_result.row)
             },
@@ -433,7 +443,8 @@ class SeriesShard:
         Returns
         -------
         Row or None
-            Its newest row; ``None`` for a series with no file yet.
+            Its newest row; ``None`` for a series with no file yet. A pair's
+            newest z is kept with it.
 
         Raises
         ------
@@ -445,9 +456,26 @@ class SeriesShard:
             data_file = series_file(self._processed_path, self._channel, series_key)
             if data_file.exists():
                 file_kind: FileKind = "meas" if len(series_key) == _PAIR else "ddiff"
-                newest_row = read_last_row(data_file, file_kind)
-                self._newest_rows[series_key] = newest_row
+                newest_record = read_last_record(data_file, file_kind)
+                newest_row = newest_record.row
+                self._keep_newest(series_key, newest_record)
         return newest_row
+
+    def _keep_newest(
+        self, series_key: SeriesKey, newest_record: MeasRecord | DdiffRecord
+    ) -> None:
+        """Keep a series' newest row, and a pair's newest z.
+
+        Parameters
+        ----------
+        series_key : series key
+            The series.
+        newest_record : MeasRecord or DdiffRecord
+            Its newest record, as its file holds it.
+        """
+        self._newest_rows[series_key] = newest_record.row
+        if isinstance(newest_record, MeasRecord):
+            self._newest_z[(series_key[0], series_key[1])] = record_z(newest_record)
 
     def _done[KeyT: SeriesKey](
         self,
@@ -484,6 +512,8 @@ class SeriesShard:
             line_text, kept_row = record_line(file_record)
             lines.append((series_key, line_text))
             self._newest_rows[series_key] = kept_row
+            if isinstance(file_record, MeasRecord):
+                self._newest_z[(series_key[0], series_key[1])] = record_z(file_record)
         accepted_count = sum("A" in done.row.flags for done in step_results.values())
         log_records: list[tuple[SeriesKey, list[logging.LogRecord]]] = []
         if _log.isEnabledFor(logging.WARNING):

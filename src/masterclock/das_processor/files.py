@@ -19,7 +19,8 @@ from outside the program: its values are checked by pydantic models, the
 row against every rule a row keeps, and it is formatted again and must give
 the same line, so a line is accepted only in the one form das_processor
 writes. The measurement file holds no innovation, so a measurement row
-reads back without one.
+reads back without one. A disabled pair's row (O) holds its reading with no
+cycle count and the z of the pair's newest row, or none.
 
 Rows are buffered and written a day at a time (:func:`write_buffer`), every
 check made before the first byte, under a write journal that names the
@@ -29,7 +30,8 @@ run that starts checks every file, and cuts every file back to before the
 epoch a journal names and to the last good row of any damaged file, so the
 files stay in step (:func:`cut_epoch`, :func:`roll_back`,
 :func:`read_journal`). Files may end at different epochs: a series writes no
-row for an epoch it is not in, nor while it is dormant with no measurement.
+row for an epoch it is not in, nor while it is dormant with no measurement
+or disabled with no reading.
 """
 
 import dataclasses
@@ -61,11 +63,16 @@ from masterclock.das_processor.epochs import floor_to_ten_minutes, format_epoch
 from masterclock.das_processor.exceptions import DataFileError
 from masterclock.das_processor.read_cd5m5m import RMS_WIDTH
 from masterclock.domain.exceptions import FilterError, PhaseError
-from masterclock.domain.measurements import PairMeasurement, TripleMeasurement
+from masterclock.domain.measurements import (
+    DisabledReading,
+    PairMeasurement,
+    TripleMeasurement,
+)
 from masterclock.domain.phase import EPOCH_SECONDS, FS_PER_PS, PHASE_MAX
 from masterclock.domain.references import REFERENCE_PATTERN
 from masterclock.domain.series import (
     FilterStates,
+    PairKey,
     Reject,
     Row,
     SeriesKey,
@@ -127,8 +134,8 @@ _STATE_COLUMNS: Final[tuple[Column, ...]] = (
     Column(
         "flags",
         8,
-        "A accepted, R rejected, X excluded, P predicted, D dormant,"
-        " S slip corrected, N new segment, U unsettled",
+        "A accepted, R rejected, X excluded, P predicted, O disabled,"
+        " D dormant, S slip corrected, N new segment, U unsettled",
     ),
 )
 """The columns every row ends with: the estimator's state and counters."""
@@ -139,7 +146,7 @@ MEAS_COLUMNS: Final[tuple[Column, ...]] = (
     Column("measurement_mjd", 13, "measurement time, MJD"),
     Column("measured_phase", 6, "raw phase from the DAS, ps"),
     Column("rms", RMS_WIDTH, "RMS from the DAS, ps"),
-    Column("cycle_count", 12, "whole periods added in decycling"),
+    Column("cycle_count", 12, "whole periods added in decycling; - when disabled"),
     Column("z", 16, "decycled phase interpolated to E, ps"),
     *_STATE_COLUMNS,
 )
@@ -267,9 +274,9 @@ class MeasRecord:
 
     Parameters
     ----------
-    measurement : PairMeasurement or None
-        The pair's measurement at the epoch, or ``None`` when there was
-        none.
+    measurement : PairMeasurement or DisabledReading or None
+        The pair's measurement at the epoch; its reading while it is
+        disabled; or ``None`` when there was none.
     row : Row
         The pair's row at the epoch; its innovation is not written.
 
@@ -277,11 +284,13 @@ class MeasRecord:
     ------
     DataFileError
         If there is a measurement and the row is P or the other way round,
-        the measurement is of another epoch than the row's, or the
-        measurement's slip correction and the row's S do not go together.
+        the measurement is of another epoch than the row's, it is a
+        disabled reading and the row is not O or the other way round, or
+        the measurement's slip correction and the row's S do not go
+        together.
     """
 
-    measurement: PairMeasurement | None
+    measurement: PairMeasurement | DisabledReading | None
     row: Row
 
     def __post_init__(self) -> None:
@@ -302,6 +311,13 @@ class MeasRecord:
                 f"row of {self.row.interpolated_datetime}: its measurement is of"
                 f" the epoch of {self.measurement.interpolated_datetime}"
             )
+        if isinstance(self.measurement, DisabledReading) != ("O" in self.row.flags):
+            _fail(
+                f"row of {self.row.interpolated_datetime}: a disabled reading goes"
+                f" with flag O and O with a disabled reading; flags {self.row.flags!r}"
+            )
+        if isinstance(self.measurement, DisabledReading):
+            return
         if self.measurement.slip != ("S" in self.row.flags):
             _fail(
                 f"row of {self.row.interpolated_datetime}: a slip correction"
@@ -662,20 +678,42 @@ def format_meas_row(meas_record: MeasRecord) -> str:
     column_texts: list[str | None] = list(_mark_texts(row.interpolated_datetime))
     if pair_measurement is None:
         column_texts += [None] * 6
+    elif isinstance(pair_measurement, DisabledReading):
+        column_texts += [
+            *_reading_texts(pair_measurement),
+            None,
+            None if pair_measurement.z is None else str(pair_measurement.z),
+        ]
     else:
         column_texts += [
-            pair_measurement.measurement_datetime.isoformat(
-                sep=" ", timespec="microseconds"
-            ),
-            f"{pair_measurement.measurement_mjd:.{_MJD_DECIMALS}f}",
-            str(pair_measurement.measured_phase),
-            str(pair_measurement.rms),
+            *_reading_texts(pair_measurement),
             str(pair_measurement.cycle_count),
             str(pair_measurement.z),
         ]
     return _joined(
         MEAS_COLUMNS, column_texts + _state_texts(row), row.interpolated_datetime
     )
+
+
+def _reading_texts(reading: PairMeasurement | DisabledReading) -> list[str | None]:
+    """Write a reading's time, MJD, phase and rms columns.
+
+    Parameters
+    ----------
+    reading : PairMeasurement or DisabledReading
+        The reading.
+
+    Returns
+    -------
+    list of (str or None)
+        The four columns' texts.
+    """
+    return [
+        reading.measurement_datetime.isoformat(sep=" ", timespec="microseconds"),
+        f"{reading.measurement_mjd:.{_MJD_DECIMALS}f}",
+        str(reading.measured_phase),
+        str(reading.rms),
+    ]
 
 
 def format_ddiff_row(ddiff_record: DdiffRecord) -> str:
@@ -811,6 +849,38 @@ class PairMeasurementFields(BaseModel):
             The measurement.
         """
         return PairMeasurement(**dict(self))
+
+
+class DisabledReadingFields(BaseModel):
+    """A disabled pair's reading as read back from a measurement file.
+
+    The fields are a :class:`~masterclock.domain.measurements.DisabledReading`'s,
+    with the same names, order and meanings.
+
+    Raises
+    ------
+    pydantic.ValidationError
+        If a field is of the wrong kind, missing or unknown, the MJD is not
+        finite, the reading is outside 0 to
+        :data:`~masterclock.domain.phase.PHASE_MAX`, or the rms is below 0.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
+
+    measurement_mjd: Annotated[float, Field(allow_inf_nan=False)]
+    measured_phase: Annotated[int, Field(ge=0, le=PHASE_MAX)]
+    rms: Annotated[int, Field(ge=0)]
+    z: int | None
+
+    def reading(self) -> DisabledReading:
+        """Give the reading the fields make.
+
+        Returns
+        -------
+        DisabledReading
+            The reading.
+        """
+        return DisabledReading(**dict(self))
 
 
 class TripleMeasurementFields(BaseModel):
@@ -1057,7 +1127,7 @@ def _row(
 
 def _pair_measurement(
     measurement_texts: list[str | None], flags: str
-) -> PairMeasurement | None:
+) -> PairMeasurement | DisabledReading | None:
     """Build a pair's measurement from its columns.
 
     Parameters
@@ -1065,21 +1135,26 @@ def _pair_measurement(
     measurement_texts : list of (str or None)
         The six measurement columns' fields.
     flags : str
-        The row's flags, whose S marks a slip correction.
+        The row's flags, whose S marks a slip correction and O a disabled
+        pair.
 
     Returns
     -------
-    PairMeasurement or None
-        The measurement, or ``None`` when every field is empty.
+    PairMeasurement or DisabledReading or None
+        The measurement; for an O row, the disabled reading; ``None`` when
+        every field is empty.
 
     Raises
     ------
     ValueError
         If a field is not of its kind, or the fields do not make a
-        measurement.
+        measurement: on an O row a cycle count is given, or on another
+        row a field is empty.
     """
     if all(field_text is None for field_text in measurement_texts):
         return None
+    if "O" in flags:
+        return _disabled_reading(measurement_texts)
     _, mjd_text, phase_text, rms_text, cycles_text, z_text = (
         _given(field_text) for field_text in measurement_texts
     )
@@ -1093,6 +1168,39 @@ def _pair_measurement(
             "slip": "S" in flags,
         }
     ).measurement()
+
+
+def _disabled_reading(measurement_texts: list[str | None]) -> DisabledReading:
+    """Build a disabled pair's reading from its columns.
+
+    Parameters
+    ----------
+    measurement_texts : list of (str or None)
+        The six measurement columns' fields.
+
+    Returns
+    -------
+    DisabledReading
+        The reading, with the z it carries or none.
+
+    Raises
+    ------
+    ValueError
+        If a field is not of its kind, a reading field is empty, or a cycle
+        count is given, which a reading never decycled has none of.
+    """
+    _, mjd_text, phase_text, rms_text, cycles_text, z_text = measurement_texts
+    if cycles_text is not None:
+        message = "a disabled pair's row has no cycle count"
+        raise ValueError(message)
+    return DisabledReadingFields.model_validate(
+        {
+            "measurement_mjd": _float_value(_given(mjd_text)),
+            "measured_phase": int(_given(phase_text)),
+            "rms": int(_given(rms_text)),
+            "z": None if z_text is None else int(z_text),
+        }
+    ).reading()
 
 
 def _attempt[RecordT: (MeasRecord, DdiffRecord)](
@@ -1645,6 +1753,23 @@ _FILE_KIND_ORDER: Final[dict[FileKind, int]] = {"meas": 0, "ddiff": 1}
 """The order the kinds of file are written in: measurement files first."""
 
 
+def record_z(file_record: MeasRecord) -> int | None:
+    """Give the z a pair's record holds, which a disabled row after it carries.
+
+    Parameters
+    ----------
+    file_record : MeasRecord
+        A pair's measurement and row at an epoch.
+
+    Returns
+    -------
+    int or None
+        The z of its measurement or of its disabled reading; ``None`` for
+        a row without one.
+    """
+    return None if file_record.measurement is None else file_record.measurement.z
+
+
 def record_line(file_record: MeasRecord | DdiffRecord) -> tuple[str, Row]:
     """Write a series' record as its file's line, and give the row to keep.
 
@@ -1696,6 +1821,9 @@ class DayBuffer:
         newline.
     last_rows : dict of series key to Row
         Each series' newest row, as a later run would read it back.
+    last_z : dict of (str, str) to int or None
+        Each pair's newest z, as a later run would read it back; ``None``
+        for a row without one. A disabled pair's row carries it.
     earliest_epoch : datetime or None
         The earliest epoch of the rows since the last write; ``None`` when
         there are none.
@@ -1728,6 +1856,7 @@ class DayBuffer:
         self.rows_added = 0
         self.file_lines: dict[Path, list[str]] = {}
         self.last_rows: dict[SeriesKey, Row] = {}
+        self.last_z: dict[PairKey, int | None] = {}
         self.journal_written = False
         self.unflushed_files: set[Path] = set()
         self.unflushed_directories: set[Path] = set()
@@ -1770,6 +1899,8 @@ class DayBuffer:
         line_text, kept_row = record_line(file_record)
         self.file_lines.setdefault(data_file, []).append(line_text)
         self.last_rows[series_key] = kept_row
+        if isinstance(file_record, MeasRecord):
+            self.last_z[(series_key[0], series_key[1])] = record_z(file_record)
         self._started(kept_row.interpolated_datetime)
 
     def add_line(
@@ -1876,6 +2007,7 @@ class DayBuffer:
             self._file_series[data_file] = newer_buffer.series_of(data_file)
             self.file_lines.setdefault(data_file, []).extend(new_lines)
         self.last_rows.update(newer_buffer.last_rows)
+        self.last_z.update(newer_buffer.last_z)
         self._started(newer_buffer.earliest_epoch, newer_buffer.rows_added)
 
     def series_of(self, data_file: Path) -> tuple[FileKind, SeriesKey]:
@@ -2191,8 +2323,8 @@ def _keep_through(
     -----
     A file's rows are in time order, though an epoch may have none: a
     series writes no row while it is left out of the epochs, nor while it
-    is dormant with no measurement. The rows kept
-    are found by a binary search over the line slots, a slot that is not a
+    is dormant with no measurement or disabled with no reading. The rows
+    kept are found by a binary search over the line slots, a slot that is not a
     good row counting as after ``last_kept_epoch``: every row up to it is
     good, so the damage lies after it.
     """

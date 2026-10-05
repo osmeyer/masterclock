@@ -14,7 +14,8 @@ right width with a field wider than its column included, which the file
 check then counts as damaged with nothing logged; and a record pairs its
 measurement with its row consistently: a measurement exactly when the row is
 not P, of the row's epoch, a pair's slip correction exactly when the row
-carries S, and S never on a triple.
+carries S, S never on a triple, and a disabled pair's reading exactly when
+the row is O, written with no cycle count and the z it carries, or none.
 
 The file check: a file whose length is its header plus whole rows, with a
 last row that parses, is sound and good through that row, its other rows
@@ -90,6 +91,7 @@ from masterclock.das_processor import files
 from masterclock.das_processor.exceptions import DataFileError
 from masterclock.das_processor.read_cd5m5m import RMS_MAX
 from masterclock.domain.measurements import (
+    DisabledReading,
     PairMeasurement,
     TripleMeasurement,
     measure_pair,
@@ -253,7 +255,7 @@ def test_the_measurement_header_is_the_design_s() -> None:
     assert header_lines[6] == "#   interpolated_datetime   epoch start E, UTC"
     assert header_lines[32] == (
         "#   flags                   A accepted, R rejected, X excluded, P predicted,"
-        " D dormant, S slip corrected, N new segment, U unsettled"
+        " O disabled, D dormant, S slip corrected, N new segment, U unsettled"
     )
 
 
@@ -554,6 +556,79 @@ def test_a_measurement_belongs_to_its_row_s_epoch() -> None:
         )
 
 
+# ---------------------------------------------------------- disabled pairs
+
+DISABLED_READING: Final = DisabledReading(
+    measurement_mjd=60941.251588, measured_phase=34579, rms=3, z=1_234_577
+)
+"""Appendix A's reading, taken while its pair is disabled, carrying z."""
+
+
+@pytest.mark.parametrize(("carried_z", "z_text"), [(1_234_577, "1234577"), (None, "-")])
+def test_a_disabled_row_writes_the_reading_no_cycle_count_and_the_carried_z(
+    carried_z: int | None, z_text: str
+) -> None:
+    """Write the reading, '-' for the cycle count, z or '-', no state, O (5.4)."""
+    file_record = files.MeasRecord(
+        measurement=dataclasses.replace(DISABLED_READING, z=carried_z),
+        row=disabled_row(E, 3, 4),
+    )
+    row_line = files.format_meas_row(file_record)
+    field_texts = [field_text.strip() for field_text in row_line.split(", ")]
+    assert field_texts[2:12] == [
+        "2025-09-23 06:02:17.203200+00:00",
+        "60941.251588",
+        "34579",
+        "3",
+        "-",
+        z_text,
+        "-",
+        "-",
+        "-",
+        "-",
+    ]
+    assert field_texts[-1] == "O"
+    assert files.parse_meas_row(row_line) == file_record
+
+
+def test_a_disabled_reading_goes_with_an_o_row_and_only_with_one() -> None:
+    """Refuse a disabled reading on a tracked row, and a measurement on an O row."""
+    with pytest.raises(DataFileError, match="disabled"):
+        files.MeasRecord(measurement=DISABLED_READING, row=worked_row())
+    with pytest.raises(DataFileError, match="disabled"):
+        files.MeasRecord(measurement=APPENDIX_A_MEASUREMENT, row=disabled_row(E, 3, 4))
+    with pytest.raises(DataFileError, match="measurement"):
+        files.MeasRecord(measurement=None, row=disabled_row(E, 3, 4))
+
+
+def test_a_disabled_reading_belongs_to_its_row_s_epoch() -> None:
+    """Refuse a disabled reading taken in another epoch than its row's."""
+    with pytest.raises(DataFileError, match="epoch"):
+        files.MeasRecord(
+            measurement=DISABLED_READING, row=disabled_row(E + ONE_EPOCH, 3, 4)
+        )
+
+
+def test_a_cycle_count_is_written_exactly_when_the_row_is_not_disabled() -> None:
+    """Refuse an O line with a cycle count, and a tracked line without one."""
+    disabled_line = files.format_meas_row(
+        files.MeasRecord(measurement=DISABLED_READING, row=disabled_row(E, 3, 4))
+    )
+    with_cycle_count = disabled_line.replace(
+        ",            -,          1234577,", ",            6,          1234577,"
+    )
+    assert with_cycle_count != disabled_line
+    with pytest.raises(DataFileError, match="does not parse"):
+        files.parse_meas_row(with_cycle_count)
+    tracked_line = MEAS_EXAMPLE[0]
+    without_cycle_count = tracked_line.replace(
+        ",            6,          1234577,", ",            -,          1234577,"
+    )
+    assert without_cycle_count != tracked_line
+    with pytest.raises(DataFileError, match="does not parse"):
+        files.parse_meas_row(without_cycle_count)
+
+
 # ------------------------------------------------------------- round trips
 
 EPOCH_STARTS: Final = st.integers(min_value=0, max_value=20 * 365 * 144).map(
@@ -578,6 +653,8 @@ def valid_rows(draw: st.DrawFn, *, has_measurement: bool, for_pair: bool) -> Row
     """
     epoch_start = draw(EPOCH_STARTS)
     filter_states: Literal[1, 2, 3] = draw(st.sampled_from([1, 2, 3]))
+    if for_pair and has_measurement and draw(st.booleans()):
+        return disabled_row(epoch_start, filter_states, draw(st.integers(0, 10**8)))
     is_dormant = draw(st.booleans())
     allowed_outcomes = ("R", "X") if is_dormant else ("A", "R", "X")
     outcome = draw(st.sampled_from(allowed_outcomes)) if has_measurement else "P"
@@ -588,7 +665,7 @@ def valid_rows(draw: st.DrawFn, *, has_measurement: bool, for_pair: bool) -> Row
         extra_flags.add("U")
     flags = "".join(
         letter
-        for letter in "ARXPDSNU"
+        for letter in "ARXPODSNU"
         if letter in {outcome, *extra_flags, *("D" if is_dormant else "")}
     )
     reject_count = draw(st.integers(min_value=0, max_value=3))
@@ -619,6 +696,30 @@ def valid_rows(draw: st.DrawFn, *, has_measurement: bool, for_pair: bool) -> Row
     )
 
 
+def disabled_row(
+    epoch_start: datetime, filter_states: Literal[1, 2, 3], segment: int
+) -> Row:
+    """Build a disabled pair's row: O alone, no state, the counters at zero."""
+    return Row(
+        interpolated_datetime=epoch_start,
+        innovation=None,
+        x_fs=None,
+        y=None,
+        d=None,
+        innovation_scale=None,
+        segment=segment,
+        step_offset=0,
+        epochs_in_segment=0,
+        epochs_since_accept=0,
+        consecutive_rejects=0,
+        rejects=(),
+        filter_states=filter_states,
+        time_constant=100.0 if filter_states > 1 else None,
+        scale_time_constant=50.0,
+        flags="O",
+    )
+
+
 @st.composite
 def meas_records(draw: st.DrawFn) -> files.MeasRecord:
     """Draw a valid measurement file record."""
@@ -628,6 +729,14 @@ def meas_records(draw: st.DrawFn) -> files.MeasRecord:
         return files.MeasRecord(measurement=None, row=drawn_row)
     epoch_mjd = datetime_to_mjd(drawn_row.interpolated_datetime)
     offset_us = draw(st.integers(min_value=1, max_value=6_900))
+    if "O" in drawn_row.flags:
+        disabled_reading = DisabledReading(
+            measurement_mjd=round(epoch_mjd + offset_us * 1e-6, 6),
+            measured_phase=draw(st.integers(0, PHASE_MAX)),
+            rms=draw(st.integers(0, RMS_MAX)),
+            z=draw(st.one_of(st.none(), st.integers(-(10**14), 10**14))),
+        )
+        return files.MeasRecord(measurement=disabled_reading, row=drawn_row)
     pair_measurement = PairMeasurement(
         measurement_mjd=round(epoch_mjd + offset_us * 1e-6, 6),
         measured_phase=draw(st.integers(0, PHASE_MAX)),
@@ -1048,6 +1157,56 @@ def test_the_newest_row_is_the_one_a_later_run_reads(tmp_path: Path) -> None:
     day_buffer.add(meas / "das_a.mc2.ox23.dat", PAIR_KEY, file_record)
     assert day_buffer.last_rows[PAIR_KEY].innovation is None
     assert day_buffer.last_rows[PAIR_KEY] == worked_row()
+
+
+@pytest.mark.parametrize(
+    ("measurement", "flags", "kept_z"),
+    [
+        (APPENDIX_A_MEASUREMENT, "A", 1_234_577),
+        (DISABLED_READING, "O", 1_234_577),
+        (dataclasses.replace(DISABLED_READING, z=None), "O", None),
+        (None, "P", None),
+    ],
+)
+def test_a_pair_s_newest_z_is_kept_as_its_file_holds_it(
+    tmp_path: Path,
+    measurement: PairMeasurement | DisabledReading | None,
+    flags: str,
+    kept_z: int | None,
+) -> None:
+    """Keep each pair's newest z, none for a row without one, and move it on take."""
+    meas, ddiff = make_archives(tmp_path)
+    row = disabled_row(E, 3, 4) if flags == "O" else worked_row(flags=flags)
+    epoch_buffer = files.DayBuffer("a")
+    epoch_buffer.add(
+        meas / "das_a.mc2.ox23.dat",
+        PAIR_KEY,
+        files.MeasRecord(measurement=measurement, row=row),
+    )
+    epoch_buffer.add(
+        ddiff / "das_a.mc1.mc2.ox23.dat", TRIPLE_KEY, predicted_triple_record(0)
+    )
+    day_buffer = files.DayBuffer("a")
+    day_buffer.take(epoch_buffer)
+    assert epoch_buffer.last_z == day_buffer.last_z == {PAIR_KEY: kept_z}
+
+
+@pytest.mark.parametrize("flags", ["A", "O"])
+def test_the_last_record_of_a_sound_file_is_read_with_its_z(
+    tmp_path: Path, flags: str
+) -> None:
+    """Read the last record back, a tracked or a disabled pair's, its z kept."""
+    meas, _ = make_archives(tmp_path)
+    file_record = (
+        files.MeasRecord(measurement=DISABLED_READING, row=disabled_row(E, 3, 4))
+        if flags == "O"
+        else files.MeasRecord(measurement=APPENDIX_A_MEASUREMENT, row=worked_row())
+    )
+    day_buffer = files.DayBuffer("a")
+    day_buffer.add(meas / "das_a.mc2.ox23.dat", PAIR_KEY, file_record)
+    files.write_final(day_buffer)
+    assert files.read_last_record(meas / "das_a.mc2.ox23.dat", "meas") == file_record
+    assert files.record_z(file_record) == 1_234_577
 
 
 def test_a_triple_s_newest_row_keeps_its_innovation(tmp_path: Path) -> None:

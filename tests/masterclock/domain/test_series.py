@@ -1,11 +1,13 @@
 """Tests for src/masterclock/domain/series.py.
 
 The rules covered: an estimator state holds its phase exactly; a series'
-settings hold what they are given; a row's flags are letters of ARXPDSNU in
-that order, with exactly one outcome, a dormant row never accepted and an
-unsettled row never dormant or one-state; a dormant row has no state and
-every other row a whole one, with no rate or drift where its model has
-none; a row without a measurement (P) has no innovation; at most three
+settings hold what they are given, a series enabled unless they say
+otherwise; a row's flags are letters of ARXPODSNU in that order, with
+exactly one outcome, a dormant row never accepted, an unsettled row never
+dormant or one-state, and a disabled row's O standing alone; a dormant or
+disabled row has no state and every other row a whole one, with no rate or
+drift where its model has none; a row without a measurement (P), or of a
+disabled series (O), has no innovation; at most three
 rejects are held, oldest first; a time constant is held exactly when the
 model has more than one state; every float is finite and no counter below
 0; a row gives its state unless it is dormant; and every type is frozen.
@@ -120,6 +122,8 @@ def test_settings_hold_what_they_are_given() -> None:
             rms_max=None,
         )
     )
+    assert not make_series_params().disabled
+    assert make_series_params(disabled=True).disabled
 
 
 # --------------------------------------------------------------------- Row
@@ -147,6 +151,8 @@ def test_settings_hold_what_they_are_given() -> None:
         ("R", ONE_STATE_FIELDS),
         ("PD", {"innovation": None, **ONE_STATE_FIELDS, **DORMANT_FIELDS}),
         ("A", {"filter_states": 2, "d": 0.0, "time_constant": 30.0}),
+        ("O", {"innovation": None, **DORMANT_FIELDS}),
+        ("O", {"innovation": None, **ONE_STATE_FIELDS, **DORMANT_FIELDS}),
     ],
 )
 def test_a_row_of_each_flag_pattern_builds(
@@ -170,11 +176,17 @@ def test_a_row_of_each_flag_pattern_builds(
         "AZ",
         "a",
         "AD",
+        "AO",
+        "PO",
+        "OD",
+        "OS",
+        "ON",
+        "OU",
     ],
 )
 def test_flags_need_one_outcome_in_order(flags: str) -> None:
-    """Refuse flags without exactly one of A R X P, out of order, or unknown."""
-    field_changes = DORMANT_FIELDS if "D" in flags else {}
+    """Refuse flags without exactly one of A R X P O, out of order, or unknown."""
+    field_changes = DORMANT_FIELDS if {"D", "O"} & set(flags) else {}
     with pytest.raises(ValueError, match="flags"):
         checked_row(flags=flags, **field_changes)
 
@@ -220,6 +232,20 @@ def test_a_row_has_no_rate_or_drift_its_model_lacks(
     """Refuse a drift on a 2-state row, and a rate or drift on a 1-state row."""
     with pytest.raises(ValueError, match=refusal_reason):
         checked_row(**field_changes)
+
+
+@pytest.mark.parametrize("state_field", ["x_fs", "y", "d", "innovation_scale"])
+def test_a_disabled_row_has_no_state(state_field: str) -> None:
+    """Refuse a disabled row that holds any part of a state: it is not tracked."""
+    row_fields = {**DORMANT_FIELDS, state_field: 1 if state_field == "x_fs" else 1.0}
+    with pytest.raises(ValueError, match="disabled"):
+        checked_row(flags="O", innovation=None, **row_fields)
+
+
+def test_a_disabled_row_has_no_innovation() -> None:
+    """Refuse an innovation on a disabled row, which has no prediction."""
+    with pytest.raises(ValueError, match="innovation"):
+        checked_row(flags="O", innovation=1.5, **DORMANT_FIELDS)
 
 
 def test_a_row_without_a_measurement_has_no_innovation() -> None:

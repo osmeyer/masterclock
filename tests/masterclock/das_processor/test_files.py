@@ -3,16 +3,18 @@
 The rules covered: the column table gives the measurement file a width of
 477 and 33 header lines and the double-difference file 455 and 31; every
 header line is exactly that wide and starts with '#', in the design's order
-with the warning second, and only for its kind of series, which it names
-in words; rows are right-justified fixed-width columns
-separated by ', ', with '-' for an empty field, floats as {:+.16e} and the
-estimator's phase as whole femtoseconds written in ps with three decimals;
-the design's example rows come out byte for byte; a value too wide for its
-column raises DataFileError; parsing a row gives back the record it was
-formatted from and refuses a line that is not exactly what formatting gives
-(U20); and a record pairs its measurement with its row consistently: a
-measurement exactly when the row is not P, of the row's epoch, a pair's
-slip correction exactly when the row carries S, and S never on a triple.
+with the warning second, and only for its kind of series, which it names in
+words; rows are right-justified fixed-width columns separated by ', ', with
+'-' for an empty field, floats as {:+.16e} and the estimator's phase as
+whole femtoseconds written in ps with three decimals; the design's example
+rows come out byte for byte; a value too wide for its column raises
+DataFileError; parsing a row gives back the record it was formatted from and
+refuses a line that is not exactly what formatting gives (U20), one of the
+right width with a field wider than its column included, which the file
+check then counts as damaged with nothing logged; and a record pairs its
+measurement with its row consistently: a measurement exactly when the row is
+not P, of the row's epoch, a pair's slip correction exactly when the row
+carries S, and S never on a triple.
 
 The file check: a file whose length is its header plus whole rows, with a
 last row that parses, is sound and good through that row, its other rows
@@ -819,6 +821,47 @@ def test_a_line_that_is_not_a_row_has_no_epoch(row_line: bytes) -> None:
     """Give no epoch for a header line, a line with no newline, or non-ASCII."""
     assert files.row_epoch(row_line + b"\n", "meas") is None
     assert files.row_epoch(predicted_row_lines(1)[0].encode()[:-1], "meas") is None
+
+
+def with_segment_too_wide(row_line: str) -> str:
+    """Give the line at its width, its segment one character wider than its column.
+
+    The space the segment takes is taken from the padding of a later field.
+    """
+    row_fields = row_line.split(", ")
+    segment_index = [column.name for column in files.MEAS_COLUMNS].index("segment")
+    row_fields[segment_index] = "1" * (len(row_fields[segment_index]) + 1)
+    padded_index = next(
+        field_index
+        for field_index, field_text in enumerate(row_fields)
+        if field_index > segment_index and field_text.startswith("  ")
+    )
+    row_fields[padded_index] = row_fields[padded_index][1:]
+    return ", ".join(row_fields)
+
+
+def test_a_field_too_wide_for_its_column_is_a_damaged_row(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Treat a row of the right width with a field too wide as damaged.
+
+    It has no epoch, nothing is logged for it, the file is good through the
+    row before, and parsing it refuses it as not written as das_processor
+    writes it.
+    """
+    row_lines = predicted_row_lines(2)
+    wide_line = with_segment_too_wide(row_lines[1].removesuffix("\n"))
+    assert len(wide_line) == files.MEAS_WIDTH
+    with caplog.at_level(logging.DEBUG):
+        assert files.row_epoch(f"{wide_line}\n".encode(), "meas") is None
+    assert not caplog.records
+    meas_path = write_meas_file(tmp_path, row_lines[0] + f"{wide_line}\n")
+    assert files.good_through(meas_path, "meas") == E
+    with pytest.raises(DataFileError) as refusal:
+        files.parse_meas_row(wide_line)
+    assert str(refusal.value) == (
+        f"row {wide_line[:25]!r} is not written as das_processor writes it"
+    )
 
 
 def test_a_row_gives_its_epoch() -> None:

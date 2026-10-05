@@ -1115,9 +1115,13 @@ def _attempt[RecordT: (MeasRecord, DdiffRecord)](
     -------
     tuple of (record or None, str, Exception or None)
         The record, or ``None`` with what is wrong with the line and the
-        error that showed it. Nothing is logged, a record's own check
-        included: the caller says what is wrong.
+        error that showed it. A record that formats back to another line,
+        or cannot be formatted back at all, as when the line fits a field
+        wider than its column by narrowing another, is not written as
+        das_processor writes it. Nothing is logged, a record's own checks
+        and the formatting included: the caller says what is wrong.
     """
+    not_written_so = f"row {line[:25]!r} is not written as das_processor writes it"
     quiet_token = _QUIET.set(True)
     try:
         parsed_record = build_record()
@@ -1127,15 +1131,16 @@ def _attempt[RecordT: (MeasRecord, DdiffRecord)](
         PhaseError,
         DataFileError,
     ) as exc:
+        _QUIET.reset(quiet_token)
         return None, f"row {line[:25]!r} does not parse: {describe_error(exc)}", exc
+    try:
+        line_back = format_record(parsed_record)
+    except DataFileError as exc:
+        return None, not_written_so, exc
     finally:
         _QUIET.reset(quiet_token)
-    if format_record(parsed_record) != line:
-        return (
-            None,
-            f"row {line[:25]!r} is not written as das_processor writes it",
-            None,
-        )
+    if line_back != line:
+        return None, not_written_so, None
     return parsed_record, "", None
 
 

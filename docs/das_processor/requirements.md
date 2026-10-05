@@ -1,6 +1,6 @@
 # das_processor requirements
 
-**Date:** 2026-10-05 21:03:12 UTC
+**Date:** 2026-10-05 21:12:57 UTC
 
 This document lists what `das_processor` must do, as numbered requirements a test or a reader can check.
 The [design](design.md) says how it does each one, and the [user manual](user_manual.md) says how to use it.
@@ -90,7 +90,9 @@ flowchart LR
 | INI settings file and command line | in | INI sections `[DAS]`, `[PROCESSED]`, `[LOGGING]` | The operator |
 | Clock configuration | in | YAML | The operator |
 | Measurement and double-difference archives | out | Fixed-width text files, one per series | das_processor |
-| Log | out | One line per record, UTC and MJD | das_processor |
+| Run lock and write journal | out | One small file each per RF channel, beside the archives | das_processor |
+| Log | out | One line per record, a traceback apart, UTC and MJD; to the log file and to standard error | das_processor |
+| Standard error | out | The help, usage errors, and errors when logging cannot start or is off | das_processor |
 | Exit status | out | 0, 1 or 2 | das_processor |
 
 ## 4. Requirements
@@ -104,15 +106,15 @@ flowchart LR
 | IN-3 | It skips, and logs at WARNING with the reason, a DAS line that cannot be read as such a record, that falls outside the day its file is named for, that was taken within <!-- figure: EPOCH_EDGE -->10 s<!-- end figure --> of the end of its epoch, that is earlier than the line accepted before it, or that measures a reference and clock already measured in its epoch. A skipped line changes nothing that later lines are checked against. | §5.3 |
 | IN-4 | It skips, with nothing logged, a DAS line measured against a reference it does not use: <!-- figure: SKIPPED_REFERENCES -->`mc9`<!-- end figure -->. | §5.3 |
 | IN-5 | It stops the run when a DAS file cannot be read, or its last line has no newline. | §5.3, §16.1 |
-| IN-6 | It reads each reference's steering events from the file <!-- figure: STEERING_FILE_TEMPLATE -->`steer_<mc>.dat`<!-- end figure --> in the steering directory, each line an MJD, a phase change in ps and a rate change in ps/s. A reference with no file has never been steered. It stops the run when a steering file that is there cannot be read as text, or has a line that does not parse, is earlier than the line before it, or ends without a newline. | §5.6 |
+| IN-6 | It reads each reference's steering events from the file <!-- figure: STEERING_FILE_TEMPLATE -->`steer_<mc>.dat`<!-- end figure --> in the steering directory, each line an MJD, a phase change in ps and a rate change in ps/s. A reference with no file has never been steered. It stops the run when a steering file that is there is not a regular file, cannot be read as ASCII text, or has a line that does not parse, is earlier than the line before it, or ends without a newline. | §5.6 |
 | IN-7 | It takes its settings from an INI file and from the command line, the command line winning where both give one. It refuses a file that names a section or entry it does not read, holds a `DEFAULT` section, or gives a value on more than one line. | §15.1 |
 | IN-8 | It takes every path as given, and refuses a path that is not absolute. | §15.1 |
 | IN-9 | For a setting that accepts it, the literal `None`, from either source, sets no value; an option left off the command line takes the file's value. | §15.1 |
-| IN-10 | Before it changes anything, it refuses a run whose data or steering directory cannot be listed, whose clock configuration file cannot be read, or whose processed directory is there but is not a directory it can write into. | §6.1 |
+| IN-10 | Before it changes any data file, it refuses a run whose data or steering directory cannot be listed, whose clock configuration file cannot be read, or whose processed directory is there but is not a directory it can write into. | §6.1 |
 | IN-11 | It reads the clock configuration once, at the start of a run, and refuses a file with a key repeated in any mapping, a YAML merge key, or a key it does not read. | §15.2 |
-| IN-12 | It refuses a clock configuration in which a clock has no entry; a clock's first entry gives neither a type the file defines nor, undated, every setting itself; a later entry gives a type; an entry gives both `disabled` and `enabled`; a reference is not of type <!-- figure: REFERENCE_TYPE -->`mc`<!-- end figure -->; an entry changes a clock's number of estimator states; a time constant is missing for 2 or 3 states or given for 1; a value is out of its range; a clock is ignored twice or ignored and given entries; or the rejects that make a series dormant are fewer than 3 or more than any clock's gap limit at any date. | §15.2 |
+| IN-12 | It refuses a clock configuration that cannot be read as YAML, is not a mapping, leaves out a key it needs, or gives a value of the wrong kind or out of its range; and one in which a clock has no entry; a clock's first entry gives neither a type the file defines nor, undated, every setting itself; a later entry gives a type; an entry gives both `disabled` and `enabled`; a reference is not of type <!-- figure: REFERENCE_TYPE -->`mc`<!-- end figure -->; an entry changes a clock's number of estimator states; a time constant is missing for 2 or 3 states or given for 1; a clock is ignored twice or ignored and given entries; an RMS limit names a reference or pair that is not one; or the rejects that make a series dormant are fewer than 3 or more than the gap limit of any type, or of any clock at any date. | §15.2 |
 | IN-13 | A clock's settings at an epoch are its type's default, or its first entry's own, with every entry in force at the epoch applied in date order; an entry's location places the clock in a building from the entry's date, and an entry's `disabled: true` or `enabled: false` disables the clock from its date, until an entry's `disabled: false` or `enabled: true` enables it again. | §15.2 |
-| IN-14 | It leaves out every measurement and series of a clock the clock configuration does not name: silently when the configuration lists the clock to ignore, and otherwise logging the clock at WARNING when it is first found so in a run and whenever it returns after an epoch without it. A series is left out when its clock side, its last name, is such a clock. | §15.2, §16.2 |
+| IN-14 | It leaves out every measurement whose measured clock, and every series whose clock side, its last name, the clock configuration does not name: silently when the configuration lists the clock to ignore, and otherwise logging the clock at WARNING when it is first found so in a run and whenever it returns after an epoch without it. | §15.2, §16.2 |
 
 ### 4.2 Processing (PR)
 
@@ -134,7 +136,7 @@ flowchart LR
 | PR-14 | A series goes dormant when its counted rejects in a row reach the configured number, when it has gone more epochs than its gap limit without an accepted measurement, or, for a triple, when a pair whose value it uses restarts, whether or not the triple has a measurement at that epoch: any of its three pairs for a remote triple, and only (r, c) for a local triple (r, r, c), whose self pair cancels. | §13.3, §12.6 |
 | PR-15 | A dormant series restarts from its current measurement once it has three measurements from consecutive epochs, each of a pair's within its RMS limit, whose second difference is within 5√6 times its initial innovation scale. | §13.3 |
 | PR-16 | A change to a clock's time constants starts a new segment of each of its series at the change's epoch, carrying the estimate across. | §8.7 |
-| PR-17 | A row of a 2- or 3-state series is marked unsettled while its segment has run fewer than <!-- figure: SETTLE_FACTOR -->5<!-- end figure --> times M rows. | §8.8 |
+| PR-17 | A row of a 2- or 3-state series that is neither dormant nor disabled is marked unsettled while its segment has run fewer than <!-- figure: SETTLE_FACTOR -->5<!-- end figure --> times M rows. | §8.8 |
 | PR-18 | Before any pair is filtered, it screens the references: a reference whose self pair falls outside the gate has the pairs sharing that shift excluded; a link whose two directions do not cancel has its bad direction, or both, excluded; and a link in every failing triangle of references and no passing one is excluded both ways. | §10 |
 | PR-19 | When a clock measured against two or more references shows a whole number of periods between its pairs, it corrects the pair that slipped and marks its row, or, when it cannot tell which, excludes those pairs for the epoch. | §11 |
 | PR-20 | A triple's value is the accepted measurement of (s, c) plus half the difference of the accepted measurements of (r, s) and (s, r); with one link direction missing, the predicted round trip of the link stands in for it. A triple is built only from accepted pair measurements, never from the pairs' estimates. | §12 |
@@ -150,11 +152,11 @@ flowchart LR
 | OUT-1 | It writes each pair's rows to its own file in the <!-- figure: MEAS_SUBDIRECTORY -->`meas`<!-- end figure --> directory and each triple's to its own file in the <!-- figure: DDIFF_SUBDIRECTORY -->`ddiff`<!-- end figure --> directory under the processed directory, each file named for its RF channel and its series. | §5.1 |
 | OUT-2 | Every line of an output file, its header included, is ASCII text of one fixed width for its kind of file, ending in a newline. | §5.2 |
 | OUT-3 | A file's header, written with its first row, says what the file holds and what every column means, and warns that only das_processor may change it. | §5.2 |
-| OUT-4 | Each row of a series holds the series' epoch, its measurement when it has one, its estimate, its counters and its flags, in the columns of its kind of file; every value read back from a row gives the same row again exactly. | §5.4, §5.5 |
+| OUT-4 | Each row of a series holds the series' epoch, its measurement when it has one, its estimate, its counters and its flags, in the columns of its kind of file. A row read back from its file and written again gives the same line exactly; a measurement row's innovation and a triple's restart mark are not written, so they are not read back. | §5.4, §5.5 |
 | OUT-5 | A series writes one row for every epoch it is in, except while it is dormant with no measurement or disabled with no reading. | §13.3, §13.6 |
 | OUT-6 | A row is never changed once written. Rows are removed only by a redo, a recovery from a stopped write, or the cut-back that follows a damaged file, and each removes the same epochs from every file of the channel. | §1.3, §6.5, §6.7 |
 | OUT-7 | The data files are byte-for-byte the same whether the epochs were processed in one run or one epoch per run, whether or not a run was interrupted and resumed, and with or without worker processes. | §1.3, §6.4, §6.8 |
-| OUT-8 | It writes rows to the files once a UTC day, after the day's last epoch, and when a run stops, and flushes the files to the storage device only when the run stops. | §5.8 |
+| OUT-8 | It writes rows to the files once a UTC day, after the day's last epoch, and when a run stops, and flushes the rows it writes to the storage device only when the run stops. | §5.8 |
 | OUT-9 | A disabled pair's row holds the reading's time, phase and RMS, no cycle count, the z of the pair's newest row or none when that row has none, no estimate, and the single flag O. | §5.4, §13.6 |
 
 ### 4.4 Operation (OP)
@@ -163,7 +165,7 @@ flowchart LR
 | --- | --- | --- |
 | OP-1 | A run processes one RF channel, and holds the channel's lock file <!-- figure: LOCK_FILE_TEMPLATE -->`das_processor_<rf>.lock`<!-- end figure --> for the whole run; a second run of the same channel stops at once. | §6.1 |
 | OP-2 | It makes the processed directory, and every directory above it, when they are missing. | §6.1 |
-| OP-3 | On SIGINT, SIGTERM or SIGHUP, it finishes the epoch it is on, writes its rows and stops. | §6.1 |
+| OP-3 | On SIGINT, SIGTERM or SIGHUP, it finishes the epoch it is on, writes its rows and stops. With worker processes, a SIGHUP sent to the whole process group also ends the workers, and the run then stops with an error, its rows left to the next run. | §6.1, §6.8 |
 | OP-4 | A run with `--steps N` stops after N epochs that wrote rows; an epoch that writes no row is not counted. | §6.1 |
 | OP-5 | A run starts one epoch after the newest row any file of the channel holds. With no file holding a row, it starts at the epoch containing the configured start MJD, or <!-- figure: START_FROM_MJD -->59500<!-- end figure --> when none is configured, or at the first epoch of DAS data after it. | §6.7 |
 | OP-6 | A run given `--redo-from-mjd` first undoes a write that stopped part way, as OP-7 says, then removes every row at or after that epoch from every file of the channel, or every row after a damaged file's last good row when that comes earlier, and then processes from one epoch after the newest row left. It checks every file before it removes any row. The option is taken from the command line only, and repeating an interrupted redo finishes it. | §6.5 |
@@ -178,10 +180,10 @@ flowchart LR
 | ID | Requirement | Design |
 | --- | --- | --- |
 | ER-1 | It exits with status 0 when a run finishes, 2 for a usage error such as a required setting given by neither source, and 1 for any other failure. An error that is not one of the program's own is logged at ERROR with its traceback, or printed with it on standard error when nothing logs at ERROR. | §6.1, §16.1 |
-| ER-2 | It starts logging from the logging settings before checking any other setting, so every later failure is logged at ERROR. A failure that keeps logging from starting, or a failure in a setting or path when the log level is `None`, is printed on standard error. | §6.1, §16 |
+| ER-2 | It starts logging from the logging settings before checking any other setting, so every later failure is logged at ERROR. A failure that keeps logging from starting, which includes any fault in the INI file and a missing logging setting, or a failure in a setting or path when the log level is `None`, is printed on standard error. | §6.1, §16 |
 | ER-3 | Every log record is one line, timed in UTC with the MJD beside it; the log file rolls over at midnight UTC and keeps the configured number of old files, or all of them. | §16.2 |
-| ER-4 | It logs at WARNING each refused DAS line, each counted reject that ends in neither a step nor dormancy, each screening and undecided slip finding, and each cut-back of files; at INFO each epoch's counts and each step, restart, dormancy, stop, configuration change, clock disabled or enabled again, corrected slip and redo; at DEBUG each series' outcome; and at TRACE each prediction and update. | §16.2 |
-| ER-5 | A failure before an epoch's rows are written changes no file. | §5.8, §6.6 |
+| ER-4 | It logs at WARNING each refused DAS line, each counted reject that ends in neither a step nor dormancy, each screening and undecided slip finding, and each cut-back of files when a run starts; at INFO each epoch's counts and each step, restart, dormancy, stop, configuration change, clock disabled or enabled again, corrected slip and redo; at DEBUG each series' outcome; and at TRACE each prediction and update. | §16.2 |
+| ER-5 | A failure before an epoch's rows are written changes no data file beyond the cut-back or redo the run made when it started. | §5.8, §6.6 |
 | ER-6 | It checks that every value fits its column, every file it will append to is whole, and the free space covers every byte, before writing any byte. | §5.8 |
 
 ### 4.6 Quality (QU)
@@ -189,10 +191,10 @@ flowchart LR
 | ID | Requirement | Design |
 | --- | --- | --- |
 | QU-1 | The program runs on Python 3.14. | §4.4 |
-| QU-2 | Its run-time dependencies are only those listed in the project's `pyproject.toml`. | §4.4 |
+| QU-2 | At run time it imports only the standard library and the packages `pyproject.toml` lists as its dependencies. | §4.4 |
 | QU-3 | Everything entering from outside the program is checked by frozen pydantic models that refuse unknown fields. | §4.3 |
 | QU-4 | Every module, class and function, private ones included, has a docstring in the numpy convention. | §4.4 |
-| QU-5 | Its tests cover every line and branch of the package. | §17 |
+| QU-5 | Its tests cover every line and branch of the package, of the project's scripts and of the tests themselves. | §17 |
 | QU-6 | Every test module passes when run on its own. | §17 |
 | QU-7 | The repository holds no real data, operational configuration, logs or details of a real machine; every example value is invented. | §17 |
 | QU-8 | No function is more complex than McCabe 12 or xenon rank B, and every module and the average are rank A. | §4.4 |

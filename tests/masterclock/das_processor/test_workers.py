@@ -243,7 +243,7 @@ def test_every_series_has_one_owner(num_workers: int) -> None:
 def test_workers_write_the_files_a_run_without_them_writes(
     tmp_path: Path, num_workers: int
 ) -> None:
-    """Give byte-identical data files with workers as without them (I5)."""
+    """Give byte-identical data files with workers as without them (I5, U28)."""
     without_files = archived_files(run_without_workers(tmp_path / "without"))
     with_files = archived_files(run_with_workers(tmp_path / "with", num_workers))
     assert sum(name.startswith("meas/") for name in without_files) == len(PAIR_RATES)
@@ -257,7 +257,7 @@ def test_workers_write_the_files_a_run_without_them_writes(
 
 
 def test_workers_one_epoch_per_run_write_the_same_files(tmp_path: Path) -> None:
-    """Give the batch's data files from one epoch per run with workers (I5)."""
+    """Give the batch's data files from one epoch per run with workers (I5, U28)."""
     without_files = archived_files(run_without_workers(tmp_path / "without"))
     config = write_deployment(tmp_path / "stepped")
     for _ in range(EPOCH_COUNT + 1):

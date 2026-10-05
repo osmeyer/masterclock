@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-05 14:34:32 UTC
+**Date:** 2026-10-05 21:12:57 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -115,18 +115,23 @@ Every option of the command line, the settings-file entry it overrides, whether 
 The rules, which the program enforces:
 
 - A required setting given neither in the file nor on the command line is a usage error: the program prints its full help and exits with status 2, naming what is missing.
-- The literal `None`, spelled exactly so, means "no value" for a setting that takes it: no log file, no logging at all, no worker processes, or no limit on how many old log files are kept. `--log-file None` on the command line clears a log file the settings file gives.
+- The literal `None`, spelled exactly so, means "no value" for a setting that takes it: no log file, no logging at all, no worker processes, or no limit on how many old log files are kept.
+  `--log-file None` on the command line clears a log file the settings file gives.
 - An option left off the command line takes the file's value.
 - A section or entry the program does not read, a `[DEFAULT]` section, or a value spread over more than one line is refused, so a misspelt entry is never quietly ignored.
 - Every path must be absolute.
-- `%(entry)s` in a value is replaced by another entry of the same section; write `%%` for a single `%`.
-- `start_from_mjd` matters only for a channel with no files yet: it is where the first run starts. Left out, it is <!-- figure: START_FROM_MJD -->59500<!-- end figure -->. A run starts at the first DAS data at or after it.
+- `%(entry)s` in a value is replaced by another entry of the same section; write `%%` for a single `%`, since a `%` alone makes the file invalid.
+- `start_from_mjd` matters only for a channel with no files yet: it is where the first run starts.
+  Left out, it is <!-- figure: START_FROM_MJD -->59500<!-- end figure -->.
+  A run starts at the first DAS data at or after its ten-minute mark.
+- Every MJD given, `start_from_mjd` and `--redo-from-mjd` alike, must fall on a day from <!-- figure: FIRST_DAY -->50000<!-- end figure --> to <!-- figure: LAST_DAY -->99999<!-- end figure -->.
 - `--steps` and `--redo-from-mjd` are command line only: they are ways of running the program once, and one left in the settings file would act on every scheduled run.
 
 ### 4.2 The clock configuration
 
 The clock configuration tells das_processor, for each clock, how its estimator should behave and which building it is in.
 `etc/clock_config.yaml.example` is a complete example with invented clocks; copy it and edit it.
+It holds more types and clocks than the parts shown here, each with a comment.
 Its parts:
 
 ```yaml
@@ -134,7 +139,7 @@ rejects_before_restart: 36
 ```
 
 `rejects_before_restart` is the number of readings rejected in a row at which das_processor gives up on a series' estimate and starts it again from fresh readings.
-It must be at least 3, and no more than any clock's `gap_limit`.
+It must be at least 3, and no more than the `gap_limit` of any type, or of any clock at any date.
 
 ```yaml
 rms_limit:
@@ -144,8 +149,9 @@ rms_limit:
 ```
 
 Each DAS reading comes with an RMS, the instrument's own measure of its noise, in picoseconds.
-A pair's reading with an RMS over the pair's limit is rejected.
+A pair's reading with an RMS over the pair's limit is rejected, and is never accepted later, as part of a step or a restart.
 The limit is the pair's own (written `reference.clock`), else its reference's, else the default.
+Every limit is a whole number above zero; `references` and `pairs` may be left out.
 
 ```yaml
 types:
@@ -158,11 +164,11 @@ Each type gives the default estimator settings for its clocks:
 
 | Setting | Meaning | Unit |
 | --- | --- | --- |
-| `filter_states` | 3 follows phase, rate and drift (masers); 2 follows phase and rate (cesium beams, rubidium fountains); 1 takes each accepted reading as it is (references) | — |
+| `filter_states` | 3 follows phase, rate and drift (masers); 2 follows phase and rate (cesium beams, rubidium fountains); 1 takes each accepted reading as it is (references, and any other clock best passed through) | — |
 | `time_constant` | How many epochs the estimator averages over: larger is smoother but slower to follow the clock. Given for 2 or 3 states only, at least 1 | epochs |
 | `scale_time_constant` | How many epochs the expected size of an innovation is averaged over, at least 1 | epochs |
-| `initial_innovation_scale` | How large a one-epoch difference from the prediction is expected to be, when an estimate starts | ps |
-| `gap_limit` | How many epochs an estimate may run on predictions alone before it can no longer be trusted | epochs |
+| `initial_innovation_scale` | How large a one-epoch difference from the prediction is expected to be, when an estimate starts; above zero | ps |
+| `gap_limit` | How many epochs an estimate may run on predictions alone before it can no longer be trusted; a whole number | epochs |
 
 Every reference must have the type `mc`.
 
@@ -185,11 +191,19 @@ clocks:
 
 Each clock has a list of *entries*:
 
-- The first entry gives the clock's type, and usually its `location`, the number of the building it is in. A clock that fits no type gives every setting itself in its first entry, with no type and no date, as `ox6` does.
-- A later entry has an `effective_mjd`, and changes the settings it names from the first epoch at or after that MJD: a new time constant (`hm7` at MJD 60980), or a move to another building (`hm7` at MJD 61000). A later entry never gives a type and never changes `filter_states`.
-- A later entry can also disable a clock from its `effective_mjd`, with `disabled: true`, and a still later one enable it again, with `disabled: false`; `enabled: false` and `enabled: true` say the same the other way round, as `cs3` does. An entry gives one of the two, never both. While a clock is disabled, nothing tracks it: each of its pairs, and every pair of a disabled reference, writes a row with the flag O and the reading as the DAS gave it, and its triples carry on as if it was not measured. When it is enabled again, its pairs start afresh, as a new clock's do.
+- The first entry gives the clock's type, and usually its `location`, the number of the building it is in, a whole number above zero.
+  A clock that fits no type gives every setting itself in its first entry, with no type and no date, as `ox6` does.
+- A later entry usually has an `effective_mjd`, and changes the settings it names from the first epoch at or after that MJD: a new time constant (`hm7` at MJD 60980), or a move to another building (`hm7` at MJD 61000).
+  A later entry with no `effective_mjd` applies from the start, as if it were part of the first.
+  A later entry never gives a type and never changes `filter_states`.
+- An entry can also disable a clock from its `effective_mjd`, with `disabled: true`, and a later one enable it again, with `disabled: false`; `enabled: false` and `enabled: true` say the same the other way round, as `cs3` does.
+  An entry gives one of the two, never both.
+  While a clock is disabled, nothing tracks it: at each epoch with a reading, each of its pairs, and every pair of a disabled reference, writes a row with the flag O and the reading as the DAS gave it, and its triples carry on as if it was not measured.
+  When it is enabled again, its pairs start afresh, dormant, in a new segment.
 - A clock with no `location` gets no triples.
-- `ignore` lists clocks the DAS measures that are of no use. Their readings are left out with nothing logged.
+- `ignore` lists clocks the DAS measures that are of no use.
+  Their readings are left out with nothing logged.
+  Leave the key out to ignore no clock.
 - A clock the DAS measures that the file neither lists nor ignores is left out too, with a warning in the log when a run first sees it, and again whenever it comes back after an epoch without it.
 
 The file is checked in full when a run starts, and a run never starts on a configuration it cannot use.
@@ -208,7 +222,10 @@ Good values of `time_constant`, `initial_innovation_scale` and `gap_limit` depen
 uv run --frozen python scripts/characterize.py /srv/masterclock/characterization/a --rf a --three-state hm
 ```
 
-It prints a line naming each field, then a line for each clock with a local triple, references left out: the references it used, the rows and days of data it used and dropped, the noise it fitted, and the suggested time constant, initial innovation scale and gap limit.
+`--three-state` takes name prefixes: the drift of every clock whose name starts with one is taken off before the fit, as for a 3-state clock.
+`--min-days` sets how many days of prepared rows a clock needs to be given settings, and `--jobs` how many clocks are worked at once; `--help` lists every option.
+It prints a line naming each field, then a line for each clock with a local triple, references left out: the references it used, the rows it used, the days it dropped, the measurement noise, the fitted noise coefficients and crossover time, and the suggested initial innovation scale, time constant and gap limit.
+`-` marks a value it could not work out, for example for a clock with too few rows, and a gap limit of −1 means even a gap of no epochs fails.
 
 ## 5. Running
 
@@ -294,6 +311,7 @@ das_processor --config-file /srv/masterclock/etc/das_processor.ini --rf b
 ```
 
 Keep one settings file per channel, or one for both with `--rf` given on the command line, as above.
+With one settings file for both, give each channel its own `--log-file` too: the `[LOGGING]` section cannot name the channel, and two runs writing one log file mix their lines.
 Both channels may share one `processed_path`: every file, lock and journal carries its channel's letter in its name.
 A run that finds another run of the same channel still going stops at once, logs which process holds the lock, and exits with status 1; the next scheduled run carries on.
 
@@ -309,7 +327,10 @@ So the first rows of each file carry the flag D, and the first accepted row carr
 After an outage, a run processes every epoch it missed, in order, up to the end of the DAS data.
 This can take a while for months of data, and needs no special option.
 To do it in parts, give `--steps N`: the run stops after N epochs that wrote rows.
-Rows are written to the files a day at a time and flushed when the run stops. A catch-up stopped by a signal flushes its rows, and the next run goes on after them. One that fails or is killed after its first write leaves its journal, and the next run cuts every file back to before that run's first epoch and does its work again. Either way its files end exactly as an uninterrupted one's would.
+Rows are written to the files a day at a time and flushed when the run stops.
+A catch-up stopped by a signal flushes its rows, and the next run goes on after them.
+One that fails or is killed after its first write leaves its journal, and the next run cuts every file back to before that run's first epoch and does its work again.
+Either way its files end exactly as an uninterrupted one's would.
 
 ### 5.5 Reprocessing from an MJD
 
@@ -322,7 +343,7 @@ If it finds a damaged file whose last good row comes before that epoch, it delet
 Use it after changing the clock configuration for a past date, or after the DAS data for past days were corrected.
 A redo first puts right a run that stopped after its first write, as any run does (§7.4), so it works whether or not the journal is there.
 If a redo is interrupted, run the same command again: it finishes the deletion before it processes anything.
-A redo is logged at INFO, with how many files it cut, deleted and left.
+A redo is logged at INFO, with how many files it cut, how many it deleted, and how many had no row at or after the epoch.
 
 Pause the scheduler for that channel while a redo runs, then start it again: the redo holds the channel's lock, so every scheduled run in the meantime stops at once with the lock error and exit status 1.
 
@@ -339,6 +360,7 @@ das_processor --config-file /srv/masterclock/etc/das_processor.ini --rf a --num-
 
 Send the run SIGINT (Ctrl+C), SIGTERM or SIGHUP.
 It finishes the epoch it is on, writes and flushes its rows, and exits with status 0.
+With worker processes, send the signal to the main process alone: a SIGHUP sent to the whole process group, as closing its terminal does, also ends the workers, and the run then stops with exit status 1, leaving its rows to the next run.
 A run killed outright, or one that loses power, is put right by the next run (§7.3).
 
 ### 5.8 Exit status
@@ -353,23 +375,26 @@ A run killed outright, or one that loses power, is put right by the next run (§
 
 ### 6.1 Where the files are
 
-```
+```text
 <processed_path>/
     meas/das_a.mc2.hm7.dat        one file per pair: reference mc2 measured against clock hm7
     ddiff/das_a.mc1.mc2.hm7.dat   one file per triple: hm7 against mc1, through mc2
-    das_processor_a.lock            the run lock of channel a
-    das_processor_a.writing         there only while a run has rows not yet flushed
+    das_processor_a.lock          the run lock of channel a
+    das_processor_a.writing       there only while a run has rows not yet flushed
 ```
 
 A file's name gives its channel and its series, the names separated by dots.
 The timescale reads the `ddiff/` files; the `meas/` files are kept for checking and for the program itself.
 
 Never edit, copy over, or truncate these files, and read them only while the channel's lock is free, that is, while no run of the channel is going.
-das_processor checks every file when it starts. When it finds one damaged, it cuts every file of the channel back to that file's last good row, or to the earliest such row when several are damaged, so the files stay in step, and computes the rows after it again.
+das_processor checks every file when it starts.
+When it finds one damaged, it cuts every file of the channel back to that file's last good row, or to the earliest such row when several are damaged, so the files stay in step, and computes the rows after it again.
+A file that holds no whole row, or whose first row is damaged, cannot be placed in time: unless a run stopped part way through writing it, the run stops with no file changed (§7.3).
 
 ### 6.2 What a file looks like
 
-Every line of a file, header included, has the same width, so a file is easy to read with any tool that splits on `, `.
+Every line of a file, header included, has the same width.
+The header lines start with `#`; in every other line the fields are separated by `, ` and padded with spaces on the left, so a tool that skips the header, splits on `, ` and trims the spaces reads every field.
 
 <!-- generated: line-widths -->
 
@@ -468,25 +493,28 @@ The columns most users want:
 Every row carries exactly one of A, R, X, P and O:
 
 - **A**: the reading was accepted and updated the estimate.
-- **R**: the reading was too far from the prediction, or too noisy, and was rejected.
-- **X**: the reading was set aside because another check found a fault in a reference or a slip of a whole period.
+- **R**: the reading was too far from the prediction, or too noisy, and was rejected; with D, the series had no estimate to judge it by, and the reading was kept to start one from.
+- **X**: the reading was set aside because another check found a fault in a reference, or a slip of a whole period it could not put right.
 - **P**: there was no reading this epoch; the row holds the prediction.
-- **O**: the pair is disabled in the clock configuration. The row holds the reading as the DAS gave it, no `cycle_count`, the last `z` the pair had, and no estimate, and carries no other flag.
+- **O**: the pair is disabled in the clock configuration.
+  The row holds the reading as the DAS gave it, no `cycle_count`, the last `z` the pair had, and no estimate, and carries no other flag.
 
 The others are added to it:
 
 - **D**: the series is dormant, with no estimate; x, y, d and innovation_scale are empty.
 - **S**: the reading was a whole period out, and was put right.
-- **N**: a new segment starts here.
+- **N**: the estimator starts again here, in a new segment.
+  A series that comes back after a gap, or after being disabled, starts its new segment dormant, on a row without N; its first accepted row then starts the segment after that one, with N.
 - **U**: the estimator has not yet settled since the segment started.
 
 A row is a usable measurement when its flags hold A and not U.
 
 ### 6.4 Gaps in a file
 
-A series writes a row every epoch while it has an estimate, carrying the prediction through short gaps in its readings with P rows.
+A series writes a row every epoch while it has an estimate, carrying the prediction through short gaps in its readings with P rows, and a dormant series writes a row at every epoch with a reading.
 When its readings stop for longer than its `gap_limit`, it stops writing rows; when they come back, it starts again in a new segment.
 A disabled pair writes a row only at an epoch with a reading.
+A triple writes no row while its clock and its reference s are not in one building, and no series of a clock the clock configuration does not name, or ignores, writes any.
 So the files of a channel can end at different epochs, and a file can have gaps.
 The log says when a series stops writing.
 
@@ -494,13 +522,15 @@ The log says when a series stops writing.
 
 ### 7.1 What a log line looks like
 
-```
+```text
 2026-09-24 14:10:03.512 UTC, MJD 61307.590318 | INFO | masterclock.das_processor.run: epoch 2026-09-24 14:00:00+00:00: 29 pairs, 87 triples, 114 accepted, 2 held
 ```
 
 Every line has the time in UTC and as an MJD, the level, the part of the program that wrote it, and the message.
-A message always fits on one line.
+A message always fits on one line; a traceback, which follows an unexpected error, keeps its own lines.
 The log file starts a new file at midnight UTC and keeps `backup_count` old ones.
+Every line also goes to standard error, so a scheduler that keeps or mails a job's output gets the log too; `--log-file None` leaves the standard-error copy alone.
+With `--log-level None` nothing is written, but a `log_file` given is still opened, and so made when it is missing.
 
 ### 7.2 Levels
 
@@ -524,25 +554,37 @@ The log file starts a new file at midnight UTC and keeps `backup_count` old ones
 | `clock … has no entry in the clock configuration: its measurements are ignored` | The DAS measured a clock the clock configuration does not list | Add the clock with its type and building, or list it under `ignore`; then reprocess if its past data matter |
 | `… rejected: innovation … ps, scale … ps, … consecutive` | A reading was far from the prediction | Nothing; three that agree are taken as a step |
 | `self-measurement of … failed`, `reciprocity of … failed`, `closure of link … failed` | A reference's measurements disagree with the others | Look at the reference's hardware if it repeats |
-| `… phase step of … ps`, `… frequency step`, `… cold start`, `… dormant`, `… stops: no row until it is measured again` | The estimator followed a change in a clock | Nothing; worth a look if a clock does it often |
+| `… phase step of … ps`, `… frequency step`, `… cold start`, `… dormant` | The estimator followed a change in a clock, or started again | Nothing; worth a look if a clock does it often |
+| `… stops: no row until it is measured again` | The series' readings stopped for longer than its gap limit, or a pair of a triple started again with no reading for the triple | Nothing, unless the clock should still be measured |
+| `… configuration change: M … to …, M_sigma … to …` | A clock's time constants changed at this epoch, as its entry says | Nothing |
+| `… slip corrected: … cycles` | A reading came out a whole number of periods wrong, and was put right | Nothing, unless it repeats |
+| `slip of clock … undecided: excluded …` | A slip was found and could not be placed, so the clock's readings were set aside for the epoch | Nothing, unless it repeats |
+| `self-measurement of … missing` | A reference was not measured against itself this epoch | Look at the DAS if it repeats |
+| `epoch …: … pairs, … triples, … accepted, … held` | One epoch done: rows written, accepted and held | Nothing |
+| `redo of channel … from …: … files cut, … deleted, … with no row at or after it` | A redo removed its rows before the run | Nothing |
 | `clock … disabled from …`, `clock … enabled again from …` | The clock configuration disabled the clock, or enabled it again, from that epoch | Nothing; this is what the configuration asked for |
 | `cut back the files of channel … after a write that stopped part way` | The last run stopped before flushing; the files were put back to before its first epoch | Nothing; the rows are computed again |
-| `data file … is damaged …` | A file holds a line that is not a row das_processor wrote | Find out what changed the file; das_processor has cut every file of the channel back to that file's last good row, and computes the rows after it again |
+| `data file … is damaged …` | A file holds a line that is not a row das_processor wrote | Next to the line below for a write that stopped part way, nothing: that write left the line. Otherwise find out what changed the file; das_processor has cut every file of the channel back to that file's last good row, and computes the rows after it again |
 | `cut back the files of channel … after damaged files, each logged at ERROR` | The files were put back to the last good row of a damaged file | Nothing more than for the damaged file above |
 | `… has a damaged first row, so its rows cannot be placed in time` | A file's first row is not readable, or the file holds no whole row | Move the file aside and run again; its series starts afresh |
 | `another run (pid …) already holds the run lock …` | A run of the same channel is still going | Wait for it to finish; the operating system frees the lock however a run ends, so it is never left behind |
 | `these settings must be provided by the config file or the command line: …` | A required setting is missing | Add it to the settings file or the command line |
 | `… bytes to write in …, only … free` | The disk is full; nothing was written | Free space; the next run carries on |
-| `steering file …` followed by a problem | A steering file has a line that cannot be read, or is out of order | Correct the steering file; das_processor stops until it can trust it |
+| `steering file …` followed by a problem, or `cannot read steering file …` | A steering file has a line that cannot be read, or is out of order, or the file cannot be read at all | Correct the steering file; das_processor stops until it can trust it |
+| `clock configuration …` followed by a problem | The clock configuration cannot be used | Correct it; the run stops before it changes anything |
+| `cannot read data file …`, `cannot write …`, `cannot flush …` | The operating system refused a file | Look at the disk and the file's permissions; the next run carries on |
+| `worker … stopped answering`, `a worker failed: …` | A worker process ended or failed | Look at the error; the next run does the work again |
+| `stopped on an unexpected error: …`, with a traceback | A fault in das_processor itself | Keep the log and report it; the next run tries again |
 | `no cd5m5m data files found in …` | The data directory holds no DAS files | Check `cd5m5m_path` |
 
 ### 7.4 When a run stops on an error
 
 Every failure is logged at ERROR, and the run exits with status 1.
-A failure before the run's first write changes no file, and the next run tries again from the same place.
+A failure before the run's first write changes no data file, beyond any cut-back or redo the run made when it started, and the next run tries again from the same place.
 A run that failed, was killed or lost power after its first write leaves its journal, `das_processor_<rf>.writing`; the next run sees it, cuts every file back to before the epoch the journal names, and computes those rows again, so the files end exactly as if nothing had gone wrong.
 Never delete the journal by hand.
-A fault that persists stops the channel at that epoch until it is put right. A data file that holds no whole row, or whose first row is damaged, stops only its own channel; a bad steering line stops both, since they share the steering files.
+A fault that persists stops the channel at that epoch until it is put right.
+A data file that holds no whole row, or whose first row is damaged, stops only its own channel; a bad steering line stops both, since they share the steering files.
 
 ## 8. Quick reference
 

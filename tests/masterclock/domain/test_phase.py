@@ -148,7 +148,7 @@ def test_a_ratio_of_a_value_that_is_not_finite_is_refused(
 def test_rounding_is_to_nearest_with_ties_to_even(
     exact_sum: mpq, expected_round: int
 ) -> None:
-    """Round 2.5 to 2, 3.5 to 4 and -2.5 to -2, exactly at any size."""
+    """Round 2.5 to 2, 3.5 to 4 and -2.5 to -2, exactly at any size (U2)."""
     rounded_result = phase.round_even(exact_sum)
     assert rounded_result == expected_round
     assert type(rounded_result) is int

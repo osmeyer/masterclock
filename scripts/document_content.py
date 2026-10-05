@@ -1072,6 +1072,9 @@ PREDICTED: Final[str] = "x\N{SUPERSCRIPT MINUS}"
 RATE_PREDICTED: Final[str] = "y\N{SUPERSCRIPT MINUS}"
 """The predicted rate's symbol."""
 
+DRIFT_PREDICTED: Final[str] = "d\N{SUPERSCRIPT MINUS}"
+"""The predicted drift's symbol."""
+
 AT_T: Final[str] = "x\N{COMBINING CIRCUMFLEX ACCENT}"
 """The symbol of the phase predicted at the measurement time, x with a hat."""
 
@@ -1121,7 +1124,7 @@ def _steps(worked: WorkedEpoch) -> list[tuple[str, str, str]]:
         ),
         (
             "Decycle",
-            f"n = round(({AT_T} {MINUS} {measurement.measured_phase})"
+            f"n = round_even(({AT_T} {MINUS} {measurement.measured_phase})"
             f" / {PHASE_PERIOD})",
             f"n = {measurement.cycle_count}",
         ),
@@ -1153,7 +1156,7 @@ def _steps(worked: WorkedEpoch) -> list[tuple[str, str, str]]:
         (
             "Update",
             f"x = {PREDICTED} + g{NU}, y = {RATE_PREDICTED} + (h/T){NU},"
-            f" d = (2k/T{SQUARED}){NU}",
+            f" d = {DRIFT_PREDICTED} + (2k/T{SQUARED}){NU}",
             f"x = {_grouped(updated.x, 4)}, stored as {stored_x};"
             f" y = {row.y!r}; d = {row.d!r}",
         ),

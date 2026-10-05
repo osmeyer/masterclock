@@ -1,6 +1,6 @@
 # masterclock
 
-**Date:** 2026-10-05 02:27:34 UTC
+**Date:** 2026-10-05 21:12:57 UTC
 
 masterclock is software for a timekeeping laboratory that runs many atomic clocks.
 It turns the laboratory's raw, continuous record of clock comparisons into clean data that a timescale can be built from.
@@ -87,13 +87,14 @@ Both give byte-for-byte the same output files.
 
 | Path | What it holds |
 | --- | --- |
-| `src/masterclock/app/` | What every program needs just to be a program: command line, settings, logging, errors, the run lock and signal handling. It knows nothing about clocks. |
-| `src/masterclock/domain/` | The subject matter: phases, steering, the estimator, screening, slips and double differences. It reads and writes no files. |
+| `src/masterclock/app/` | What every program needs just to be a program, such as its command line, settings and logging. It knows nothing about clocks. |
+| `src/masterclock/domain/` | The subject matter: the measurements and the clocks, not any one program. It reads and writes no files. |
 | `src/masterclock/das_processor/` | The `das_processor` program: its settings, file formats, reading, recovery and the epoch loop. |
 | `scripts/` | Tools for working on the project; each script's docstring says what it does and how to run it. |
 | `tests/` | The tests, laid out as a mirror of `src/` and `scripts/`. |
 | `docs/` | The documents listed below. |
 | `etc/` | Configuration. Only the `.example` files, which hold invented values, are part of the repository. |
+| `stubs/` | Type descriptions, for mypy, of a run-time package that ships without them. |
 
 A test, `tests/masterclock/test_layout.py`, holds the packages to their layers: `app` imports nothing else of the project, `domain` imports only `app` and itself, and a program imports `app`, `domain` and itself.
 
@@ -129,8 +130,8 @@ The project holds itself to a strict standard, and every check runs on every com
 | Formatting | ruff format |
 | Linting, including security rules | ruff check |
 | Types, strictly | mypy |
-| Security | bandit |
-| Complexity | radon and xenon |
+| Security | bandit, which fails a commit on a high-severity finding |
+| Complexity | xenon, which fails a commit over the limits; radon lists every block's |
 | A docstring on every module, class and function | `scripts/check_docstrings.py` |
 | Tests, doctests and 100% line and branch coverage of `src`, `scripts` and `tests`, each reported on its own | pytest with coverage |
 | Every test module passes on its own | `scripts/check_test_modules_alone.py` |

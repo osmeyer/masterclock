@@ -2448,7 +2448,7 @@ def stopping_deployment(tmp_path: Path) -> tuple[AppConfig, ClockConfig]:
 
 
 def test_a_series_whose_measurements_stop_writes_no_more_rows(tmp_path: Path) -> None:
-    """Predict for the gap limit, then write nothing until a measurement (13.3)."""
+    """Predict for the gap limit, then write nothing until measured (13.3, U28)."""
     config, clock_config = stopping_deployment(tmp_path)
     run.run(config, clock_config, None, ShutdownHandler())
     pair_rows = rows_of(config, ("mc1", "ox23"))
@@ -2466,7 +2466,7 @@ def test_a_series_whose_measurements_stop_writes_no_more_rows(tmp_path: Path) ->
 
 
 def test_a_series_that_stops_writes_the_same_files_stepped(tmp_path: Path) -> None:
-    """Give the same files when a series stops, in one go or epoch by epoch (I5)."""
+    """Give the same files when a series stops, at once or stepped (I5, U28)."""
     batch_config, clock_config = stopping_deployment(tmp_path / "batch")
     run.run(batch_config, clock_config, None, ShutdownHandler())
     stepped_config, clock_config = stopping_deployment(tmp_path / "stepped")
@@ -2485,7 +2485,7 @@ def test_a_series_that_stops_writes_the_same_files_stepped(tmp_path: Path) -> No
 
 
 def test_an_epoch_that_writes_no_row_is_not_counted_as_a_step(tmp_path: Path) -> None:
-    """Pass over gap epochs no series writes, so a stepped run gets past them."""
+    """Pass over gap epochs no series writes, so a stepped run passes them (U28)."""
     config, clock_config = make_loop_deployment(tmp_path)
     write_das_files(tmp_path, [LATE_START, LATE_START + T, LATE_START + 4 * T])
     run.run(config, clock_config, 2, ShutdownHandler())
@@ -2503,7 +2503,7 @@ def test_an_epoch_that_writes_no_row_is_not_counted_as_a_step(tmp_path: Path) ->
 def test_a_series_that_stops_is_logged_once_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Log a series that writes no row at INFO, and count only rows written (16.2)."""
+    """Log a series that stops writing at INFO; count only rows written (16.2, U28)."""
     stopping_last_rows = {
         **REFERENCE_LAST_ROWS,
         ("mc1", "mc1"): last_row(x_fs=1_000_000, epochs_since_accept=40),

@@ -1,22 +1,24 @@
 """Tests for src/masterclock/domain/measurements.py.
 
-The rules covered: a pair measurement is a reading decycled and referred
-to its epoch start, against the prediction or, without one, the anchor,
-with the steering since the epoch start taken off; it holds the plain values
-it was made from, and its measurement time, epoch start and offset after the
+The rules covered: a pair measurement is a reading decycled and referred to
+its epoch start, against the prediction or, without one, the anchor, with
+the steering since the epoch start taken off; it holds the plain values it
+was made from, and its measurement time, epoch start and offset after the
 epoch start are worked out from the MJD, the offset exactly from the
 datetimes, and none of them can be passed in; an epoch starts at midnight
-and every epoch after; a slip correction moves the cycle count and z by
-whole periods and marks it; a pair or triple measurement gives the filter
-step its plain values; a triple's sigma may be zero; and a disabled pair's
-reading holds its MJD, phase and rms, with no cycle count, the z it carries
-or none, and its time and epoch worked out from the MJD.
+and every epoch after, a microsecond before a mark falling in the epoch
+before it and the mark itself at an offset of 0; a slip correction moves the
+cycle count and z by whole periods and marks it; a pair or triple
+measurement gives the filter step its plain values; a triple's sigma may be
+zero; and a disabled pair's reading holds its MJD, phase and rms, with no
+cycle count, the z it carries or none, and its time and epoch worked out
+from the MJD.
 
 The ranges of a measurement's values are checked where a measurement is
 read back from a file, and tested there (das_processor/test_files.py).
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import pytest
@@ -32,7 +34,7 @@ from masterclock.domain.measurements import (
     epoch_start,
     measure_pair,
 )
-from masterclock.domain.phase import PHASE_PERIOD, exact
+from masterclock.domain.phase import PHASE_PERIOD, exact, seconds
 from masterclock.domain.series import State
 
 APPENDIX_A_READING: Final[dict[str, float | int]] = {
@@ -145,6 +147,17 @@ def test_an_epoch_starts_on_its_ten_minute_mark(
     """Give the epoch start: midnight and every 600 s after."""
     instant = datetime(2025, 9, 23, hour, minute, second, 1, tzinfo=UTC)
     assert epoch_start(instant) == datetime(2025, 9, 23, hour, start_minute, tzinfo=UTC)
+
+
+def test_a_microsecond_either_side_of_a_mark_falls_in_its_own_epoch() -> None:
+    """Put a mark's last microsecond before it, the mark itself at delta 0 (U1)."""
+    mark = datetime(2025, 9, 23, 6, 10, tzinfo=UTC)
+    microsecond = timedelta(microseconds=1)
+    assert epoch_start(mark - microsecond) == mark - timedelta(minutes=10)
+    assert epoch_start(mark) == mark
+    assert epoch_start(mark + microsecond) == mark
+    assert seconds(mark, epoch_start(mark)) == 0
+    assert seconds(mark + microsecond, epoch_start(mark + microsecond)) == mpq(1, 10**6)
 
 
 def test_a_slip_correction_moves_whole_periods() -> None:

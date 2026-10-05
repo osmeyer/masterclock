@@ -42,11 +42,12 @@ after every epoch writes byte-identical files. A block before the run's next
 epoch is passed over, an epoch that fails adds none of its rows, and a first
 run starts at the first data.
 
-The next epoch is one after the newest epoch any file is good through: a
-damaged file is cut back to its last good row and the rest left; after a
-write that stopped part way, every file is cut back to before the epoch its
-journal names, the journal then deleted, and a file whose first row is
-damaged is refused without a journal and deleted with one, to be made
+The next epoch is one after the newest row any file keeps: when a file is
+damaged, every file is cut back to the damaged file's last good row, those
+starting after it deleted, to be made again; after a write that stopped part
+way, every file is cut back to before the epoch its journal names, the
+journal then deleted; a file that holds no whole row, or whose first row is
+damaged, is refused without a journal and deleted with one, to be made
 again; with no file, the epoch containing start_from_mjd. A roll-back is
 logged once at WARNING, with its reason, what it did and the newest row
 left, and nothing is logged when nothing was cut. A series whose newest row
@@ -1082,10 +1083,13 @@ def test_a_run_restarted_after_every_epoch_writes_the_same_files(
         )
 
 
-def test_a_damaged_line_found_at_the_start_cuts_only_its_file(
+def test_a_damaged_line_found_at_the_start_cuts_every_file_before_it(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Cut a damaged file before its damaged line, and go on after the newest row."""
+    """Cut every file back to the damaged file's last good row, and go on from there.
+
+    The files whose first row comes after it are deleted, to be made again.
+    """
     config, clock_config = make_loop_deployment(tmp_path)
     write_das_files(tmp_path, [LATE_START + i * T for i in range(6)])
     run.run(config, clock_config, None, ShutdownHandler())
@@ -1097,7 +1101,7 @@ def test_a_damaged_line_found_at_the_start_cuts_only_its_file(
     file_bytes[(files.MEAS_HEADER_LINES + 2) * line_size + 3] = ord("x")
     data_file.write_bytes(bytes(file_bytes[: -line_size // 2]))
     caplog.clear()
-    assert run.next_epoch(config) == LATE_START + 6 * T
+    assert run.next_epoch(config) == LATE_START + 2 * T
     log_entries = [
         (log_record.levelname, log_record.getMessage()) for log_record in caplog.records
     ]
@@ -1107,13 +1111,11 @@ def test_a_damaged_line_found_at_the_start_cuts_only_its_file(
     )
     assert log_entries[1][1] == (
         "cut back the files of channel a after damaged files, each logged at ERROR:"
-        f" 1 files cut, 0 deleted, {len(LOOP_SERIES) - 1} left; the newest row is"
-        f" now of {LATE_START + 5 * T}"
+        " 2 files cut, 2 deleted, 0 left; the newest row is"
+        f" now of {LATE_START + T}"
     )
     for checked_file, file_kind, series_key in run.data_series(config):
-        assert files.good_through(checked_file, file_kind) == (
-            LATE_START + (T if checked_file == data_file else 5 * T)
-        ), series_key
+        assert files.good_through(checked_file, file_kind) == LATE_START + T, series_key
 
 
 def test_a_journal_found_at_the_start_rolls_every_file_back_before_its_epoch(

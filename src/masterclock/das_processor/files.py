@@ -25,11 +25,11 @@ Rows are buffered and written a day at a time (:func:`write_buffer`), every
 check made before the first byte, under a write journal that names the
 first epoch the run writes. The files are flushed to the device only by the
 run's final write (:func:`write_final`), which then deletes the journal. A
-run that starts checks every file, cuts a damaged one back to its last good
-row, and cuts every file back to before the epoch a journal names
-(:func:`roll_back`, :func:`read_journal`). Files
-may end at different epochs: a series writes no row for an epoch it is not
-in, nor while it is dormant with no measurement.
+run that starts checks every file, and cuts every file back to before the
+epoch a journal names and to the last good row of any damaged file, so the
+files stay in step (:func:`cut_epoch`, :func:`roll_back`,
+:func:`read_journal`). Files may end at different epochs: a series writes no
+row for an epoch it is not in, nor while it is dormant with no measurement.
 """
 
 import dataclasses
@@ -1464,17 +1464,18 @@ def check_file(
     FileCheck
         For a sound file, one whose length is its header plus whole rows
         and whose last row is good: that row's epoch, found with one short
-        read, and ``damaged`` false. Otherwise the
-        epoch of the row before its first line that is not a good row, or
-        ``None`` when it holds no whole row or, after a stopped write, when
-        its first row is not good; a damaged file is logged once at ERROR,
-        naming where it is damaged and why.
+        read, and ``damaged`` false. Otherwise the epoch of the row before
+        its first line that is not a good row; after a stopped write,
+        ``None`` when the file holds no whole row or its first row is not
+        good. A damaged file is logged once at ERROR, naming where it is
+        damaged and why.
 
     Raises
     ------
     DataFileError
         If the file cannot be read, or, unless a write stopped part way,
-        its first row is not good, so its rows cannot be placed in time.
+        it holds no whole row or its first row is not good, so its rows
+        cannot be placed in time.
     """
     line_size, header_lines = WIDTHS[file_kind] + 1, HEADER_LINES[file_kind]
     try:
@@ -1495,7 +1496,7 @@ def check_file(
                 )
     except OSError as exc:
         _fail(f"cannot read data file {data_file}: {exc}", exc)
-    if good_epoch is None and row_slots >= 1 and not stopped_write:
+    if good_epoch is None and not stopped_write:
         _fail(
             f"{data_file} has a damaged first row, so its rows cannot be placed in"
             f" time: {damage_reason}"
@@ -1545,6 +1546,35 @@ def _first_damage(
             return good_epoch, damage_reason
         good_epoch = slot_epoch
     return good_epoch, "its last line is cut short"
+
+
+def cut_epoch(
+    file_checks: Iterable[FileCheck], latest_epoch: datetime | None
+) -> datetime | None:
+    """Give the last epoch every file of a channel may keep, so they stay in step.
+
+    Parameters
+    ----------
+    file_checks : iterable of FileCheck
+        What the file check found in each file of the channel.
+    latest_epoch : datetime or None
+        The latest epoch a file may keep whatever its damage: the epoch
+        before a stopped write's or a redo's first; ``None`` for no such
+        limit.
+
+    Returns
+    -------
+    datetime or None
+        The earliest of ``latest_epoch`` and the last good row of every
+        damaged file; ``None`` when there is neither, and every file keeps
+        all its good rows. A damaged file with no good row, which only a
+        stopped write leaves, sets no limit: it holds nothing to keep.
+    """
+    limits = [
+        file_check.good_through for file_check in file_checks if file_check.damaged
+    ]
+    limits.append(latest_epoch)
+    return min((epoch for epoch in limits if epoch is not None), default=None)
 
 
 def read_last_row(data_file: Path, file_kind: FileKind) -> Row:
@@ -2338,32 +2368,30 @@ def redo_from(
     Raises
     ------
     DataFileError
-        If a file cannot be read, changed or deleted, or its first row is
-        not good.
+        If a file cannot be read, changed or deleted, or holds no whole row
+        or a damaged first row, so its rows cannot be placed in time; every
+        file is checked before any is cut, so a refused file changes none.
 
     Notes
     -----
-    Each file is truncated just before its first row at or after ``redo_epoch``,
-    and deleted when it has no earlier row. A file is never kept past its
-    last good row, so a damaged one is cut there instead. The run then goes
-    on from the newest epoch any file holds (see :func:`roll_back`).
-    Running it again after an interruption finishes the deletion: a file
-    already cut is left as it is. The redo is logged once at INFO, with how
-    many files it cut, deleted and left.
+    Every file is truncated just before its first row at or after
+    ``redo_epoch``, and deleted when it has no earlier row. When a damaged
+    file's last good row comes before that, every file is cut after that
+    row instead (see :func:`cut_epoch`), so the files stay in step. The run
+    then goes on one epoch after the newest row left. Running it again
+    after an interruption finishes the deletion: a file already cut is left
+    as it is. The redo is logged once at INFO, with how many files it cut,
+    deleted and left.
     """
-    cuts: list[Cut] = []
-    for data_file, file_kind in data_files:
-        good_epoch = good_through(data_file, file_kind)
-        last_kept_epoch = (
-            redo_epoch - _EPOCH
-            if good_epoch is None
-            else min(redo_epoch - _EPOCH, good_epoch)
-        )
-        cuts.append(
-            _keep_through(
-                data_file, file_kind, None if good_epoch is None else last_kept_epoch
-            )
-        )
+    data_files = list(data_files)
+    file_checks = [
+        check_file(data_file, file_kind) for data_file, file_kind in data_files
+    ]
+    last_kept_epoch = cut_epoch(file_checks, redo_epoch - _EPOCH)
+    cuts = [
+        _keep_through(data_file, file_kind, last_kept_epoch)
+        for data_file, file_kind in data_files
+    ]
     _log.info(
         "redo of channel %s from %s: %d files cut, %d deleted,"
         " %d with no row at or after it",

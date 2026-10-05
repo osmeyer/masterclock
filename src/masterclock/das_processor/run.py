@@ -36,6 +36,7 @@ from masterclock.das_processor.files import (
     MeasRecord,
     check_file,
     clear_journal,
+    cut_epoch,
     ensure_archives,
     read_journal,
     read_last_row,
@@ -1109,18 +1110,18 @@ def next_epoch(config: AppConfig) -> datetime:
     Returns
     -------
     datetime
-        One epoch after the newest epoch any file is good through; with no
-        file holding a whole row, the epoch containing ``start_from_mjd``.
-        A file may end earlier: its series was left out of the later
-        epochs, or was dormant with no measurement, or a damaged end was
-        cut off, and it starts cold when it is next in an epoch.
+        One epoch after the newest row any file keeps; with no file
+        holding a row, the epoch containing ``start_from_mjd``. A file may
+        end earlier: its series was left out of the later epochs, or was
+        dormant with no measurement, and it starts cold when it is next in
+        an epoch.
 
     Raises
     ------
     DataFileError
         If a file cannot be read, changed or deleted, or, with no write
-        stopped part way, its first row is damaged, so its rows cannot be
-        placed in time.
+        stopped part way, it holds no whole row or its first row is
+        damaged, so its rows cannot be placed in time.
 
     Notes
     -----
@@ -1128,8 +1129,10 @@ def next_epoch(config: AppConfig) -> datetime:
     write stopped part way, and every file is cut back to before the
     write's first epoch; a file whose first row is damaged is then one the
     write was creating, its length on the device but not its rows, and it
-    is deleted, to be made again. A damaged file is cut back to its last
-    good row. Each damaged file is logged once at ERROR by the file check,
+    is deleted, to be made again. When a file is damaged, every file is
+    cut back to that file's last good row, so the files stay in step and
+    the rows after it are computed again as an uninterrupted run computes
+    them. Each damaged file is logged once at ERROR by the file check,
     and a roll-back that changed anything, or followed a stopped write, is
     logged once at WARNING, with why, how many files it cut, deleted and
     left, and the epoch the run goes on after. Once the files are cut back,
@@ -1168,7 +1171,7 @@ def _roll_back_all(
     ------
     DataFileError
         If a file cannot be read, changed or deleted, or, with no stopped
-        write, its first row is damaged.
+        write, it holds no whole row or its first row is damaged.
     """
     series_files = data_series(config)
     stopped_write = stopped_write_epoch is not None
@@ -1216,14 +1219,19 @@ def _kept_epochs(
     -------
     list of datetime or None
         For each file, its last good row's epoch, and no later than the
-        epoch before ``stopped_write_epoch``; ``None`` for a file that keeps
-        no row.
+        epoch :func:`~masterclock.das_processor.files.cut_epoch` gives: the
+        epoch before ``stopped_write_epoch``, and the last good row of every
+        damaged file. ``None`` for a file that keeps no row.
     """
     kept_epochs = [file_check.good_through for file_check in file_checks]
-    if stopped_write_epoch is None:
+    last_kept_epoch = cut_epoch(
+        file_checks,
+        None if stopped_write_epoch is None else stopped_write_epoch - _EPOCH,
+    )
+    if last_kept_epoch is None:
         return kept_epochs
     return [
-        None if kept_epoch is None else min(kept_epoch, stopped_write_epoch - _EPOCH)
+        None if kept_epoch is None else min(kept_epoch, last_kept_epoch)
         for kept_epoch in kept_epochs
     ]
 

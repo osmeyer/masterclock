@@ -6,12 +6,11 @@ or after any write or fsync, a torn line included, is undone by the next
 run, whose data files end byte-identical to those of a run that never
 stopped; rows a power failure loses from one file before the final write,
 which alone flushes the data files, are made again from the run's first
-epoch; and a file whose end is torn, with a line damaged by hand in its
-middle, is cut back before that line while no other file is cut, and its
-series starts cold at the run's next epoch, leaving a gap, in the segment
-after its last kept row's; the triples built on a damaged pair take its new
-measurements. A file of whole rows whose last row is good is not scanned
-(design 5.7), so damage in its middle alone is not looked for.
+epoch; and when a file whose end is torn has a line damaged by hand in its
+middle, every file is cut back before that line and the next run's data
+files end byte-identical to those of a run that never stopped. A file of
+whole rows whose last row is good is not scanned (design 5.7), so damage in
+its middle alone is not looked for.
 """
 
 import os
@@ -409,13 +408,12 @@ def test_rows_a_power_failure_loses_before_the_final_write_are_made_again(
 
 
 @pytest.mark.parametrize("file_kind", ["meas", "ddiff"])
-def test_a_line_damaged_by_hand_cuts_its_file_and_its_series_starts_again(
+def test_a_line_damaged_by_hand_cuts_every_file_and_the_run_is_redone(
     tmp_path: Path, uninterrupted_files: dict[str, bytes], file_kind: str
 ) -> None:
-    """Cut a torn file before its damaged line, and start its series cold (U21, U26).
+    """Cut every file before a damaged line; give the uninterrupted files (U21, U26).
 
-    Every other file is as in a run that never stopped, but for the triples
-    built on a damaged pair, which take its new measurements.
+    The damaged file is torn at its end too, so the file check finds it.
     """
     config = make_deployment(tmp_path)
     epochs_run, damaged_row = (5, 3) if file_kind == "meas" else (5, 1)
@@ -428,33 +426,4 @@ def test_a_line_damaged_by_hand_cuts_its_file_and_its_series_starts_again(
     file_bytes[(header_lines + damaged_row) * line_size + 5] = ord("#")
     data_file.write_bytes(bytes(file_bytes[:-line_size] + b"torn"))
     run_once(config)
-    damaged_key = f"{file_kind}/{file_name}"
-    archived = archived_files(config)
-    moved_keys = (
-        {file_key for file_key in archived if file_key.endswith(".mc1.hm1.dat")}
-        if file_kind == "meas"
-        else {damaged_key}
-    )
-    assert {
-        file_key: file_bytes
-        for file_key, file_bytes in archived.items()
-        if file_key not in moved_keys
-    } == {
-        file_key: file_bytes
-        for file_key, file_bytes in uninterrupted_files.items()
-        if file_key not in moved_keys
-    }
-    kept_bytes = uninterrupted_files[damaged_key][
-        : (header_lines + damaged_row) * line_size
-    ]
-    assert archived[damaged_key].startswith(kept_bytes)
-    parse_row = files.parse_meas_row if file_kind == "meas" else files.parse_ddiff_row
-    row_lines = archived[damaged_key][len(kept_bytes) :].decode().splitlines()
-    rows = [parse_row(row_line).row for row_line in row_lines]
-    last_kept_row = parse_row(kept_bytes[-line_size:-1].decode()).row
-    assert [row.interpolated_datetime for row in rows] == [
-        FIRST_EPOCH_START + epoch_index * T
-        for epoch_index in range(epochs_run, EPOCH_COUNT)
-    ]
-    assert "D" in rows[0].flags
-    assert rows[0].segment == last_kept_row.segment + 1
+    assert archived_files(config) == uninterrupted_files

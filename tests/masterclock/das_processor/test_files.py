@@ -19,16 +19,20 @@ carries S, and S never on a triple.
 The file check: a file whose length is its header plus whole rows, with a
 last row that parses, is sound and good through that row, its other rows
 not read; otherwise it is good through the row before its first line that
-does not parse, holds nothing good when it has no whole row, and is refused
-when its first row does not parse, unless a write stopped part way, when it
-holds nothing good; a file that cannot be read is refused; a damaged file
-is explained once at ERROR, where and why; and the last row of a sound file
+does not parse, and is refused when it holds no whole row or its first row
+does not parse, unless a write stopped part way, when it holds nothing
+good; a file that cannot be read is refused; a damaged file is explained
+once at ERROR, where and why; and the last row of a sound file
 is read back as its row, and only from a sound file whose last row is ASCII
 (U26). A roll-back keeps a file's rows up to an epoch, the cut found by a
 search, since some epochs have no row, says what it did to the file and
-logs nothing. A redo removes every row at or after its epoch, deletes a
-file with no earlier row, finishes when run again after it stopped part
-way, and is logged once at INFO.
+logs nothing. The last epoch every file keeps is the earliest of a given
+limit and every damaged file's last good row. A redo checks every file
+before it cuts any, refusing a file that cannot be placed in time with no
+file changed, removes every row at or after its epoch, or after a damaged
+file's last good row when that is earlier, from every file, deletes a file
+with no earlier row, finishes when run again after it stopped part way,
+and is logged once at INFO.
 
 A file keeps one series, and a buffer takes all of another buffer's rows or
 none. A row too wide is refused before it is buffered. A line made
@@ -725,19 +729,29 @@ def test_a_file_cut_inside_its_last_row_is_good_through_the_row_before(
 @pytest.mark.parametrize(
     "cut_bytes", [0, 1, files.MEAS_WIDTH + 1, 10 * (files.MEAS_WIDTH + 1) + 7]
 )
-def test_a_file_without_a_whole_row_holds_nothing_good(
+def test_a_file_without_a_whole_row_cannot_be_placed_in_time(
     tmp_path: Path, cut_bytes: int
 ) -> None:
-    """Give None for a file cut inside its header, or holding only its header (U26)."""
+    """Refuse a file cut inside its header, or holding only its header (U26).
+
+    Its series' rows are gone and nothing says from when, so no epoch can
+    be found that every file could be cut back to.
+    """
+    whole_header = files.header("meas", "a", PAIR_KEY)
+    for header_text in (whole_header[:cut_bytes], whole_header):
+        meas_path = write_meas_file(tmp_path, "", header_text=header_text)
+        with pytest.raises(DataFileError, match="it holds no whole row"):
+            files.good_through(meas_path, "meas")
+
+
+@pytest.mark.parametrize("cut_bytes", [0, 1, files.MEAS_WIDTH + 1])
+def test_after_a_stopped_write_a_file_without_a_whole_row_holds_nothing_good(
+    tmp_path: Path, cut_bytes: int
+) -> None:
+    """Give None for a file a stopped write was creating (U26)."""
     whole_header = files.header("meas", "a", PAIR_KEY)
     meas_path = write_meas_file(tmp_path, "", header_text=whole_header[:cut_bytes])
-    assert files.good_through(meas_path, "meas") is None
-    assert (
-        files.good_through(
-            write_meas_file(tmp_path, "", header_text=whole_header), "meas"
-        )
-        is None
-    )
+    assert files.good_through(meas_path, "meas", stopped_write=True) is None
 
 
 def test_a_row_of_the_wrong_length_inside_a_file_ends_what_is_good(
@@ -1490,6 +1504,32 @@ def write_archive(tmp_path: Path) -> list[tuple[Path, files.FileKind]]:
     return [(pair_path, "meas"), (triple_path, "ddiff")]
 
 
+@pytest.mark.parametrize(
+    ("latest_epoch", "expected_epoch"),
+    [(None, E + ONE_EPOCH), (E + 5 * ONE_EPOCH, E + ONE_EPOCH), (E, E)],
+)
+def test_every_file_keeps_up_to_the_earliest_limit(
+    latest_epoch: datetime | None, expected_epoch: datetime
+) -> None:
+    """Give the earliest of the limit and every damaged file's last good row.
+
+    A sound file sets no limit, however early it ends, and a damaged file
+    with no good row sets none either.
+    """
+    file_checks = [
+        files.FileCheck(E - ONE_EPOCH, damaged=False),
+        files.FileCheck(E + 3 * ONE_EPOCH, damaged=True),
+        files.FileCheck(E + ONE_EPOCH, damaged=True),
+        files.FileCheck(None, damaged=True),
+    ]
+    assert files.cut_epoch(file_checks, latest_epoch) == expected_epoch
+
+
+def test_with_no_damage_and_no_limit_every_file_keeps_its_rows() -> None:
+    """Give no limit when no file is damaged and none is given."""
+    assert files.cut_epoch([files.FileCheck(E, damaged=False)], None) is None
+
+
 def test_a_redo_deletes_every_row_at_or_after_its_epoch(tmp_path: Path) -> None:
     """Truncate every file before its first row at or after the mark (6.5)."""
     data_files = write_archive(tmp_path)
@@ -1549,10 +1589,14 @@ def test_an_interrupted_redo_finishes_when_run_again(
     ] == [E, E]
 
 
-def test_a_redo_and_a_roll_back_at_one_start_keep_each_file_whole(
+def test_a_redo_cuts_every_file_before_a_damaged_line_it_meets(
     tmp_path: Path,
 ) -> None:
-    """Redo first, then cut each file to its own last good row, at one start."""
+    """Cut every file before the first damaged line when it comes before the redo.
+
+    The triple's file is torn after its row of E + 2T; a redo from E + 4T
+    keeps every file through E + 2T only, so the files stay in step.
+    """
     data_files = write_archive(tmp_path)
     triple_path = data_files[1][0]
     with triple_path.open("ab") as open_file:
@@ -1561,7 +1605,7 @@ def test_a_redo_and_a_roll_back_at_one_start_keep_each_file_whole(
     good_epochs = [
         files.good_through(meas_path, file_kind) for meas_path, file_kind in data_files
     ]
-    assert good_epochs == [E + 3 * ONE_EPOCH, E + 2 * ONE_EPOCH]
+    assert good_epochs == [E + 2 * ONE_EPOCH, E + 2 * ONE_EPOCH]
     for (meas_path, file_kind), good_epoch in zip(data_files, good_epochs, strict=True):
         files.roll_back(meas_path, file_kind, good_epoch)
     assert [
@@ -1888,13 +1932,27 @@ def test_a_redo_is_logged_once_with_what_it_did(
     ]
 
 
-def test_a_redo_deletes_a_file_holding_nothing_good(tmp_path: Path) -> None:
-    """Delete a file with no whole row, whatever the redo's epoch."""
-    meas_path = written_meas_file(tmp_path / "meas" / "das_a.mc2.ox23.dat", 0)
+def test_a_redo_refuses_a_file_holding_nothing_good(tmp_path: Path) -> None:
+    """Refuse a file with no whole row before any file is cut, as at a start."""
+    data_files = write_archive(tmp_path)
+    archive_bytes = [data_file.read_bytes() for data_file, _ in data_files]
+    meas_path = written_meas_file(tmp_path / "meas" / "das_a.mc3.ox24.dat", 0)
     with meas_path.open("ab") as open_file:
         open_file.write(b"2025-09-23 06:0")
-    files.redo_from([(meas_path, "meas")], E + 3 * ONE_EPOCH, "a")
-    assert not meas_path.exists()
+    with pytest.raises(DataFileError, match="it holds no whole row"):
+        files.redo_from([*data_files, (meas_path, "meas")], E + 3 * ONE_EPOCH, "a")
+    assert [data_file.read_bytes() for data_file, _ in data_files] == archive_bytes
+    assert meas_path.exists()
+
+
+def test_a_redo_checks_every_file_before_it_cuts_any(tmp_path: Path) -> None:
+    """Refuse a file whose first row is damaged with no file cut, wherever it lies."""
+    data_files = write_archive(tmp_path)
+    archive_bytes = [data_file.read_bytes() for data_file, _ in data_files]
+    bad_path = write_meas_file(tmp_path, "\0" * (files.MEAS_WIDTH + 1) * 2)
+    with pytest.raises(DataFileError, match="damaged first row"):
+        files.redo_from([*data_files, (bad_path, "meas")], E + ONE_EPOCH, "a")
+    assert [data_file.read_bytes() for data_file, _ in data_files] == archive_bytes
 
 
 @pytest.mark.parametrize(
@@ -2252,7 +2310,7 @@ def test_a_torn_file_is_explained_once(
         "".join(predicted_row_lines(2)) + torn_tail if torn_tail is not None else "2025"
     )
     meas_path = write_meas_file(tmp_path, file_text)
-    file_check = files.check_file(meas_path, "meas")
+    file_check = files.check_file(meas_path, "meas", stopped_write=torn_tail is None)
     assert file_check.damaged
     damage_place = damage_place.format(last=E + ONE_EPOCH)
     assert logged_errors(caplog) == [

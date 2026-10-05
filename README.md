@@ -1,6 +1,6 @@
 # masterclock
 
-**Date:** 2026-10-05 21:12:57 UTC
+**Date:** 2026-10-05 21:27:04 UTC
 
 masterclock is software for a timekeeping laboratory that runs many atomic clocks.
 It turns the laboratory's raw, continuous record of clock comparisons into clean data that a timescale can be built from.
@@ -158,6 +158,8 @@ uv run --frozen python scripts/documents.py .
 ```
 
 The commit hook runs the same script with `--check`, and fails if any document no longer says what the code says.
+
+`scripts/pdfs.py` makes a PDF of every document when asked, with headless Chrome; the PDFs are never committed.
 
 ## Documents
 

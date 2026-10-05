@@ -310,17 +310,19 @@ def configure_logging(
     stream: TextIO | None = None,
     log_file: Path | None = None,
     backup_count: int | None = None,
-) -> logging.StreamHandler[TextIO]:
-    """Attach UTC/MJD-formatted handlers to the root logger.
+) -> logging.Handler:
+    """Attach a UTC/MJD-formatted handler to the root logger.
 
-    Always installs a :class:`logging.StreamHandler`, and - when ``log_file``
-    is given - additionally a
-    :class:`logging.handlers.TimedRotatingFileHandler` that rolls the file over
-    at midnight UTC, keeping ``backup_count`` rotated days (or all of them when
-    it is ``None``). Both handlers use :class:`UtcMjdFormatter` with
-    :data:`DEFAULT_FORMAT`, and the root logger's level is set. Calling this
-    again removes and closes the handlers the previous call installed instead
-    of stacking more.
+    Installs a :class:`logging.StreamHandler` when there is no ``log_file``;
+    when there is, a :class:`logging.handlers.TimedRotatingFileHandler` that
+    rolls the file over at midnight UTC, keeping ``backup_count`` rotated
+    days (or all of them when it is ``None``), in its place, so the log goes
+    to the file alone and a scheduler keeping a run's output gets none of
+    it. The stream handler is attached first and removed only once the file
+    is open, so a failure to open it can still be logged. Each handler uses
+    :class:`UtcMjdFormatter` with :data:`DEFAULT_FORMAT`, and the root
+    logger's level is set. Calling this again removes and closes the
+    handler the previous call installed instead of stacking more.
 
     Parameters
     ----------
@@ -342,8 +344,9 @@ def configure_logging(
 
     Returns
     -------
-    logging.StreamHandler
-        The stream handler that was attached to the root logger.
+    logging.Handler
+        The handler the records go to: the file handler when ``log_file``
+        is given, the stream handler otherwise.
 
     Raises
     ------
@@ -382,7 +385,10 @@ def configure_logging(
         )
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
-        _active_handlers.append(file_handler)
+        root.removeHandler(stream_handler)
+        _active_handlers[:] = [file_handler]
+        root.setLevel(root_level)
+        return file_handler
 
     root.setLevel(root_level)
     return stream_handler

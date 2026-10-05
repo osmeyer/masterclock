@@ -1,6 +1,6 @@
 # das_processor requirements
 
-**Date:** 2026-10-05 21:12:57 UTC
+**Date:** 2026-10-05 21:59:28 UTC
 
 This document lists what `das_processor` must do, as numbered requirements a test or a reader can check.
 The [design](design.md) says how it does each one, and the [user manual](user_manual.md) says how to use it.
@@ -91,7 +91,7 @@ flowchart LR
 | Clock configuration | in | YAML | The operator |
 | Measurement and double-difference archives | out | Fixed-width text files, one per series | das_processor |
 | Run lock and write journal | out | One small file each per RF channel, beside the archives | das_processor |
-| Log | out | One line per record, a traceback apart, UTC and MJD; to the log file and to standard error | das_processor |
+| Log | out | One line per record, a traceback apart, UTC and MJD; to the log file, or to standard error when there is none | das_processor |
 | Standard error | out | The help, usage errors, and errors when logging cannot start or is off | das_processor |
 | Exit status | out | 0, 1 or 2 | das_processor |
 
@@ -181,7 +181,7 @@ flowchart LR
 | --- | --- | --- |
 | ER-1 | It exits with status 0 when a run finishes, 2 for a usage error such as a required setting given by neither source, and 1 for any other failure. An error that is not one of the program's own is logged at ERROR with its traceback, or printed with it on standard error when nothing logs at ERROR. | §6.1, §16.1 |
 | ER-2 | It starts logging from the logging settings before checking any other setting, so every later failure is logged at ERROR. A failure that keeps logging from starting, which includes any fault in the INI file and a missing logging setting, or a failure in a setting or path when the log level is `None`, is printed on standard error. | §6.1, §16 |
-| ER-3 | Every log record is one line, timed in UTC with the MJD beside it; the log file rolls over at midnight UTC and keeps the configured number of old files, or all of them. | §16.2 |
+| ER-3 | Every log record is one line, timed in UTC with the MJD beside it, and goes to the log file, or to standard error when there is none, never to both; the log file rolls over at midnight UTC and keeps the configured number of old files, or all of them. | §16.2 |
 | ER-4 | It logs at WARNING each refused DAS line, each counted reject that ends in neither a step nor dormancy, each screening and undecided slip finding, and each cut-back of files when a run starts; at INFO each epoch's counts and each step, restart, dormancy, stop, configuration change, clock disabled or enabled again, corrected slip and redo; at DEBUG each series' outcome; and at TRACE each prediction and update. | §16.2 |
 | ER-5 | A failure before an epoch's rows are written changes no data file beyond the cut-back or redo the run made when it started. | §5.8, §6.6 |
 | ER-6 | It checks that every value fits its column, every file it will append to is whole, and the free space covers every byte, before writing any byte. | §5.8 |

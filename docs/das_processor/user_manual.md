@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-05 21:12:57 UTC
+**Date:** 2026-10-05 21:59:28 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -529,7 +529,7 @@ The log says when a series stops writing.
 Every line has the time in UTC and as an MJD, the level, the part of the program that wrote it, and the message.
 A message always fits on one line; a traceback, which follows an unexpected error, keeps its own lines.
 The log file starts a new file at midnight UTC and keeps `backup_count` old ones.
-Every line also goes to standard error, so a scheduler that keeps or mails a job's output gets the log too; `--log-file None` leaves the standard-error copy alone.
+Lines go to the log file, or, with `--log-file None`, to standard error instead, never to both, so a scheduled run with a log file prints nothing.
 With `--log-level None` nothing is written, but a `log_file` given is still opened, and so made when it is missing.
 
 ### 7.2 Levels
@@ -596,6 +596,6 @@ A data file that holds no whole row, or whose first row is damaged, stops only i
 | Reprocess from an MJD | add `--redo-from-mjd MJD`, with the scheduler paused |
 | Catch up faster | add `--num-workers N` |
 | Log to the terminal only | add `--log-file None` |
-| Turn logging off | add `--log-level None`; an error in a setting or path is then printed on standard error, and any other failure shows only in the exit status |
+| Turn logging off | add `--log-level None`; an error in a setting or path, or an error that is not the program's own, is then printed on standard error, and any other failure shows only in the exit status |
 | Stop a run cleanly | send SIGINT, SIGTERM or SIGHUP |
 | Choose clock settings | `uv run --frozen python scripts/characterize.py RUN --rf a` on a characterization run |

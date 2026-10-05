@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 21:52:09 UTC
+**Date:** 2026-10-05 21:59:28 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -2857,7 +2857,7 @@ Logging is `app/log.py`, set up from the `[LOGGING]` settings.
 Every module logs through `get_logger(__name__)`.
 A record is one line, timed in UTC with the MJD beside it, whatever its message holds; a traceback keeps its own lines.
 The log file rolls over at midnight UTC, and `backup_count` old files are kept, or all of them.
-Every record also goes to standard error, with or without a log file.
+Records go to the log file, or to standard error when there is none, never to both, so a scheduler that keeps a run's output gets none of the log.
 With the log level `None`, nothing is logged, though a `log_file` given is still opened, and made when it is missing.
 Besides the standard levels there is TRACE, below DEBUG.
 

@@ -7,8 +7,9 @@ at their levels, with no stack unless one is asked for, take the keywords
 the standard methods take, and name their real caller, a check that does
 not run under mutmut, whose wrapper around each function adds a frame;
 get_logger refuses a logger of the wrong class, the root logger included;
-configure_logging attaches a stream handler, and a file handler that rotates
-at midnight UTC in a directory it makes when missing, and replaces what its
+configure_logging attaches a stream handler when there is no log file, and
+otherwise only a file handler that rotates at midnight UTC in a directory it
+makes when missing, so nothing then reaches the stream; it replaces what its
 previous call attached; and a log file that cannot be made raises OSError
 with the new stream handler still attached.
 """
@@ -294,6 +295,7 @@ def test_configure_logging_attaches_a_one_line_stream_handler() -> None:
     )
     root_logger = logging.getLogger()
     assert stream_handler in root_logger.handlers
+    assert isinstance(stream_handler, logging.StreamHandler)
     assert stream_handler.stream is output_stream
     assert isinstance(stream_handler.formatter, log.UtcMjdFormatter)
     assert root_logger.level == logging.WARNING
@@ -310,6 +312,7 @@ def test_configure_logging_writes_to_standard_error_by_default(
 ) -> None:
     """Use the standard error stream in force when no stream is given."""
     stream_handler = log.configure_logging()
+    assert isinstance(stream_handler, logging.StreamHandler)
     assert stream_handler.stream is sys.stderr
     log.get_logger("tests.log.stderr").info("to stderr")
     assert "| INFO | tests.log.stderr: to stderr" in capsys.readouterr().err
@@ -335,6 +338,18 @@ def file_handlers() -> list[TimedRotatingFileHandler]:
         for root_handler in logging.getLogger().handlers
         if isinstance(root_handler, TimedRotatingFileHandler)
     ]
+
+
+def test_with_a_log_file_nothing_goes_to_the_stream(tmp_path: Path) -> None:
+    """Write every record to the log file alone, none to the stream."""
+    output_stream = io.StringIO()
+    attached = log.configure_logging(stream=output_stream, log_file=tmp_path / "a.log")
+    assert log._active_handlers == [attached]
+    assert isinstance(attached, TimedRotatingFileHandler)
+    log.get_logger("tests.log.only_file").warning("to the file only")
+    attached.flush()
+    assert output_stream.getvalue() == ""
+    assert "to the file only" in (tmp_path / "a.log").read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(("backup_count", "kept_backups"), [(None, 0), (0, 0), (7, 7)])

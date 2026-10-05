@@ -36,7 +36,7 @@ from masterclock.das_processor.config import (
 )
 from masterclock.das_processor.epochs import floor_to_ten_minutes
 from masterclock.das_processor.files import make_processed_path, redo_from
-from masterclock.das_processor.run import data_series
+from masterclock.das_processor.run import data_series, recover_stopped_write
 from masterclock.das_processor.run import run as run_channel
 from masterclock.das_processor.workers import WorkerPool
 
@@ -175,8 +175,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     above it, since the lock goes straight into it. The run holds its
     channel's lock throughout, so a second run of the
     same channel is refused, and turns a termination signal into a request
-    to stop between epochs. A redo, when one is asked for, deletes its rows
-    before the run starts, and the run then computes them again. With
+    to stop between epochs. A redo, when one is asked for, first undoes a
+    write that stopped part way, as a run's start does, then deletes its
+    rows before the run starts, and the run then computes them again. With
     num_workers set, worker processes work each epoch's series; they start
     after any redo and stop when the run ends (design 6.8).
     """
@@ -194,6 +195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ):
             redo_mjd = cli_options.redo_from_mjd
             if redo_mjd is not None:
+                recover_stopped_write(config)
                 redo_from(
                     [
                         (data_file, file_kind)

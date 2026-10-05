@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 02:27:34 UTC
+**Date:** 2026-10-05 09:31:48 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -932,7 +932,7 @@ flowchart TD
     MK --> LOCK[Take the channel's run lock]
     LOCK -- held by another run --> ERR3[Log it, exit 1]
     LOCK --> REDO{--redo-from-mjd?}
-    REDO -- yes --> CUT[Delete every row from that epoch on]
+    REDO -- yes --> CUT[Undo a stopped write, then<br/>delete every row from that epoch on]
     REDO -- no --> RUN
     CUT --> RUN[Process epochs until the data end,<br/>--steps are done, or a signal]
     RUN -- failure --> ERR4[Logged where it happened, exit 1]
@@ -962,6 +962,8 @@ def main(argv=None):
         ):
             # §6.5: before the run; command line only.
             if cli_options.redo_from_mjd is not None:
+                # A write that stopped part way is undone first (§6.7).
+                recover_stopped_write(config)
                 redo_from(
                     every_file_of_the_channel(config),
                     epoch_containing(cli_options.redo_from_mjd),
@@ -1203,7 +1205,8 @@ A catch-up stopped by a signal flushes its rows, and the next run goes on after 
 
 `--redo-from-mjd MJD`, given on the command line only, reprocesses from the epoch containing that MJD.
 It has no configuration file entry: a redo is asked for once, and one left in the file would reprocess at every scheduled run.
-Before any epoch is processed, `redo_from` checks every measurement and double-difference file of the channel (§5.7), and then deletes every row at or after that epoch from every one of them, which keeps the archives in step, as I1 requires.
+Before any epoch is processed, a write that stopped part way is undone as at the start of a run (`recover_stopped_write`, §6.7), so a file it was creating is deleted and the journal with it.
+Then `redo_from` checks every measurement and double-difference file of the channel (§5.7), and then deletes every row at or after that epoch from every one of them, which keeps the archives in step, as I1 requires.
 Rows have a fixed width, so each file is truncated just before its first row at or after that epoch, and a file with no earlier row is deleted.
 A redo never keeps a row after a damaged file's last good row: when that row comes before the redo epoch, every file is cut after it instead (`cut_epoch`, §6.7), so the files stay in step.
 The run then goes on one epoch after the newest row left (§6.7): the redo epoch itself when some series has a row of the epoch before it.

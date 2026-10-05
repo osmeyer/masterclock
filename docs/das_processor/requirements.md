@@ -1,6 +1,6 @@
 # das_processor requirements
 
-**Date:** 2026-10-05 02:27:34 UTC
+**Date:** 2026-10-05 09:31:48 UTC
 
 This document lists what `das_processor` must do, as numbered requirements a test or a reader can check.
 The [design](design.md) says how it does each one, and the [user manual](user_manual.md) says how to use it.
@@ -161,7 +161,7 @@ flowchart LR
 | OP-3 | On SIGINT, SIGTERM or SIGHUP, it finishes the epoch it is on, writes its rows and stops. | §6.1 |
 | OP-4 | A run with `--steps N` stops after N epochs that wrote rows; an epoch that writes no row is not counted. | §6.1 |
 | OP-5 | A run starts one epoch after the newest row any file of the channel holds. With no file holding a row, it starts at the epoch containing the configured start MJD, or <!-- figure: START_FROM_MJD -->59500<!-- end figure --> when none is configured, or at the first epoch of DAS data after it. | §6.7 |
-| OP-6 | A run given `--redo-from-mjd` first removes every row at or after that epoch from every file of the channel, or every row after a damaged file's last good row when that comes earlier, and then processes from one epoch after the newest row left. It checks every file before it removes any row. The option is taken from the command line only, and repeating an interrupted redo finishes it. | §6.5 |
+| OP-6 | A run given `--redo-from-mjd` first undoes a write that stopped part way, as OP-7 says, then removes every row at or after that epoch from every file of the channel, or every row after a damaged file's last good row when that comes earlier, and then processes from one epoch after the newest row left. It checks every file before it removes any row. The option is taken from the command line only, and repeating an interrupted redo finishes it. | §6.5 |
 | OP-7 | A run that stops after its first write and before flushing every file leaves a journal, <!-- figure: JOURNAL_FILE_TEMPLATE -->`das_processor_<rf>.writing`<!-- end figure -->; the next run cuts every file back to before the journal's epoch and computes those rows again. | §5.8, §6.7 |
 | OP-8 | When a run starts and finds a file damaged, it cuts every file of the channel back to the damaged file's last good row, the earliest of them when several are damaged, and computes the rows after it again. With no journal, a file that holds no whole row, or whose first row is damaged, stops the run with no file changed. | §6.7 |
 | OP-9 | With `num_workers` set to N, it works each epoch's series in N worker processes. | §6.8 |

@@ -1148,6 +1148,38 @@ def next_epoch(config: AppConfig) -> datetime:
     return newest_epoch + _EPOCH
 
 
+def recover_stopped_write(config: AppConfig) -> None:
+    """Undo a write that stopped part way, before a redo cuts the files (design 6.5).
+
+    Parameters
+    ----------
+    config : AppConfig
+        The run's settings.
+
+    Raises
+    ------
+    DataFileError
+        If a file cannot be read, changed or deleted.
+
+    Notes
+    -----
+    With the journal there, every file is cut back as at the start of a
+    run (:func:`next_epoch`): to before the stopped write's first epoch and
+    to the last good row of any damaged file, a file the write was creating
+    deleted; the journal is then deleted. So a redo never meets a file the
+    stopped write left with no whole row, which it would refuse. With no
+    journal, or one that is not whole, nothing is done.
+    """
+    journal = config.processed.processed_path / JOURNAL_FILE_TEMPLATE.format(
+        rf=config.das.rf
+    )
+    stopped_write_epoch = read_journal(journal)
+    if stopped_write_epoch is None:
+        return
+    _roll_back_all(config, stopped_write_epoch)
+    clear_journal(journal)
+
+
 def _roll_back_all(
     config: AppConfig, stopped_write_epoch: datetime | None
 ) -> datetime | None:

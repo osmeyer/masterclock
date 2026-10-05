@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-05 02:27:34 UTC
+**Date:** 2026-10-05 09:31:48 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -314,6 +314,7 @@ das_processor --config-file /srv/masterclock/etc/das_processor.ini --rf a --redo
 `--redo-from-mjd` deletes every row at or after the epoch containing that MJD from every file of the channel, and then processes from there.
 If it finds a damaged file whose last good row comes before that epoch, it deletes every row after that row instead, so the files stay in step.
 Use it after changing the clock configuration for a past date, or after the DAS data for past days were corrected.
+A redo first puts right a run that stopped after its first write, as any run does (§7.4), so it works whether or not the journal is there.
 If a redo is interrupted, run the same command again: it finishes the deletion before it processes anything.
 A redo is logged at INFO, with how many files it cut, deleted and left.
 

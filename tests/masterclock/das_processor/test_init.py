@@ -9,9 +9,10 @@ first, so a setting or path that cannot be used is logged at ERROR with exit
 1, printed on standard error instead only when it keeps logging from
 starting or logging is set to None; any later MasterClockError exits 1,
 logged once where it was raised; a second run of the same channel is refused
-by the run lock; a redo deletes the rows from its epoch before the run,
-which computes them again; ``--steps`` limits the run to that many epochs;
-and logging set to None logs nothing.
+by the run lock; a redo first undoes a write that stopped part way, then
+deletes the rows from its epoch before the run, which computes them again;
+``--steps`` limits the run to that many epochs; and logging set to None logs
+nothing.
 
 A usage error ends with the missing setting; the logging settings reach the
 logging; and a redo computes its rows again with the settings in force now.
@@ -248,6 +249,30 @@ def test_a_redo_deletes_the_rows_from_its_epoch_before_the_run(tmp_path: Path) -
     ]
     assert das_processor.main(redo_argv) == 0
     assert archived_files(tmp_path) == files_before_redo
+
+
+def test_a_redo_undoes_a_stopped_write_before_it_cuts(tmp_path: Path) -> None:
+    """Undo a write that stopped part way first, then redo, same bytes (6.5, 6.7).
+
+    The stopped write left its journal and a file it was creating with only
+    a few bytes in it, no whole row: a file the redo alone refuses, and the
+    undoing of the stopped write deletes.
+    """
+    argv = make_deployment(tmp_path)
+    assert das_processor.main(argv) == 0
+    files_before_redo = archived_files(tmp_path)
+    processed_path = tmp_path / "processed"
+    journal = processed_path / "das_processor_a.writing"
+    journal.write_text(f"{(FIRST_EPOCH_START + 3 * T).isoformat()}\n", encoding="ascii")
+    (processed_path / "meas" / "das_a.mc1.cs5.dat").write_bytes(b"# das_p")
+    redo_argv = [
+        *argv,
+        "--redo-from-mjd",
+        f"{datetime_to_mjd(FIRST_EPOCH_START + 2 * T):.6f}",
+    ]
+    assert das_processor.main(redo_argv) == 0
+    assert archived_files(tmp_path) == files_before_redo
+    assert not journal.exists()
 
 
 def test_logging_set_to_none_logs_nothing(

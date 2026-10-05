@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 21:30:55 UTC
+**Date:** 2026-10-05 21:52:09 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -2883,6 +2883,7 @@ Nothing is worked out for a level the log leaves out: when WARNING is not logged
 
 ### 17.1 Tests
 
+The [test plan](../test_plan.md) gives the project's rules for tests and every check; here are the parts particular to das_processor.
 The tests follow the project's layout and tools:
 
 - Location: one test module per module, mirroring the source: `tests/masterclock/domain/test_filter.py` for `src/masterclock/domain/filter.py`, and so on.

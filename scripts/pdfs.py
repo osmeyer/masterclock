@@ -23,7 +23,7 @@ refused with exit status 2.
 import argparse
 import html
 import re
-import subprocess  # nosec B404
+import subprocess  # nosec B404 - runs Chrome, given by its full path
 import sys
 import tempfile
 from pathlib import Path
@@ -182,6 +182,7 @@ def page(title: str, body: str) -> str:
 def print_pdf(chrome: Path, page_file: Path, pdf_file: Path) -> bool:
     """Print a page to a PDF with headless Chrome; tell whether the PDF was made."""
     pdf_file.parent.mkdir(parents=True, exist_ok=True)
+    # The command is the Chrome given, with arguments this script makes.
     finished = subprocess.run(  # noqa: S603  # nosec B603
         [
             str(chrome),

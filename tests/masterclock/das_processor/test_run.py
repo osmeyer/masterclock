@@ -1165,6 +1165,19 @@ def test_a_damaged_line_found_at_the_start_cuts_every_file_before_it(
         assert files.good_through(checked_file, file_kind) == LATE_START + T, series_key
 
 
+def test_a_roll_back_counts_every_file_and_says_when_no_row_is_left(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Count the files cut, deleted and left, and say so when no row is left."""
+    run._log_roll_back(
+        "a", None, "a write that stopped part way", ["kept", "cut", "deleted", "kept"]
+    )
+    assert [log_record.getMessage() for log_record in caplog.records] == [
+        "cut back the files of channel a after a write that stopped part way:"
+        " 1 files cut, 1 deleted, 2 left; the newest row is now of no epoch"
+    ]
+
+
 def test_a_journal_found_at_the_start_rolls_every_file_back_before_its_epoch(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

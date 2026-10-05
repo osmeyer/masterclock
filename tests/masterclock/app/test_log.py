@@ -181,8 +181,11 @@ def test_get_logger_refuses_a_logger_of_another_class(
         "tests.log.plain",
         logging.Logger("tests.log.plain"),
     )
-    with pytest.raises(LoggingError, match=r"'tests\.log\.plain' is a Logger"):
+    with pytest.raises(LoggingError) as raised:
         log.get_logger("tests.log.plain")
+    assert str(raised.value) == (
+        "logger 'tests.log.plain' is a Logger, not a MasterClockLogger"
+    )
 
 
 def logger_with_kept(logger_level: int) -> tuple[log.MasterClockLogger, KeepingHandler]:

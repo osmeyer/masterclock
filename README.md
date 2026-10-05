@@ -1,6 +1,6 @@
 # masterclock
 
-**Date:** 2026-10-05 21:27:04 UTC
+**Date:** 2026-10-05 21:52:09 UTC
 
 masterclock is software for a timekeeping laboratory that runs many atomic clocks.
 It turns the laboratory's raw, continuous record of clock comparisons into clean data that a timescale can be built from.
@@ -168,3 +168,6 @@ The commit hook runs the same script with `--check`, and fails if any document n
 | [das_processor requirements](docs/das_processor/requirements.md) | What `das_processor` must do, as numbered requirements |
 | [das_processor design](docs/das_processor/design.md) | How it does it: the data, the algorithms and the mathematics |
 | [das_processor user manual](docs/das_processor/user_manual.md) | How to configure it, run it and read what it writes |
+| [Test plan](docs/test_plan.md) | How the project is tested, and what a change must pass |
+
+The reports in `docs/reports/` give the latest measurements of the tests, formatting and linting, security, complexity, performance and mutation runs; `scripts/reports.py` writes them when asked.

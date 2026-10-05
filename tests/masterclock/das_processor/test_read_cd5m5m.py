@@ -354,6 +354,12 @@ def test_a_file_name_made_from_a_day_reads_back_as_that_day(day: int) -> None:
     assert reader._file_mjd(Path(file_name)) == day
 
 
+@pytest.mark.parametrize("day", [reader.FIRST_DAY, reader.LAST_DAY])
+def test_the_first_and_last_days_have_file_names(day: int) -> None:
+    """Make a file name for each end of the range of days, both included."""
+    assert reader.data_file_name(day) == f"cd5m5m_{day}.dat"
+
+
 @pytest.mark.parametrize(
     "day", [reader.FIRST_DAY - 1, reader.LAST_DAY + 1, 0, -1, 123_456]
 )

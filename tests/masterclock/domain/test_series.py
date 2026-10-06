@@ -42,7 +42,6 @@ def make_row(**field_changes: object) -> series.Row:
         "y": 0.01230129052352643,
         "d": 7.169515400974333e-12,
         "innovation_scale": 3.0,
-        "segment": 4,
         "step_offset": 0,
         "epochs_in_segment": 812,
         "epochs_since_accept": 0,
@@ -315,10 +314,10 @@ def test_every_reject_value_is_finite() -> None:
 
 @pytest.mark.parametrize(
     "counter_field",
-    ["segment", "epochs_in_segment", "epochs_since_accept", "consecutive_rejects"],
+    ["epochs_in_segment", "epochs_since_accept", "consecutive_rejects"],
 )
 def test_no_counter_of_a_row_is_below_zero(counter_field: str) -> None:
-    """Refuse a segment number or counter below 0."""
+    """Refuse a counter below 0."""
     with pytest.raises(ValueError, match=rf"{counter_field} -1 is below 0"):
         checked_row(**{counter_field: -1})
 

@@ -795,7 +795,7 @@ def _held_row(
     x_ps: int,
     y: float,
     innovation_scale: float,
-    position: tuple[int, int],
+    epochs_in_segment: int,
 ) -> Row:
     """Make an invented accepted row of a 3-state series with no drift.
 
@@ -809,8 +809,8 @@ def _held_row(
         Its rate, ps/s.
     innovation_scale : float
         Its innovation scale, ps.
-    position : tuple of (int, int)
-        Its segment and its rows since the segment started.
+    epochs_in_segment : int
+        Its rows since the segment started.
 
     Returns
     -------
@@ -824,9 +824,8 @@ def _held_row(
         y=y,
         d=0.0,
         innovation_scale=innovation_scale,
-        segment=position[0],
         step_offset=0,
-        epochs_in_segment=position[1],
+        epochs_in_segment=epochs_in_segment,
         epochs_since_accept=0,
         consecutive_rejects=0,
         rejects=(),
@@ -889,7 +888,7 @@ def worked_epoch() -> WorkedEpoch:
         built on its first measurement. No reference is steered.
     """
     epoch_before = _EXAMPLE_START - timedelta(seconds=EPOCH_SECONDS)
-    last_row = _held_row(epoch_before, 1_234_567, 0.0123, 3.0, (4, 811))
+    last_row = _held_row(epoch_before, 1_234_567, 0.0123, 3.0, 811)
     prediction = predict(last_row, _NO_STEERING)
     if prediction is None:  # pragma: no cover - the last row is accepted
         message = "the example's last row gives no prediction"
@@ -921,7 +920,7 @@ def worked_epoch() -> WorkedEpoch:
         rms=measurement.rms,
         predicted_phase=prediction.x,
     )
-    triple_last_row = _held_row(epoch_before, 6_666_660, 0.0205, 3.5, (2, 3106))
+    triple_last_row = _held_row(epoch_before, 6_666_660, 0.0205, 3.5, 3106)
     triple_value, triple_row, triple_line = _triple_row(
         ("mc1", "mc2", "hm7"),
         triple_last_row,
@@ -1259,7 +1258,7 @@ def settling_percents(filter_states: FilterStates, epochs: int) -> tuple[float, 
         each epoch after.
     """
     row = dataclasses.replace(
-        _held_row(_EXAMPLE_START, 0, 0.0, 1.0, (1, 0)),
+        _held_row(_EXAMPLE_START, 0, 0.0, 1.0, 0),
         filter_states=filter_states,
         time_constant=SETTLING_TIME_CONSTANT,
     )

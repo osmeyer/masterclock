@@ -113,7 +113,6 @@ _STATE_COLUMNS: Final[tuple[Column, ...]] = (
     Column("y", 23, "estimated rate, ps/s"),
     Column("d", 23, "estimated drift, ps/s^2; 0 for a 1- or 2-state estimator"),
     Column("innovation_scale", 23, "innovation scale, ps"),
-    Column("segment", 9, "segment number"),
     Column("step_offset", 16, "sum of phase steps in this segment, ps"),
     Column("epochs_in_segment", 9, "rows since the segment started"),
     Column(
@@ -499,7 +498,6 @@ def _state_texts(row: Row) -> list[str | None]:
         _float_text(row.y),
         _float_text(row.d),
         _float_text(row.innovation_scale),
-        str(row.segment),
         str(row.step_offset),
         str(row.epochs_in_segment),
         str(row.epochs_since_accept),
@@ -721,7 +719,6 @@ class RowFields(BaseModel):
     y: float | None
     d: float | None
     innovation_scale: float | None
-    segment: int
     step_offset: int
     epochs_in_segment: int
     epochs_since_accept: int
@@ -1026,17 +1023,16 @@ def _row(
         y,
         d,
         innovation_scale,
-        segment,
         step_offset,
         epochs_in_segment,
         epochs_since_accept,
         consecutive_rejects,
-    ) = state_texts[:9]
+    ) = state_texts[:8]
     rejects: list[Reject] = []
     for reject_index in range(3):
         reject_mjd_text, reject_innovation_text = (
+            state_texts[8 + 2 * reject_index],
             state_texts[9 + 2 * reject_index],
-            state_texts[10 + 2 * reject_index],
         )
         if reject_mjd_text is not None or reject_innovation_text is not None:
             rejects.append(
@@ -1045,7 +1041,7 @@ def _row(
                     _float_value(_given(reject_innovation_text)),
                 )
             )
-    filter_states, time_constant, scale_time_constant, flags = state_texts[15:]
+    filter_states, time_constant, scale_time_constant, flags = state_texts[14:]
     return RowFields.model_validate(
         {
             "interpolated_datetime": epoch_start,
@@ -1054,7 +1050,6 @@ def _row(
             "y": _optional_float(y),
             "d": _optional_float(d),
             "innovation_scale": _optional_float(innovation_scale),
-            "segment": int(_given(segment)),
             "step_offset": int(_given(step_offset)),
             "epochs_in_segment": int(_given(epochs_in_segment)),
             "epochs_since_accept": int(_given(epochs_since_accept)),

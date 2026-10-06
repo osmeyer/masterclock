@@ -1,6 +1,6 @@
 # das_processor requirements
 
-**Date:** 2026-10-06 11:57:17 UTC
+**Date:** 2026-10-06 22:45:55 UTC
 
 This document lists what `das_processor` must do, as numbered requirements a test or a reader can check.
 The [design](design.md) says how it does each one, and the [user manual](user_manual.md) says how to use it.
@@ -143,7 +143,7 @@ flowchart LR
 | PR-21 | A local triple's value is its pair's measurement exactly; any other value stops the run before the epoch is written. | §12.4 |
 | PR-22 | A pair is disabled at an epoch when either of its clocks is. A disabled pair is not predicted, decycled, screened, checked for slips, gated or updated, and its reading is never accepted. | §13.6 |
 | PR-23 | Triples, screening and the slip check treat a disabled clock as if it was missing from the epoch's DAS data; a disabled reference is not one of the epoch's references. | §13.6 |
-| PR-24 | A pair whose clocks are enabled again starts afresh, dormant, in the segment after its last row's. | §13.6 |
+| PR-24 | A pair whose clocks are enabled again starts afresh, dormant, in a new segment. | §13.6 |
 
 ### 4.3 Output (OUT)
 

@@ -6,8 +6,7 @@ so a series' file can have gaps. A row of a pair whose clock or reference is
 disabled (O) holds the epoch's reading and no state: nothing tracks it. Each
 row is the whole state of the series at its epoch: the estimate, the
 counters and the reject buffer the next epoch starts from. Across a gap
-only the segment number carries: the series starts cold, in the segment
-after its last written row's.
+nothing carries: the series starts cold, as a new one does.
 
 Every type here is a plain frozen dataclass, built without checks: its
 values come from code or from data already checked where it entered the
@@ -152,8 +151,6 @@ class Row:
         a 1- or 2-state series.
     innovation_scale : float or None
         The innovation scale, ps; ``None`` when dormant or disabled.
-    segment : int
-        Segment number, at least 0; 0 until the first cold start.
     step_offset : int
         Sum of the phase steps accepted in this segment, ps.
     epochs_in_segment : int
@@ -190,7 +187,6 @@ class Row:
     y: float | None
     d: float | None
     innovation_scale: float | None
-    segment: int
     step_offset: int
     epochs_in_segment: int
     epochs_since_accept: int
@@ -253,10 +249,9 @@ def check_row(row: Row) -> None:
     >>> row = Row(
     ...     interpolated_datetime=datetime(2025, 9, 23, 6, 0, tzinfo=UTC),
     ...     innovation=None, x_fs=None, y=None, d=None, innovation_scale=None,
-    ...     segment=0, step_offset=0, epochs_in_segment=0,
-    ...     epochs_since_accept=0, consecutive_rejects=0, rejects=(),
-    ...     filter_states=1, time_constant=None, scale_time_constant=50.0,
-    ...     flags="PD",
+    ...     step_offset=0, epochs_in_segment=0, epochs_since_accept=0,
+    ...     consecutive_rejects=0, rejects=(), filter_states=1,
+    ...     time_constant=None, scale_time_constant=50.0, flags="PD",
     ... )
     >>> check_row(row)
     """
@@ -277,8 +272,7 @@ def _check_numbers(row: Row) -> None:
     Raises
     ------
     ValueError
-        If a float field is nan or infinite, or a counter or the segment
-        number is negative.
+        If a float field is nan or infinite, or a counter is negative.
     """
     for field_name, number in (
         ("innovation", row.innovation),
@@ -292,7 +286,6 @@ def _check_numbers(row: Row) -> None:
             message = f"{field_name} {number} is not finite"
             raise ValueError(message)
     for field_name, count in (
-        ("segment", row.segment),
         ("epochs_in_segment", row.epochs_in_segment),
         ("epochs_since_accept", row.epochs_since_accept),
         ("consecutive_rejects", row.consecutive_rejects),

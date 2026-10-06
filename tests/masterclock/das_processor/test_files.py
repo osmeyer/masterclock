@@ -1,7 +1,7 @@
 """Tests for src/masterclock/das_processor/files.py.
 
 The rules covered: the column table gives the measurement file a width of
-477 and 31 header lines and the double-difference file 455 and 29, and each
+466 and 30 header lines and the double-difference file 444 and 28, and each
 kind its header's size; every header line is only its text and starts with
 '#', in the design's order with the warning second, the columns numbered
 from 1, and every file of a kind gets the same header; rows are
@@ -147,7 +147,6 @@ def worked_row(**changed_fields: object) -> Row:
         "y": 0.01230129052352643,
         "d": 7.169515400974333e-12,
         "innovation_scale": 3.0,
-        "segment": 4,
         "step_offset": 0,
         "epochs_in_segment": 812,
         "epochs_since_accept": 0,
@@ -168,14 +167,14 @@ MEAS_EXAMPLE: Final = (
     "2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,"
     "  60941.251588,  34579,    3,            6,          1234577,"
     "          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12,"
-    " +3.0000000000000000e+00,         4,                0,       812,         0,"
+    " +3.0000000000000000e+00,                0,       812,         0,"
     "         0,             -,                       -,             -,"
     "                       -,             -,                       -, 3,"
     " +1.0000000000000000e+02, +5.0000000000000000e+01,        A",
     "2025-09-23 06:10:00+00:00,  60941.256944,                                -,"
     "             -,      -,    -,            -,                -,"
     "          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12,"
-    " +3.0000000000000000e+00,         4,                0,       813,         1,"
+    " +3.0000000000000000e+00,                0,       813,         1,"
     "         0,             -,                       -,             -,"
     "                       -,             -,                       -, 3,"
     " +1.0000000000000000e+02, +5.0000000000000000e+01,        P",
@@ -186,14 +185,14 @@ DDIFF_EXAMPLE: Final = (
     "2025-09-23 06:00:00+00:00,  60941.250000,          6666667,"
     " -2.9999999981373549e-01, +3.3166247903553998e+00, 111,          6666667.291,"
     " +2.0499852230130653e-02, -8.2093687746445554e-13, +3.4650829715892466e+00,"
-    "         2,                0,      3107,         0,         0,             -,"
+    "                0,      3107,         0,         0,             -,"
     "                       -,             -,                       -,"
     "             -,                       -, 3, +1.0000000000000000e+02,"
     " +5.0000000000000000e+01,        A",
     "2025-09-23 06:00:00+00:00,  60941.250000,          1234577,"
     " +2.6200000000000001e+00, +3.0000000000000000e+00, 111,          1234574.457,"
     " +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,"
-    "         4,                0,       812,         0,         0,             -,"
+    "                0,       812,         0,         0,             -,"
     "                       -,             -,                       -,"
     "             -,                       -, 3, +1.0000000000000000e+02,"
     " +5.0000000000000000e+01,        A",
@@ -205,9 +204,9 @@ DDIFF_EXAMPLE: Final = (
 
 
 def test_the_column_table_gives_the_widths_and_header_lengths() -> None:
-    """Work out W = 477 and 455, and 31 and 29 header lines, from the table."""
-    assert (files.MEAS_WIDTH, files.MEAS_HEADER_LINES) == (477, 31)
-    assert (files.DDIFF_WIDTH, files.DDIFF_HEADER_LINES) == (455, 29)
+    """Work out W = 466 and 444, and 30 and 28 header lines, from the table."""
+    assert (files.MEAS_WIDTH, files.MEAS_HEADER_LINES) == (466, 30)
+    assert (files.DDIFF_WIDTH, files.DDIFF_HEADER_LINES) == (444, 28)
     assert {
         file_kind: len(files.header(file_kind)) for file_kind in ("meas", "ddiff")
     } == files.HEADER_SIZES
@@ -254,8 +253,8 @@ def test_the_measurement_header_is_the_design_s() -> None:
         "# Columns: right-justified, fixed width, separated by ', '.",
     ]
     assert header_lines[4] == "#   1  interpolated_datetime   epoch start E, UTC"
-    assert header_lines[30] == (
-        "#  27  flags                   A accepted, R rejected, X excluded,"
+    assert header_lines[29] == (
+        "#  26  flags                   A accepted, R rejected, X excluded,"
         " P predicted, O disabled, D dormant, S slip corrected, N new segment,"
         " U unsettled"
     )
@@ -347,7 +346,6 @@ def test_the_double_difference_example_rows_come_out_byte_for_byte() -> None:
             y=0.020499852230130653,
             d=-8.2093687746445554e-13,
             innovation_scale=3.4650829715892466,
-            segment=2,
             epochs_in_segment=3107,
         ),
     )
@@ -400,7 +398,7 @@ def test_a_dormant_row_writes_its_state_as_empty_fields() -> None:
         "-".rjust(23),
         "-".rjust(23),
     ]
-    assert row_fields[17:19] == [" 60941.243056", "+1.2345700000000000e+06"]
+    assert row_fields[16:18] == [" 60941.243056", "+1.2345700000000000e+06"]
     assert files.parse_meas_row(row_line).row == dormant_row
 
 
@@ -430,7 +428,7 @@ def test_the_phase_is_written_in_ps_to_the_femtosecond(x_fs: int, x_text: str) -
     "changed_fields",
     [
         {"step_offset": 10**16},
-        {"segment": 10**9},
+        {"epochs_in_segment": 10**9},
         {"x_fs": -(10**19)},
         {"y": 1e-300},
         {"innovation_scale": 1e100},
@@ -479,7 +477,7 @@ def test_a_cycle_count_too_wide_is_refused() -> None:
         ("2025-09-23 06:00:00+00:00", "2025-09-23 06:00:00-05:00"),
         (",       812,", ",       81x,"),
         ("  34579,", " 234579,"),
-        ("e+00,         4,", "e+00,         -,"),
+        (",                0,       812,", ",                -,       812,"),
     ],
 )
 def test_a_line_not_exactly_as_written_is_refused(
@@ -572,7 +570,7 @@ def test_a_disabled_row_writes_the_reading_no_cycle_count_and_the_carried_z(
     """Write the reading, '-' for the cycle count, z or '-', no state, O (5.4)."""
     file_record = files.MeasRecord(
         measurement=dataclasses.replace(DISABLED_READING, z=carried_z),
-        row=disabled_row(E, 3, 4),
+        row=disabled_row(E, 3),
     )
     row_line = files.format_meas_row(file_record)
     field_texts = [field_text.strip() for field_text in row_line.split(", ")]
@@ -597,23 +595,23 @@ def test_a_disabled_reading_goes_with_an_o_row_and_only_with_one() -> None:
     with pytest.raises(DataFileError, match="disabled"):
         files.MeasRecord(measurement=DISABLED_READING, row=worked_row())
     with pytest.raises(DataFileError, match="disabled"):
-        files.MeasRecord(measurement=APPENDIX_A_MEASUREMENT, row=disabled_row(E, 3, 4))
+        files.MeasRecord(measurement=APPENDIX_A_MEASUREMENT, row=disabled_row(E, 3))
     with pytest.raises(DataFileError, match="measurement"):
-        files.MeasRecord(measurement=None, row=disabled_row(E, 3, 4))
+        files.MeasRecord(measurement=None, row=disabled_row(E, 3))
 
 
 def test_a_disabled_reading_belongs_to_its_row_s_epoch() -> None:
     """Refuse a disabled reading taken in another epoch than its row's."""
     with pytest.raises(DataFileError, match="epoch"):
         files.MeasRecord(
-            measurement=DISABLED_READING, row=disabled_row(E + ONE_EPOCH, 3, 4)
+            measurement=DISABLED_READING, row=disabled_row(E + ONE_EPOCH, 3)
         )
 
 
 def test_a_cycle_count_is_written_exactly_when_the_row_is_not_disabled() -> None:
     """Refuse an O line with a cycle count, and a tracked line without one."""
     disabled_line = files.format_meas_row(
-        files.MeasRecord(measurement=DISABLED_READING, row=disabled_row(E, 3, 4))
+        files.MeasRecord(measurement=DISABLED_READING, row=disabled_row(E, 3))
     )
     with_cycle_count = disabled_line.replace(
         ",            -,          1234577,", ",            6,          1234577,"
@@ -655,7 +653,7 @@ def valid_rows(draw: st.DrawFn, *, has_measurement: bool, for_pair: bool) -> Row
     epoch_start = draw(EPOCH_STARTS)
     filter_states: Literal[1, 2, 3] = draw(st.sampled_from([1, 2, 3]))
     if for_pair and has_measurement and draw(st.booleans()):
-        return disabled_row(epoch_start, filter_states, draw(st.integers(0, 10**8)))
+        return disabled_row(epoch_start, filter_states)
     is_dormant = draw(st.booleans())
     allowed_outcomes = ("R", "X") if is_dormant else ("A", "R", "X")
     outcome = draw(st.sampled_from(allowed_outcomes)) if has_measurement else "P"
@@ -684,7 +682,6 @@ def valid_rows(draw: st.DrawFn, *, has_measurement: bool, for_pair: bool) -> Row
         y=(draw(COLUMN_FLOATS) if filter_states > 1 else 0.0) if is_tracked else None,
         d=(draw(COLUMN_FLOATS) if filter_states == 3 else 0.0) if is_tracked else None,
         innovation_scale=abs(draw(COLUMN_FLOATS)) if is_tracked else None,
-        segment=draw(st.integers(0, 10**8)),
         step_offset=draw(st.integers(-(10**14), 10**14)),
         epochs_in_segment=draw(st.integers(0, 10**8)),
         epochs_since_accept=draw(st.integers(0, 10**8)),
@@ -697,9 +694,7 @@ def valid_rows(draw: st.DrawFn, *, has_measurement: bool, for_pair: bool) -> Row
     )
 
 
-def disabled_row(
-    epoch_start: datetime, filter_states: Literal[1, 2, 3], segment: int
-) -> Row:
+def disabled_row(epoch_start: datetime, filter_states: Literal[1, 2, 3]) -> Row:
     """Build a disabled pair's row: O alone, no state, the counters at zero."""
     return Row(
         interpolated_datetime=epoch_start,
@@ -708,7 +703,6 @@ def disabled_row(
         y=None,
         d=None,
         innovation_scale=None,
-        segment=segment,
         step_offset=0,
         epochs_in_segment=0,
         epochs_since_accept=0,
@@ -964,18 +958,20 @@ def test_a_line_that_is_not_a_row_has_no_epoch(row_line: bytes) -> None:
     assert files.row_epoch(predicted_row_lines(1)[0].encode()[:-1], "meas") is None
 
 
-def with_segment_too_wide(row_line: str) -> str:
-    """Give the line at its width, its segment one character wider than its column.
+def with_counter_too_wide(row_line: str) -> str:
+    """Give the line at its width, a counter one character wider than its column.
 
-    The space the segment takes is taken from the padding of a later field.
+    The space the counter takes is taken from the padding of a later field.
     """
     row_fields = row_line.split(", ")
-    segment_index = [column.name for column in files.MEAS_COLUMNS].index("segment")
-    row_fields[segment_index] = "1" * (len(row_fields[segment_index]) + 1)
+    counter_index = [column.name for column in files.MEAS_COLUMNS].index(
+        "epochs_in_segment"
+    )
+    row_fields[counter_index] = "1" * (len(row_fields[counter_index]) + 1)
     padded_index = next(
         field_index
         for field_index, field_text in enumerate(row_fields)
-        if field_index > segment_index and field_text.startswith("  ")
+        if field_index > counter_index and field_text.startswith("  ")
     )
     row_fields[padded_index] = row_fields[padded_index][1:]
     return ", ".join(row_fields)
@@ -991,7 +987,7 @@ def test_a_field_too_wide_for_its_column_is_a_damaged_row(
     writes it.
     """
     row_lines = predicted_row_lines(2)
-    wide_line = with_segment_too_wide(row_lines[1].removesuffix("\n"))
+    wide_line = with_counter_too_wide(row_lines[1].removesuffix("\n"))
     assert len(wide_line) == files.MEAS_WIDTH
     with caplog.at_level(logging.DEBUG):
         assert files.row_epoch(f"{wide_line}\n".encode(), "meas") is None
@@ -1193,7 +1189,7 @@ def test_a_pair_s_newest_z_is_kept_as_its_file_holds_it(
 ) -> None:
     """Keep each pair's newest z, none for a row without one, and move it on take."""
     meas, ddiff = make_archives(tmp_path)
-    row = disabled_row(E, 3, 4) if flags == "O" else worked_row(flags=flags)
+    row = disabled_row(E, 3) if flags == "O" else worked_row(flags=flags)
     epoch_buffer = files.DayBuffer()
     epoch_buffer.add(
         meas / "das_a.mc2.ox23.dat",
@@ -1215,7 +1211,7 @@ def test_the_last_record_of_a_sound_file_is_read_with_its_z(
     """Read the last record back, a tracked or a disabled pair's, its z kept."""
     meas, _ = make_archives(tmp_path)
     file_record = (
-        files.MeasRecord(measurement=DISABLED_READING, row=disabled_row(E, 3, 4))
+        files.MeasRecord(measurement=DISABLED_READING, row=disabled_row(E, 3))
         if flags == "O"
         else files.MeasRecord(measurement=APPENDIX_A_MEASUREMENT, row=worked_row())
     )
@@ -2266,12 +2262,12 @@ def test_a_measurement_time_on_a_whole_second_keeps_its_microseconds() -> None:
 def test_a_value_too_wide_names_its_row_s_epoch() -> None:
     """Say which epoch's row holds a value too wide for its column."""
     meas_record = files.MeasRecord(
-        measurement=None, row=worked_row(flags="P", segment=10**12)
+        measurement=None, row=worked_row(flags="P", epochs_in_segment=10**12)
     )
     with pytest.raises(DataFileError, match=r"^row of 2025-09-23 06:00:00\+00:00: "):
         files.format_meas_row(meas_record)
     ddiff_record = files.DdiffRecord(
-        measurement=None, row=worked_row(flags="P", segment=10**12)
+        measurement=None, row=worked_row(flags="P", epochs_in_segment=10**12)
     )
     with pytest.raises(DataFileError, match=r"^row of 2025-09-23 06:00:00\+00:00: "):
         files.format_ddiff_row(ddiff_record)
@@ -2287,7 +2283,7 @@ def with_field_replaced(row_line: str, field_index: int, field_text: str) -> str
 @pytest.mark.parametrize(
     ("file_kind", "line_change", "parse_reason"),
     [
-        ("meas", lambda row_line: row_line.rsplit(", ", 1)[0], "26 fields, not 27"),
+        ("meas", lambda row_line: row_line.rsplit(", ", 1)[0], "25 fields, not 26"),
         (
             "meas",
             lambda row_line: with_field_replaced(row_line, 9, "nan"),
@@ -2319,7 +2315,7 @@ def with_field_replaced(row_line: str, field_index: int, field_text: str) -> str
         ),
         (
             "meas",
-            lambda row_line: with_field_replaced(row_line, 17, "60941.243056"),
+            lambda row_line: with_field_replaced(row_line, 16, "60941.243056"),
             "never empty",
         ),
     ],
@@ -2547,13 +2543,12 @@ def test_row_fields_read_back_give_the_row() -> None:
 @pytest.mark.parametrize(
     ("row_field", "wrong_value"),
     [
-        ("segment", -1),
         ("epochs_in_segment", -1),
         ("epochs_since_accept", -1),
         ("consecutive_rejects", -1),
         ("filter_states", 4),
         ("x_fs", 1.5),
-        ("segment", True),
+        ("epochs_in_segment", True),
         ("interpolated_datetime", E.replace(tzinfo=None)),
         ("rejects", ((E.replace(tzinfo=None), 1.0),)),
         ("flags", "AR"),

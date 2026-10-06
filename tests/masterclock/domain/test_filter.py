@@ -13,22 +13,21 @@ noise-free ramp or parabola is followed to within 1 ps, whether the phase
 is kept exact or each row stores it in whole femtoseconds.
 
 The row lifecycle: a draft has a row's fields, in a row's order; a row
-starts from the last row moved on one epoch, or dormant in segment 0 for a
-new series, or in the segment after its last row's for one that starts
-again; a slip-corrected measurement marks its row S; an accepted row holds
-the update, clears the counters and the buffer, and moves the innovation
-scale by the innovation before the update, never below its floor, and a
-draft with no innovation scale is refused; a held row (P, X or R) stores the
-prediction and keeps the scale, the counters and the buffer, one more epoch
-since an accept; a held row past the gap limit, or with no prediction, is
-dormant, with no state, and is not written when it had no measurement; a
-cold start begins segment + 1 at the measurement with sigma0; a warm
-segment start keeps the state and the step offset and takes the new time
-constants, never a new model; a row of a 2- or 3-state series is unsettled
-while its segment is younger than five time constants, a dormant or 1-state
-row never; flags are written in the order ARXPODSNU; a finished draft that
-is not a valid row is refused; and a 1-state series passes its
-measurements through.
+starts from the last row moved on one epoch, or dormant for a new series or
+one that starts again; a slip-corrected measurement marks its row S; an
+accepted row holds the update, clears the counters and the buffer, and
+moves the innovation scale by the innovation before the update, never below
+its floor, and a draft with no innovation scale is refused; a held row (P, X
+or R) stores the prediction and keeps the scale, the counters and the
+buffer, one more epoch since an accept; a held row past the gap limit, or
+with no prediction, is dormant, with no state, and is not written when it
+had no measurement; a cold start begins a new segment at the measurement
+with sigma0; a warm segment start keeps the state and the step offset and
+takes the new time constants, never a new model; a row of a 2- or 3-state
+series is unsettled while its segment is younger than five time constants,
+a dormant or 1-state row never; flags are written in the order ARXPODSNU; a
+finished draft that is not a valid row is refused; and a 1-state series
+passes its measurements through.
 
 Steps: the gate passes an innovation of at most five innovation scales,
 compared as exact fractions, and an rms up to the pair's limit, and refuses
@@ -45,9 +44,8 @@ buffer, so a step needs three rejects in the buffer, each within the limit,
 and a dormant series never buffers it, so it never starts acquisition.
 
 A disabled series is not tracked: with a reading it writes a row of flag O
-alone, with no state, innovation, counters or buffer, in the segment of the
-row before it, segment 0 for a new series, and its settings' model and time
-constants; with none it writes no row; it never cold-starts.
+alone, with no state, innovation, counters or buffer, and its settings'
+model and time constants; with none it writes no row; it never cold-starts.
 
 Acquisition: a series with no valid state buffers its measurements and
 cold-starts from the third of three from consecutive epochs whose second
@@ -62,7 +60,8 @@ pair's, with an rms, or a triple's, with sigma_dd and no rms test, and that
 value is the floor of the innovation scale; a prediction for a series with
 no scale is refused; then every path of the decision flow gives its row, a
 component cold start makes a triple dormant, with or without a measurement
-at the epoch, and the result says whether the row cold-started.
+at the epoch, and the result says whether the row cold-started and which
+kind of step, if any, it accepted.
 
 The classification and acquisition limits hold exactly at their values, the
 slope is fitted as the design writes it, gains exist for M = 1, the drift is
@@ -123,7 +122,6 @@ def last_row(**field_changes: object) -> Row:
         "y": 0.0123,
         "d": 0.0,
         "innovation_scale": 3.0,
-        "segment": 4,
         "step_offset": 0,
         "epochs_in_segment": 811,
         "epochs_since_accept": 0,
@@ -523,7 +521,7 @@ def test_a_draft_has_the_fields_of_a_row() -> None:
     assert field_names == [row_field.name for row_field in dataclasses.fields(Row)]
 
 
-def test_a_new_series_starts_dormant_in_segment_zero() -> None:
+def test_a_new_series_starts_dormant() -> None:
     """Start a series with no last row with no state and every counter at 0."""
     draft = estimator.carry(
         NEXT_EPOCH_START,
@@ -537,7 +535,6 @@ def test_a_new_series_starts_dormant_in_segment_zero() -> None:
         y=None,
         d=None,
         innovation_scale=None,
-        segment=0,
         step_offset=0,
         epochs_in_segment=0,
         epochs_since_accept=0,
@@ -550,11 +547,11 @@ def test_a_new_series_starts_dormant_in_segment_zero() -> None:
     )
 
 
-def test_a_series_starting_again_starts_in_the_segment_after_its_last() -> None:
-    """Start dormant in the segment after the given one, and cold-start past it."""
+def test_a_series_starting_again_starts_dormant_and_cold_starts() -> None:
+    """Start a series with no last row dormant, and cold-start it on three readings."""
     series_params = make_series_params()
-    draft = estimator.carry(NEXT_EPOCH_START, None, series_params, last_segment=7)
-    assert (draft.segment, draft.x_fs, draft.flags) == (8, None, "")
+    draft = estimator.carry(NEXT_EPOCH_START, None, series_params)
+    assert (draft.x_fs, draft.flags) == (None, "")
     epoch_start = NEXT_EPOCH_START
     previous_row: Row | None = None
     for _ in range(3):
@@ -564,11 +561,10 @@ def test_a_series_starting_again_starts_in_the_segment_after_its_last() -> None:
             previous_row,
             None,
             estimator.FilterInput(z=WORKED_Z, rms=3),
-            last_segment=7,
         ).row
         epoch_start += EPOCH_LENGTH
     assert previous_row is not None
-    assert (previous_row.flags, previous_row.segment) == ("ANU", 9)
+    assert previous_row.flags == "ANU"
 
 
 def test_carry_moves_the_last_row_on_one_epoch() -> None:
@@ -787,7 +783,7 @@ def test_a_gap_of_the_gap_limit_is_still_predicted(gmax: int) -> None:
     row = estimator.accept(
         moved_on(previous_row), prediction, round_even(prediction.x) - prediction.x, 3
     )
-    assert (row.flags, row.epochs_since_accept, row.segment) == ("A", 0, 4)
+    assert (row.flags, row.epochs_since_accept) == ("A", 0)
 
 
 @pytest.mark.parametrize("gmax", [3, 6])
@@ -801,7 +797,7 @@ def test_a_gap_past_the_gap_limit_goes_dormant(gmax: int) -> None:
         previous_row.d,
         previous_row.innovation_scale,
     ) == (None,) * 4
-    assert (previous_row.segment, previous_row.step_offset) == (4, 0)
+    assert previous_row.step_offset == 0
     assert estimator.predict(previous_row, NO_STEERING_INPUT) is None
     later_row = run_gap(gmax + 3, gmax)
     assert (later_row.flags, later_row.epochs_since_accept) == ("PD", gmax + 3)
@@ -842,25 +838,23 @@ def test_a_held_row_without_a_prediction_is_dormant() -> None:
 
 
 @pytest.mark.parametrize("outcome", ["P", "X", "R"])
-def test_a_dormant_row_keeps_its_segment_and_offset(
+def test_a_dormant_row_keeps_its_offset(
     outcome: Literal["P", "X", "R"],
 ) -> None:
-    """Empty the state and the buffer, keep segment and step_offset (13.4)."""
+    """Empty the state and the buffer, keep step_offset (13.4)."""
     previous_row = last_row(
         step_offset=-37, rejects=((EPOCH_START, 12.0),), consecutive_rejects=1
     )
     row = estimator.dormant(moved_on(previous_row), outcome)
     assert row.flags == f"{outcome}D"
     assert (row.x_fs, row.y, row.d, row.innovation_scale) == (None,) * 4
-    assert (row.segment, row.step_offset, row.rejects) == (4, -37, ())
+    assert (row.step_offset, row.rejects) == (-37, ())
 
 
 def test_a_dormant_row_can_keep_its_acquisition_buffer() -> None:
     """Keep the buffer when asked: it holds the measurements to acquire from."""
     buffered_entries = ((EPOCH_START, 1_234_000.0),)
-    previous_row = last_row(
-        flags="RD", rejects=buffered_entries, segment=0, **DORMANT_FIELDS
-    )
+    previous_row = last_row(flags="RD", rejects=buffered_entries, **DORMANT_FIELDS)
     row = estimator.dormant(moved_on(previous_row), "R", keep_buffer=True)
     assert (row.flags, row.rejects) == ("RD", buffered_entries)
 
@@ -872,7 +866,7 @@ def test_a_dormant_row_can_keep_its_acquisition_buffer() -> None:
 def test_a_cold_start_begins_a_segment_from_the_measurement(
     filter_states: Literal[1, 2, 3], M: float | None, flags: str
 ) -> None:
-    """Start segment + 1 at [z, 0, 0] with sigma0 and step_offset 0 (8.6, 13.4)."""
+    """Start a new segment at [z, 0, 0] with sigma0 and step_offset 0 (8.6, 13.4)."""
     series_params = make_series_params(
         filter_states=filter_states, M=M, M_sigma=40.0, sigma0=6.5
     )
@@ -880,7 +874,6 @@ def test_a_cold_start_begins_a_segment_from_the_measurement(
         filter_states=filter_states,
         time_constant=M,
         flags="RD",
-        segment=2,
         step_offset=15,
         consecutive_rejects=4,
         rejects=((EPOCH_START, 1_234_570.0),),
@@ -896,7 +889,6 @@ def test_a_cold_start_begins_a_segment_from_the_measurement(
         y=0.0,
         d=0.0,
         innovation_scale=6.5,
-        segment=3,
         step_offset=0,
         epochs_in_segment=0,
         epochs_since_accept=0,
@@ -910,7 +902,7 @@ def test_a_cold_start_begins_a_segment_from_the_measurement(
 
 
 def test_a_configuration_change_starts_a_warm_segment() -> None:
-    """Carry the state and step_offset into segment + 1, the new M, N U (8.7)."""
+    """Carry the state and step_offset into a new segment, the new M, N U (8.7)."""
     previous_row = last_row(step_offset=25)
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
@@ -918,7 +910,7 @@ def test_a_configuration_change_starts_a_warm_segment() -> None:
     draft = moved_on(previous_row)
     estimator.start_segment(draft, changed_params, keep_offset=True)
     row = estimator.hold(draft, prediction, "P", changed_params)
-    assert (row.flags, row.segment, row.epochs_in_segment) == ("PNU", 5, 0)
+    assert (row.flags, row.epochs_in_segment) == ("PNU", 0)
     assert (row.step_offset, row.time_constant, row.scale_time_constant) == (
         25,
         150.0,
@@ -928,14 +920,14 @@ def test_a_configuration_change_starts_a_warm_segment() -> None:
 
 
 def test_a_frequency_step_starts_a_warm_segment_and_accepts() -> None:
-    """Give A N U, segment + 1, step_offset carried, then the update (13.4)."""
+    """Give A N U, a new segment, step_offset carried, then the update (13.4)."""
     previous_row = last_row(step_offset=25)
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
     draft = moved_on(previous_row)
     estimator.start_segment(draft, make_series_params(), keep_offset=True)
     row = estimator.accept(draft, prediction, mpq(2), 3)
-    assert (row.flags, row.segment, row.step_offset) == ("ANU", 5, 25)
+    assert (row.flags, row.step_offset) == ("ANU", 25)
     assert row.x_fs == to_fs(estimator.update(prediction, mpq(2), 3, 100.0).x)
 
 
@@ -947,7 +939,7 @@ def test_a_phase_step_keeps_the_segment() -> None:
     row = estimator.accept(
         moved_on(previous_row, step_offset=525), prediction, mpq(2), 3
     )
-    assert (row.flags, row.segment, row.step_offset) == ("A", 4, 525)
+    assert (row.flags, row.step_offset) == ("A", 525)
 
 
 def test_a_segment_keeps_its_model() -> None:
@@ -1230,7 +1222,6 @@ def test_a_phase_step_is_found_on_the_third_reject(
     )
     assert [row.flags for row in rows_after] == ["R", "R", "A"]
     assert abs(rows_after[-1].step_offset - 12 - step_ps) <= 1
-    assert rows_after[-1].segment == rows_before[-1].segment
     assert rows_after[-1].innovation is not None
     assert abs(rows_after[-1].innovation) <= 1
     assert (rows_after[-1].consecutive_rejects, rows_after[-1].rejects) == (0, ())
@@ -1262,7 +1253,6 @@ def test_a_frequency_step_starts_a_new_segment(filter_states: Literal[2, 3]) -> 
     ramp_measurements = [z + 30 * (i + 1) for i, z in enumerate(measurements[3:])]
     rows_after = run_epochs(ramp_measurements, series_params, rows_before[-1])
     assert [row.flags for row in rows_after] == ["R", "R", "ANU"]
-    assert rows_after[-1].segment == rows_before[-1].segment + 1
     assert (rows_after[-1].step_offset, rows_after[-1].epochs_in_segment) == (12, 0)
     assert rows_after[-1].innovation is not None
     assert abs(rows_after[-1].innovation) <= 1
@@ -1387,7 +1377,7 @@ def test_three_consistent_measurements_cold_start_the_series(
     limit_z = round_even(mpq(101_000) + mpq(5) * mpq(math.sqrt(6) * 5))
     row = estimator.acquire(moved_on(previous_row), limit_z, series_params)
     assert row.flags == ("AN" if filter_states == 1 else "ANU")
-    assert (row.x_fs, row.segment, row.innovation_scale) == (limit_z * 1000, 5, 5.0)
+    assert (row.x_fs, row.innovation_scale) == (limit_z * 1000, 5.0)
     assert (row.rejects, row.consecutive_rejects, row.epochs_since_accept) == ((), 0, 0)
 
 
@@ -1459,7 +1449,6 @@ def test_inconsistent_outliers_make_a_series_dormant_at_n_break() -> None:
     steady_measurements = [1_240_000, 1_240_010, 1_240_020]
     rows_after = run_epochs(steady_measurements, series_params, step_rows[-1])
     assert [row.flags for row in rows_after] == ["RD", "RD", "ANU"]
-    assert rows_after[-1].segment == step_rows[-1].segment + 1
     assert rows_after[-1].x_fs == 1_240_020_000
 
 
@@ -1568,7 +1557,7 @@ WORKED_Z: Final = 1_234_577
 def test_the_worked_epoch_is_accepted() -> None:
     """Give the accepted row of design 5.4 for the worked epoch, not cold."""
     step_result = filter_step_after(last_row(), pair_input(WORKED_Z))
-    assert step_result.cold_started is False
+    assert (step_result.cold_started, step_result.step) == (False, None)
     assert step_result.row.flags == "A"
     assert step_result.row.x_fs == 1_234_574_457
 
@@ -1594,7 +1583,6 @@ def test_a_new_series_buffers_its_first_measurement() -> None:
     step_result = filter_step_after(None, pair_input(WORKED_Z))
     assert (step_result.row.flags, step_result.cold_started) == ("RD", False)
     assert step_result.row.rejects == ((NEXT_EPOCH_START, float(WORKED_Z)),)
-    assert step_result.row.segment == 0
 
 
 def test_a_consistent_third_measurement_cold_starts() -> None:
@@ -1609,7 +1597,7 @@ def test_a_consistent_third_measurement_cold_starts() -> None:
     )
     step_result = filter_step_after(previous_row, pair_input(WORKED_Z))
     assert (step_result.row.flags, step_result.cold_started) == ("ANU", True)
-    assert step_result.row.segment == 5
+    assert step_result.step is None
 
 
 def test_an_excluded_measurement_within_the_gate_is_held() -> None:
@@ -1733,7 +1721,7 @@ def test_a_triple_has_no_rms_test_and_its_floor_is_sigma_dd() -> None:
 
 
 def test_a_third_agreeing_reject_is_a_phase_step() -> None:
-    """Give A, step_offset up, same segment, after two rejects (9.6)."""
+    """Give A, step_offset up, no new segment, and name the phase step (9.6)."""
     previous_row = last_row(
         flags="R",
         consecutive_rejects=2,
@@ -1746,19 +1734,12 @@ def test_a_third_agreeing_reject_is_a_phase_step() -> None:
     step_result = filter_step_after(
         previous_row, pair_input(round_even(prediction.x) + 150)
     )
-    assert (
-        step_result.row.flags,
-        step_result.row.step_offset,
-        step_result.row.segment,
-    ) == (
-        "A",
-        150,
-        4,
-    )
+    assert (step_result.row.flags, step_result.row.step_offset) == ("A", 150)
+    assert step_result.step == "phase"
 
 
 def test_a_third_reject_on_a_line_is_a_frequency_step() -> None:
-    """Give A N U in segment + 1 after rejects on a line (9.6)."""
+    """Give A N U in a new segment after rejects on a line, and name the step (9.6)."""
     previous_row = last_row(
         flags="R",
         consecutive_rejects=2,
@@ -1771,7 +1752,7 @@ def test_a_third_reject_on_a_line_is_a_frequency_step() -> None:
     step_result = filter_step_after(
         previous_row, pair_input(round_even(prediction.x) + 90)
     )
-    assert (step_result.row.flags, step_result.row.segment) == ("ANU", 5)
+    assert (step_result.row.flags, step_result.step) == ("ANU", "frequency")
 
 
 def test_a_third_scattered_reject_is_held() -> None:
@@ -1854,12 +1835,12 @@ def test_a_slip_corrected_measurement_carries_s() -> None:
 
 
 def test_a_configuration_change_warm_starts_before_the_measurement() -> None:
-    """Start segment + 1 with the new M, then accept with its gains (8.7, U14)."""
+    """Start a new segment with the new M, then accept with its gains (8.7, U14)."""
     changed_params = make_series_params(M=150.0, M_sigma=60.0)
     previous_row = last_row()
     step_result = filter_step_after(previous_row, pair_input(WORKED_Z), changed_params)
     row = step_result.row
-    assert (row.flags, row.segment, row.epochs_in_segment) == ("ANU", 5, 0)
+    assert (row.flags, row.epochs_in_segment, step_result.step) == ("ANU", 0, None)
     assert (row.time_constant, row.scale_time_constant, row.step_offset) == (
         150.0,
         60.0,
@@ -1891,7 +1872,7 @@ def test_a_dormant_series_takes_new_settings_at_its_cold_start() -> None:
 
 def test_unchanged_settings_start_no_segment() -> None:
     """Keep the segment when M and M_sigma are as in the last row."""
-    assert filter_step_after(last_row(), pair_input(WORKED_Z)).row.segment == 4
+    assert "N" not in filter_step_after(last_row(), pair_input(WORKED_Z)).row.flags
 
 
 @pytest.mark.parametrize(
@@ -2055,7 +2036,7 @@ def test_a_configuration_change_in_the_filter_step_keeps_the_step_offset() -> No
     row = estimator.filter_step(
         NEXT_EPOCH_START, changed_params, previous_row, prediction, filter_input
     ).row
-    assert (row.segment, row.step_offset) == (5, 25)
+    assert row.step_offset == 25
     assert "N" in row.flags
 
 
@@ -2131,24 +2112,10 @@ def test_every_filter_error_is_logged_as_raised(
 # ----------------------------------------------------------- disabled series
 
 
-@pytest.mark.parametrize(
-    ("previous_row", "last_segment", "segment"),
-    [
-        (last_row(), None, 4),
-        (None, 4, 4),
-        (None, None, 0),
-    ],
-)
-def test_a_disabled_series_with_a_reading_writes_an_o_row(
-    previous_row: Row | None, last_segment: int | None, segment: int
-) -> None:
-    """Write O alone, no state, in the segment of the row before it (13.6)."""
+def test_a_disabled_series_with_a_reading_writes_an_o_row() -> None:
+    """Write O alone, no state, no step, nothing of the row before it (13.6)."""
     step_result = estimator.disabled_step(
-        NEXT_EPOCH_START,
-        make_series_params(disabled=True),
-        previous_row,
-        measured=True,
-        last_segment=last_segment,
+        NEXT_EPOCH_START, make_series_params(disabled=True), measured=True
     )
     assert step_result == estimator.StepResult(
         row=Row(
@@ -2158,7 +2125,6 @@ def test_a_disabled_series_with_a_reading_writes_an_o_row(
             y=None,
             d=None,
             innovation_scale=None,
-            segment=segment,
             step_offset=0,
             epochs_in_segment=0,
             epochs_since_accept=0,
@@ -2170,6 +2136,7 @@ def test_a_disabled_series_with_a_reading_writes_an_o_row(
             flags="O",
         ),
         cold_started=False,
+        step=None,
     )
     assert estimator.writes_row(step_result.row)
 
@@ -2179,23 +2146,43 @@ def test_a_disabled_series_takes_its_settings_model() -> None:
     row = estimator.disabled_step(
         NEXT_EPOCH_START,
         make_series_params(filter_states=1, M=None, disabled=True),
-        None,
         measured=True,
     ).row
     assert (row.filter_states, row.time_constant, row.flags) == (1, None, "O")
 
 
-@pytest.mark.parametrize("previous_row", [last_row(), None])
-def test_a_disabled_series_without_a_reading_writes_no_row(
-    previous_row: Row | None,
-) -> None:
+def test_a_disabled_series_without_a_reading_writes_no_row() -> None:
     """Give a row that is not written, and no cold start."""
     step_result = estimator.disabled_step(
-        NEXT_EPOCH_START,
-        make_series_params(disabled=True),
-        previous_row,
-        measured=False,
-        last_segment=None if previous_row else 4,
+        NEXT_EPOCH_START, make_series_params(disabled=True), measured=False
     )
     assert not estimator.writes_row(step_result.row)
     assert not step_result.cold_started
+
+
+def test_a_frequency_step_beside_a_configuration_change_is_named() -> None:
+    """Name the frequency step when new settings take effect on the same row (8.7)."""
+    previous_row = last_row(
+        flags="R",
+        consecutive_rejects=2,
+        rejects=buffer_ending_at_start(30.0, 60.0),
+        innovation=60.0,
+        epochs_since_accept=2,
+    )
+    prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
+    assert prediction is not None
+    step_result = filter_step_after(
+        previous_row,
+        pair_input(round_even(prediction.x) + 90),
+        make_series_params(M=150.0),
+    )
+    assert (step_result.row.flags, step_result.row.time_constant) == ("ANU", 150.0)
+    assert step_result.step == "frequency"
+
+
+def test_a_row_has_no_segment_number() -> None:
+    """Keep no segment number in a row or a draft: the N flag marks a segment start."""
+    assert "segment" not in {row_field.name for row_field in dataclasses.fields(Row)}
+    assert "segment" not in {
+        draft_field.name for draft_field in dataclasses.fields(estimator.RowDraft)
+    }

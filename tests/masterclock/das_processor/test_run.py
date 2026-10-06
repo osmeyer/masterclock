@@ -34,7 +34,8 @@ counts of rows written at INFO; steps, cold starts, dormancy, a series that
 stops, configuration changes and corrected slips at INFO; rejects,
 screening failures, a missing self pair and undecided slips at WARNING;
 each series' outcome at DEBUG and its prediction and update at TRACE; each
-series named by the run's RF channel. Nothing is worked out for a level the
+series named by the run's RF channel, and every line about a series' row
+or an epoch's data naming the epoch. Nothing is worked out for a level the
 log leaves out, and no steering when no steering event falls near the epoch.
 
 A run writes a day's rows after its 23:50 epoch, measured or not, and at the
@@ -53,9 +54,8 @@ damaged, is refused without a journal and deleted with one, to be made
 again; with no file, the epoch containing start_from_mjd. A roll-back is
 logged once at WARNING, with its reason, what it did and the newest row
 left, and nothing is logged when nothing was cut. A series whose newest row
-is not of the epoch before starts cold, in the segment after its newest
-row's, as a triple does when its clock comes back to its building, run in
-one go or epoch by epoch.
+is not of the epoch before starts cold, as a triple does when its clock
+comes back to its building, run in one go or epoch by epoch.
 
 Each series takes the settings in force at its epoch; a link not accepted
 does not make its triple cold; the TRACE lines and steps with a settings
@@ -66,13 +66,13 @@ files does nothing; and a gap at the start of a run is predicted.
 
 A series dormant with no measurement writes no row: one whose measurements
 stop writes predicted rows up to its gap limit and then none, and on its
-return starts again in its next segment, in one go or epoch by epoch; and
+return starts again dormant, in one go or epoch by epoch; and
 an epoch that writes no row is not counted as a step, so a run of one step
 at a time gets past a gap no series writes.
 
 A disabled clock's pair writes a row of flag O alone at each epoch with a
 reading, holding the reading and the z of its newest row, and starts
-dormant in its next segment once enabled again; the triples and the other
+dormant again once enabled; the triples and the other
 pairs are written as if the clock was not measured; a disabled reference is
 not one of the epoch's references, and every pair it is in is disabled; a
 clock disabled or enabled again is logged once at INFO at that epoch; and a
@@ -410,7 +410,6 @@ def last_row(**changed_fields: object) -> Row:
         "y": 0.0,
         "d": 0.0,
         "innovation_scale": 2.0,
-        "segment": 1,
         "step_offset": 0,
         "epochs_in_segment": 900,
         "epochs_since_accept": 0,
@@ -431,7 +430,6 @@ WORKED_LAST_ROW: Final = last_row(
     x_fs=1_234_567_000,
     y=0.0123,
     innovation_scale=3.0,
-    segment=4,
     epochs_in_segment=811,
     filter_states=3,
     time_constant=100.0,
@@ -596,7 +594,7 @@ def test_a_new_pair_starts_acquiring(tmp_path: Path) -> None:
     pair_step = run.process_pairs(epoch, {})
     for series_key in REFERENCE_LAST_ROWS:
         row = pair_step.step_results[(series_key[0], series_key[1])].row
-        assert (row.flags, len(row.rejects), row.segment) == ("RD", 1, 0)
+        assert (row.flags, len(row.rejects)) == ("RD", 1)
     assert pair_step.predictions[("mc1", "mc1")] is None
 
 
@@ -837,7 +835,6 @@ def test_a_link_restart_without_the_clock_pair_makes_the_triple_dormant() -> Non
             )
         },
         {triple: triple_last_row()},
-        {},
         {
             ("mc2", "ox23"): Component(accepted=False),
             ("mc1", "mc2"): Component(accepted=True, z=1, rms=2, cold_started=True),
@@ -1412,7 +1409,8 @@ def test_a_reject_is_logged_at_warning(
         last_rows,
     )
     assert messages_at(log_entries, "WARNING") == [
-        "das_a.mc2.ox23 rejected: innovation 202.6 ps, scale 3.0 ps, 1 consecutive"
+        "das_a.mc2.ox23 rejected at 2025-09-23 06:00:00+00:00: innovation 202.6 ps,"
+        " scale 3.0 ps, 1 consecutive"
     ]
 
 
@@ -1440,8 +1438,9 @@ def test_a_phase_step_is_logged_at_info(
         epoch_of([*REFERENCE_MEASUREMENTS, moved_measurement], last_rows, tmp_path),
         last_rows,
     )
-    assert "das_a.mc2.ox23 phase step of 150 ps; step offset 150 ps" in messages_at(
-        log_entries, "INFO"
+    assert (
+        f"das_a.mc2.ox23 phase step at {E}: 150 ps; step offset 150 ps"
+        in messages_at(log_entries, "INFO")
     )
 
 
@@ -1465,7 +1464,7 @@ def test_a_cold_start_and_dormancy_are_logged_at_info(
         [*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], last_rows, tmp_path
     )
     info_messages = messages_at(logged_events(caplog, epoch, last_rows), "INFO")
-    assert "das_a.mc2.ox23 cold start: segment 2" in info_messages
+    assert f"das_a.mc2.ox23 cold start at {E}" in info_messages
     rejecting_last_rows = {
         **REFERENCE_LAST_ROWS,
         ("mc1", "mc1"): last_row(x_fs=1_000_000, epochs_since_accept=40),
@@ -1478,7 +1477,7 @@ def test_a_cold_start_and_dormancy_are_logged_at_info(
     info_messages = messages_at(
         logged_events(caplog, epoch, rejecting_last_rows), "INFO"
     )
-    assert "das_a.mc1.mc1 dormant" in info_messages
+    assert f"das_a.mc1.mc1 dormant at {E}" in info_messages
 
 
 def test_a_configuration_change_is_logged_at_info(
@@ -1492,15 +1491,15 @@ def test_a_configuration_change_is_logged_at_info(
     )
     info_messages = messages_at(logged_events(caplog, epoch, last_rows), "INFO")
     assert (
-        "das_a.mc2.ox23 configuration change: M 80.0 to 100.0, M_sigma 50.0 to 50.0"
-        in info_messages
-    )
+        f"das_a.mc2.ox23 configuration change at {E}: M 80.0 to 100.0,"
+        " M_sigma 50.0 to 50.0"
+    ) in info_messages
 
 
 def test_a_frequency_step_is_logged_at_info(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Log a frequency step and the segment it starts (16.2)."""
+    """Log a frequency step with the epoch it starts a segment at (16.2)."""
     ramping_row = dataclasses.replace(
         WORKED_LAST_ROW,
         flags="R",
@@ -1524,7 +1523,7 @@ def test_a_frequency_step_is_logged_at_info(
         ),
         "INFO",
     )
-    assert "das_a.mc2.ox23 frequency step: segment 5" in info_messages
+    assert f"das_a.mc2.ox23 frequency step at {E}" in info_messages
 
 
 def test_screening_and_slip_events_are_logged(
@@ -1552,7 +1551,10 @@ def test_screening_and_slip_events_are_logged(
         ),
         "WARNING",
     )
-    assert "self-measurement of mc2 failed: excluded das_a.mc2.ox23" in warning_messages
+    assert (
+        f"self-measurement of mc2 failed at {E}: excluded das_a.mc2.ox23"
+        in warning_messages
+    )
 
 
 def test_a_missing_self_measurement_is_logged(
@@ -1561,7 +1563,7 @@ def test_a_missing_self_measurement_is_logged(
     """Log a self pair with a prediction but no measurement at WARNING (10.1)."""
     last_rows = dict(REFERENCE_LAST_ROWS)
     epoch = epoch_of(REFERENCE_MEASUREMENTS[1:], last_rows, tmp_path)
-    assert "self-measurement of mc1 missing" in messages_at(
+    assert f"self-measurement of mc1 missing at {E}" in messages_at(
         logged_events(caplog, epoch, last_rows), "WARNING"
     )
 
@@ -1583,7 +1585,7 @@ def test_a_reciprocity_and_a_closure_failure_are_logged(
         "WARNING",
     )
     assert (
-        "reciprocity of mc1-mc2 failed: excluded das_a.mc1.mc2, das_a.mc2.mc1"
+        f"reciprocity of mc1-mc2 failed at {E}: excluded das_a.mc1.mc2, das_a.mc2.mc1"
         in warning_messages
     )
 
@@ -1617,7 +1619,7 @@ def test_slips_corrected_and_undecided_are_logged(
         epoch_of([*REFERENCE_MEASUREMENTS, *clock_measurements], last_rows, tmp_path),
         last_rows,
     )
-    assert "das_a.mc1.ox23 slip corrected: +1 cycles" in messages_at(
+    assert f"das_a.mc1.ox23 slip corrected at {E}: +1 cycles" in messages_at(
         log_entries, "INFO"
     )
     wide_scale_fields = {**maser_fields, "innovation_scale": 25_000.0}
@@ -1628,7 +1630,7 @@ def test_slips_corrected_and_undecided_are_logged(
     )
     warning_messages = messages_at(logged_events(caplog, epoch, last_rows), "WARNING")
     assert (
-        "slip of clock ox23 undecided: excluded das_a.mc1.ox23, das_a.mc2.ox23"
+        f"slip of clock ox23 undecided at {E}: excluded das_a.mc1.ox23, das_a.mc2.ox23"
         in warning_messages
     )
 
@@ -1659,7 +1661,7 @@ def test_a_closure_failure_is_logged(
         "WARNING",
     )
     assert (
-        "closure of link mc2-mc3 failed: excluded das_a.mc2.mc3, das_a.mc3.mc2"
+        f"closure of link mc2-mc3 failed at {E}: excluded das_a.mc2.mc3, das_a.mc3.mc2"
         in warning_messages
     )
 
@@ -1778,8 +1780,9 @@ def test_a_phase_step_logs_the_step_alone_and_the_new_offset(
         epoch_of([*REFERENCE_MEASUREMENTS, moved_measurement], last_rows, tmp_path),
         last_rows,
     )
-    assert "das_a.mc2.ox23 phase step of 150 ps; step offset 190 ps" in messages_at(
-        log_entries, "INFO"
+    assert (
+        f"das_a.mc2.ox23 phase step at {E}: 150 ps; step offset 190 ps"
+        in messages_at(log_entries, "INFO")
     )
 
 
@@ -1815,7 +1818,7 @@ def test_a_frequency_step_with_a_configuration_change_is_logged(
         message.startswith("das_a.mc2.ox23 configuration change")
         for message in info_messages
     )
-    assert "das_a.mc2.ox23 frequency step: segment 6" in info_messages
+    assert f"das_a.mc2.ox23 frequency step at {E}" in info_messages
 
 
 def test_a_cold_start_logs_no_step(
@@ -1841,7 +1844,7 @@ def test_a_cold_start_logs_no_step(
     ox23_messages = [
         message for message in info_messages if message.startswith("das_a.mc2.ox23 ")
     ]
-    assert ox23_messages == ["das_a.mc2.ox23 cold start: segment 2"]
+    assert ox23_messages == [f"das_a.mc2.ox23 cold start at {E}"]
 
 
 def test_an_epoch_s_log_names_the_series_of_its_channel(
@@ -2314,32 +2317,31 @@ def test_a_run_reads_each_steering_line_once(
 
 
 def test_a_series_with_no_row_for_the_epoch_before_starts_again() -> None:
-    """Give rows of the epoch before as last rows, and older series their segments."""
+    """Give the rows of the epoch before as last rows, and leave older series out."""
     current_row = last_row()
-    older_row = last_row(interpolated_datetime=PREVIOUS_EPOCH - 3 * T, segment=6)
-    last_rows, last_segments = run.rows_before(
-        {("mc1", "mc1"): current_row, ("mc2", "mc2"): older_row}, E
+    older_row = last_row(interpolated_datetime=PREVIOUS_EPOCH - 3 * T)
+    disabled_newest_row = last_row(
+        flags="O", x_fs=None, y=None, d=None, innovation_scale=None
+    )
+    last_rows = run.rows_before(
+        {
+            ("mc1", "mc1"): current_row,
+            ("mc2", "mc2"): older_row,
+            ("mc1", "mc2"): disabled_newest_row,
+        },
+        E,
     )
     assert last_rows == {("mc1", "mc1"): current_row}
-    assert last_segments == {("mc2", "mc2"): 6}
 
 
-def test_a_pair_and_a_triple_starting_again_start_in_their_next_segments(
-    tmp_path: Path,
-) -> None:
-    """Start a pair and a triple with no last row dormant in the segment after."""
+def test_a_pair_and_a_triple_with_no_last_row_start_dormant(tmp_path: Path) -> None:
+    """Start a pair and a triple with no last row dormant, as new series do."""
     epoch = epoch_of([*REFERENCE_MEASUREMENTS, WORKED_DAS_MEASUREMENT], {}, tmp_path)
-    last_segments: dict[SeriesKey, int] = {
-        ("mc2", "ox23"): 5,
-        ("mc1", "mc2", "ox23"): 3,
-    }
-    pair_step = run.process_pairs(epoch, {}, last_segments)
-    triple_step = run.process_triples(epoch, {}, pair_step, last_segments)
+    pair_step = run.process_pairs(epoch, {})
+    triple_step = run.process_triples(epoch, {}, pair_step)
     pair_row = pair_step.step_results[("mc2", "ox23")].row
     triple_row = triple_step.step_results[("mc1", "mc2", "ox23")].row
-    assert (pair_row.flags, pair_row.segment) == ("RD", 6)
-    assert (triple_row.flags, triple_row.segment) == ("PD", 4)
-    assert pair_step.step_results[("mc1", "mc1")].row.segment == 0
+    assert (pair_row.flags, triple_row.flags) == ("RD", "PD")
 
 
 # ------------------------------------------------------------------ buildings
@@ -2443,13 +2445,7 @@ def test_a_triple_stops_while_its_clock_is_away_and_starts_cold_on_its_return(
     triple_rows = rows_of(batch_config, ("mc1", "mc1", "ox23"))
     assert epoch_indexes(triple_rows, LATE_START) == [2, 3, 4, 7, 8, 9]
     assert len(rows_of(batch_config, ("mc1", "ox23"))) == 10
-    assert [(row.flags, row.segment) for row in triple_rows[1:]] == [
-        ("RD", 0),
-        ("ANU", 1),
-        ("RD", 2),
-        ("RD", 2),
-        ("ANU", 3),
-    ]
+    assert [row.flags for row in triple_rows[1:]] == ["RD", "ANU", "RD", "RD", "ANU"]
     stepped_config, clock_config = moving_deployment(tmp_path / "stepped")
     for _ in range(10):
         run.run(stepped_config, clock_config, 1, ShutdownHandler())
@@ -2496,7 +2492,7 @@ def test_a_series_whose_measurements_stop_writes_no_more_rows(tmp_path: Path) ->
     assert all("P" in row.flags and "D" not in row.flags for row in pair_rows[3:9]), (
         pair_rows[3:9]
     )
-    assert [row.segment for row in pair_rows[8:]] == [1, 2, 2]
+    assert [row.flags for row in pair_rows[8:]] == ["PU", "RD", "RD"]
     assert epoch_indexes(rows_of(config, ("mc1", "mc1")), E) == list(range(14))
     assert epoch_indexes(rows_of(config, ("mc1", "mc1", "ox23")), E) == [2]
     for _, file_kind, series_key in run.data_series(config):
@@ -2533,11 +2529,7 @@ def test_an_epoch_that_writes_no_row_is_not_counted_as_a_step(tmp_path: Path) ->
     run.run(config, clock_config, 1, ShutdownHandler())
     self_rows = rows_of(config, ("mc1", "mc1"))
     assert epoch_indexes(self_rows, LATE_START) == [0, 1, 4]
-    assert [(row.flags, row.segment) for row in self_rows] == [
-        ("RD", 0),
-        ("RD", 0),
-        ("RD", 1),
-    ]
+    assert [row.flags for row in self_rows] == ["RD", "RD", "RD"]
 
 
 def test_a_series_that_stops_is_logged_once_at_info(
@@ -2551,8 +2543,11 @@ def test_a_series_that_stops_is_logged_once_at_info(
     epoch = epoch_of(REFERENCE_MEASUREMENTS[1:], stopping_last_rows, tmp_path)
     log_entries = logged_events(caplog, epoch, stopping_last_rows)
     info_messages = messages_at(log_entries, "INFO")
-    assert "das_a.mc1.mc1 stops: no row until it is measured again" in info_messages
-    assert "das_a.mc1.mc1 dormant" not in info_messages
+    assert (
+        f"das_a.mc1.mc1 stops at {E}: no row until it is measured again"
+        in info_messages
+    )
+    assert f"das_a.mc1.mc1 dormant at {E}" not in info_messages
     assert not any(
         message.startswith("das_a.mc1.mc1:")
         for message in messages_at(log_entries, "DEBUG")
@@ -2608,7 +2603,7 @@ def meas_records_of(config: AppConfig, pair: tuple[str, str]) -> list[files.Meas
 def test_a_disabled_clock_s_pair_writes_o_rows_and_starts_afresh_when_enabled(
     tmp_path: Path,
 ) -> None:
-    """Write O, the reading and the last z; start dormant next segment (U29)."""
+    """Write O, the reading and the last z; start dormant again once enabled (U29)."""
     config, clock_config = disabling_deployment(tmp_path)
     run.run(config, clock_config, None, ShutdownHandler())
     pair_records = meas_records_of(config, ("mc1", "ox23"))
@@ -2620,21 +2615,14 @@ def test_a_disabled_clock_s_pair_writes_o_rows_and_starts_afresh_when_enabled(
     assert isinstance(tracked_record.measurement, PairMeasurement)
     for disabled_record in pair_records[4:7]:
         assert isinstance(disabled_record.measurement, DisabledReading)
-        assert (disabled_record.row.flags, disabled_record.row.segment) == (
-            "O",
-            tracked_record.row.segment,
-        )
+        assert disabled_record.row.flags == "O"
         assert disabled_record.measurement == DisabledReading(
             measurement_mjd=disabled_record.measurement.measurement_mjd,
             measured_phase=50_000,
             rms=3,
             z=tracked_record.measurement.z,
         )
-    assert [(record.row.flags, record.row.segment) for record in pair_records[7:]] == [
-        ("RD", tracked_record.row.segment + 1),
-        ("RD", tracked_record.row.segment + 1),
-        ("ANU", tracked_record.row.segment + 2),
-    ]
+    assert [record.row.flags for record in pair_records[7:]] == ["RD", "RD", "ANU"]
 
 
 def test_triples_screening_and_other_pairs_see_a_disabled_clock_as_missing(

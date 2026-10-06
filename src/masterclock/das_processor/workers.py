@@ -270,7 +270,6 @@ class SeriesShard:
         self._series_params: dict[SeriesKey, SeriesParams] = {}
         self._task: EpochTask | None = None
         self._last_rows: dict[SeriesKey, Row] = {}
-        self._last_segments: dict[SeriesKey, int] = {}
         self._pair_start: run.PairStart | None = None
 
     def start_pairs(self, task: EpochTask) -> PairsStarted:
@@ -299,7 +298,7 @@ class SeriesShard:
         newest_rows = {
             series_key: self._newest_row(series_key) for series_key in series_keys
         }
-        self._last_rows, self._last_segments = run.rows_before(
+        self._last_rows = run.rows_before(
             {
                 series_key: newest_row
                 for series_key, newest_row in newest_rows.items()
@@ -353,7 +352,6 @@ class SeriesShard:
             task.epoch_start,
             self._series_params,
             self._last_rows,
-            self._last_segments,
             pair_start,
             corrections,
             excluded,
@@ -408,7 +406,6 @@ class SeriesShard:
             task.triples,
             self._series_params,
             self._last_rows,
-            self._last_segments,
             components,
         )
         return self._done(
@@ -733,7 +730,7 @@ class WorkerPool:
         )
         logging_on = _log.isEnabledFor(logging.WARNING)
         if logging_on:
-            run.log_screening(screening, slips, self._channel)
+            run.log_screening(epoch_start, screening, slips, self._channel)
         pairs_done = self._finish_pairs(
             slips.corrections, screening.excluded | slips.excluded
         )

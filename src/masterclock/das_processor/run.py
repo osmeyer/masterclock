@@ -843,7 +843,6 @@ def finish_pairs(
     epoch_start: datetime,
     series_params: Mapping[SeriesKey, SeriesParams],
     last_rows: Mapping[SeriesKey, Row],
-    last_segments: Mapping[SeriesKey, int],
     pair_start: PairStart,
     corrections: Mapping[PairKey, int],
     excluded: frozenset[PairKey],
@@ -858,9 +857,6 @@ def finish_pairs(
         Each pair's settings at E.
     last_rows : Mapping of series key to Row
         Each series' row of the epoch before E.
-    last_segments : Mapping of series key to int
-        The segment of the newest row of each series that starts again
-        (see :func:`~masterclock.domain.filter.carry`).
     pair_start : PairStart
         What :func:`start_pairs` gave for the pairs, whose predictions name
         them in order.
@@ -872,9 +868,10 @@ def finish_pairs(
     Returns
     -------
     tuple of (dict, dict)
-        Each measurement, its slip corrected, and each pair's row and
-        whether it cold-started, in the pairs' order; a disabled pair's row
-        is not filtered (see :func:`~masterclock.domain.filter.disabled_step`).
+        Each measurement, its slip corrected, and each pair's row, whether
+        it cold-started and the step it accepted, in the pairs' order; a
+        disabled pair's row is not filtered (see
+        :func:`~masterclock.domain.filter.disabled_step`).
 
     Raises
     ------
@@ -890,9 +887,7 @@ def finish_pairs(
             step_results[pair] = disabled_step(
                 epoch_start,
                 series_params[pair],
-                last_rows.get(pair),
                 measured=pair in pair_start.disabled_readings,
-                last_segment=last_segments.get(pair),
             )
             continue
         measurement = measurements.get(pair)
@@ -903,7 +898,6 @@ def finish_pairs(
             prediction,
             None if measurement is None else measurement.filter_input(),
             excluded=pair in excluded,
-            last_segment=last_segments.get(pair),
         )
     return measurements, step_results
 
@@ -911,7 +905,6 @@ def finish_pairs(
 def process_pairs(
     epoch: Epoch,
     last_rows: Mapping[SeriesKey, Row],
-    last_segments: Mapping[SeriesKey, int] | None = None,
     last_z: Mapping[PairKey, int | None] | None = None,
 ) -> PairStep:
     """Process an epoch's pairs: predict, decycle, screen, check slips, filter.
@@ -922,12 +915,7 @@ def process_pairs(
         The epoch.
     last_rows : Mapping of series key to Row
         Each series' row of the epoch before E; a series missing here is
-        new, or starts again.
-    last_segments : Mapping of series key to int or None, optional
-        The segment of the newest row of each series that starts again
-        after epochs it had no row for; such a series starts in the next
-        segment (see :func:`~masterclock.domain.filter.carry`); none when
-        ``None``.
+        new, or starts again as a new series does.
     last_z : Mapping of (str, str) to int or None, optional
         Each pair's newest z, which a disabled pair's row carries; none
         when ``None``.
@@ -963,7 +951,6 @@ def process_pairs(
         epoch_start,
         epoch.series_params,
         last_rows,
-        last_segments or {},
         pair_start,
         slips.corrections,
         screening.excluded | slips.excluded,
@@ -1129,7 +1116,6 @@ def process_triples(
     epoch: Epoch,
     last_rows: Mapping[SeriesKey, Row],
     pair_step: PairStep,
-    last_segments: Mapping[SeriesKey, int] | None = None,
 ) -> TripleStep:
     """Process an epoch's triples: double differences, then the filter (design 12).
 
@@ -1139,12 +1125,9 @@ def process_triples(
         The epoch.
     last_rows : Mapping of series key to Row
         Each series' row of the epoch before E; a series missing here is
-        new, or starts again.
+        new, or starts again as a new series does.
     pair_step : PairStep
         What the epoch's pairs gave.
-    last_segments : Mapping of series key to int or None, optional
-        The segment of the newest row of each series that starts again
-        (see :func:`process_pairs`); none when ``None``.
 
     Returns
     -------
@@ -1165,7 +1148,6 @@ def process_triples(
         epoch.triples,
         epoch.series_params,
         last_rows,
-        last_segments or {},
         {pair: _component(pair_step, pair) for pair in epoch.pairs},
     )
 
@@ -1176,7 +1158,6 @@ def work_triples(
     triples: Iterable[TripleKey],
     series_params: Mapping[SeriesKey, SeriesParams],
     last_rows: Mapping[SeriesKey, Row],
-    last_segments: Mapping[SeriesKey, int],
     components: Mapping[PairKey, Component],
 ) -> TripleStep:
     """Work some triples of an epoch from the pairs' parts (design 12).
@@ -1193,8 +1174,6 @@ def work_triples(
         Each triple's settings at E.
     last_rows : Mapping of series key to Row
         Each series' row of the epoch before E.
-    last_segments : Mapping of series key to int
-        The segment of the newest row of each series that starts again.
     components : Mapping of (str, str) to Component
         Each pair's part in the triples (see :func:`component_of`).
 
@@ -1243,7 +1222,6 @@ def work_triples(
             last_rows.get(triple),
             prediction,
             None if measurement is None else measurement.filter_input(),
-            last_segment=last_segments.get(triple),
             pair_cold_started=pair_restarted(triple, *parts),
         )
     return TripleStep(
@@ -1535,8 +1513,8 @@ def read_last_state(
 
 def rows_before(
     newest_rows: Mapping[SeriesKey, Row], epoch_start: datetime
-) -> tuple[dict[SeriesKey, Row], dict[SeriesKey, int]]:
-    """Split the series' newest rows into last rows and series that start again.
+) -> dict[SeriesKey, Row]:
+    """Pick out the series' newest rows that are last rows: of the epoch before E.
 
     Parameters
     ----------
@@ -1547,24 +1525,18 @@ def rows_before(
 
     Returns
     -------
-    tuple of (dict, dict)
-        The rows of the epoch before E, each its series' last row; and for
-        every series whose newest row is older, or is a disabled pair's (O),
-        its segment. Such a series has nothing to go on from, so it starts
-        cold at E, as a new series does, in the segment after its newest
-        row's, unless it is still disabled.
+    dict of series key to Row
+        The rows of the epoch before E, each its series' last row. A series
+        whose newest row is older, or is a disabled pair's (O), is left out:
+        it has nothing to go on from, so it starts cold at E, as a new
+        series does, unless it is still disabled.
     """
-    last_rows: dict[SeriesKey, Row] = {}
-    last_segments: dict[SeriesKey, int] = {}
-    for series_key, newest_row in newest_rows.items():
-        if (
-            newest_row.interpolated_datetime == epoch_start - _EPOCH
-            and "O" not in newest_row.flags
-        ):
-            last_rows[series_key] = newest_row
-        else:
-            last_segments[series_key] = newest_row.segment
-    return last_rows, last_segments
+    return {
+        series_key: newest_row
+        for series_key, newest_row in newest_rows.items()
+        if newest_row.interpolated_datetime == epoch_start - _EPOCH
+        and "O" not in newest_row.flags
+    }
 
 
 def process_epoch(
@@ -1627,7 +1599,7 @@ def process_epoch(
             if len(series_key) == _TRIPLE
         ),
     )
-    last_rows, last_segments = rows_before(newest_rows, epoch_start)
+    last_rows = rows_before(newest_rows, epoch_start)
     epoch = build_epoch(
         epoch_start,
         das_block,
@@ -1637,8 +1609,8 @@ def process_epoch(
         last_epoch,
         steering_files,
     )
-    pair_step = process_pairs(epoch, last_rows, last_segments, day_buffer.last_z)
-    triple_step = process_triples(epoch, last_rows, pair_step, last_segments)
+    pair_step = process_pairs(epoch, last_rows, day_buffer.last_z)
+    triple_step = process_triples(epoch, last_rows, pair_step)
     epoch_buffer = DayBuffer()
     processed_path = config.processed.processed_path
     for series_key, file_record in _file_records(epoch, pair_step, triple_step):
@@ -1927,11 +1899,15 @@ def _pair_names(channel: RfChannel, pair_keys: Iterable[PairKey]) -> str:
     return ", ".join(series_name(channel, pair) for pair in sorted(pair_keys))
 
 
-def log_screening(screening: Screening, slips: Slips, channel: RfChannel) -> None:
-    """Log what screening and the slip check found (design 16.2).
+def log_screening(
+    epoch_start: datetime, screening: Screening, slips: Slips, channel: RfChannel
+) -> None:
+    """Log what screening and the slip check found, each line naming E (design 16.2).
 
     Parameters
     ----------
+    epoch_start : datetime
+        The epoch start E.
     screening : Screening
         What screening decided.
     slips : Slips
@@ -1943,27 +1919,42 @@ def log_screening(screening: Screening, slips: Slips, channel: RfChannel) -> Non
         ref_names = "-".join(screening_event.references)
         excluded_names = _pair_names(channel, screening_event.excluded)
         if screening_event.finding == "self_missing":
-            _log.warning("self-measurement of %s missing", ref_names)
+            _log.warning("self-measurement of %s missing at %s", ref_names, epoch_start)
         elif screening_event.finding == "self_fail":
             _log.warning(
-                "self-measurement of %s failed: excluded %s", ref_names, excluded_names
+                "self-measurement of %s failed at %s: excluded %s",
+                ref_names,
+                epoch_start,
+                excluded_names,
             )
         elif screening_event.finding == "reciprocity_fail":
             _log.warning(
-                "reciprocity of %s failed: excluded %s", ref_names, excluded_names
+                "reciprocity of %s failed at %s: excluded %s",
+                ref_names,
+                epoch_start,
+                excluded_names,
             )
         else:
             _log.warning(
-                "closure of link %s failed: excluded %s", ref_names, excluded_names
+                "closure of link %s failed at %s: excluded %s",
+                ref_names,
+                epoch_start,
+                excluded_names,
             )
     for slip_event in slips.events:
         if slip_event.finding == "slip_corrected":
             pair_name = series_name(channel, slip_event.pairs[0])
-            _log.info("%s slip corrected: %+d cycles", pair_name, slip_event.cycles)
+            _log.info(
+                "%s slip corrected at %s: %+d cycles",
+                pair_name,
+                epoch_start,
+                slip_event.cycles,
+            )
         else:
             _log.warning(
-                "slip of clock %s undecided: excluded %s",
+                "slip of clock %s undecided at %s: excluded %s",
                 slip_event.clock,
+                epoch_start,
                 _pair_names(channel, slip_event.pairs),
             )
 
@@ -1971,14 +1962,14 @@ def log_screening(screening: Screening, slips: Slips, channel: RfChannel) -> Non
 def _log_series(
     series_label: str, step_result: StepResult, last_row: Row | None
 ) -> None:
-    """Log what happened to one series at an epoch (design 16.2).
+    """Log what happened to one series at an epoch, each line naming E (design 16.2).
 
     Parameters
     ----------
     series_label : str
         The series' name.
     step_result : StepResult
-        Its row at the epoch.
+        Its row at the epoch, and what the epoch did to it.
     last_row : Row or None
         Its row of the epoch before, or ``None`` for a new series or one
         that starts again.
@@ -1987,52 +1978,56 @@ def _log_series(
     _log.debug("%s: %s", series_label, row.flags)
     if "R" in row.flags and "D" not in row.flags:
         _log.warning(
-            "%s rejected: innovation %.1f ps, scale %.1f ps, %d consecutive",
+            "%s rejected at %s: innovation %.1f ps, scale %.1f ps, %d consecutive",
             series_label,
+            row.interpolated_datetime,
             row.innovation,
             row.innovation_scale,
             row.consecutive_rejects,
         )
     if step_result.cold_started:
-        _log.info("%s cold start: segment %d", series_label, row.segment)
+        _log.info("%s cold start at %s", series_label, row.interpolated_datetime)
     if last_row is not None and "D" not in last_row.flags:
-        _log_changes(series_label, row, last_row)
+        _log_changes(series_label, step_result, last_row)
 
 
-def _log_changes(series_label: str, row: Row, last_row: Row) -> None:
-    """Log how a tracked series changed at an epoch (design 16.2).
+def _log_changes(series_label: str, step_result: StepResult, last_row: Row) -> None:
+    """Log how a tracked series changed at an epoch, each line naming E (design 16.2).
 
     Parameters
     ----------
     series_label : str
         The series' name.
-    row : Row
-        Its row at the epoch.
+    step_result : StepResult
+        Its row at the epoch, and the step it accepted, if any.
     last_row : Row
         Its last row, which held a state.
     """
+    row = step_result.row
+    epoch_start = row.interpolated_datetime
     if "D" in row.flags:
-        _log.info("%s dormant", series_label)
+        _log.info("%s dormant at %s", series_label, epoch_start)
         return
-    settings_changed = (last_row.time_constant, last_row.scale_time_constant) != (
+    if (last_row.time_constant, last_row.scale_time_constant) != (
         row.time_constant,
         row.scale_time_constant,
-    )
-    if settings_changed:
+    ):
         _log.info(
-            "%s configuration change: M %s to %s, M_sigma %s to %s",
+            "%s configuration change at %s: M %s to %s, M_sigma %s to %s",
             series_label,
+            epoch_start,
             last_row.time_constant,
             row.time_constant,
             last_row.scale_time_constant,
             row.scale_time_constant,
         )
-    if "A" in row.flags and row.segment - last_row.segment == 1 + int(settings_changed):
-        _log.info("%s frequency step: segment %d", series_label, row.segment)
-    elif "A" in row.flags and row.step_offset != last_row.step_offset:
+    if step_result.step == "frequency":
+        _log.info("%s frequency step at %s", series_label, epoch_start)
+    elif step_result.step == "phase":
         _log.info(
-            "%s phase step of %d ps; step offset %d ps",
+            "%s phase step at %s: %d ps; step offset %d ps",
             series_label,
+            epoch_start,
             row.step_offset - last_row.step_offset,
             row.step_offset,
         )
@@ -2090,7 +2085,12 @@ def log_epoch(
     if not _log.isEnabledFor(logging.WARNING):
         return
     pair_step, triple_step = epoch_done.pair_step, epoch_done.triple_step
-    log_screening(pair_step.screening, pair_step.slips, channel)
+    log_screening(
+        epoch_done.epoch.interpolated_datetime,
+        pair_step.screening,
+        pair_step.slips,
+        channel,
+    )
     accepted_count = log_series_results(
         pair_step.step_results, pair_step.predictions, last_rows, channel
     )
@@ -2158,7 +2158,11 @@ def log_series_results[KeyT: SeriesKey](
         series_label = series_name(channel, series_key)
         if not writes_row(step_result.row):
             if series_key in last_rows:
-                _log.info("%s stops: no row until it is measured again", series_label)
+                _log.info(
+                    "%s stops at %s: no row until it is measured again",
+                    series_label,
+                    step_result.row.interpolated_datetime,
+                )
             continue
         _log_series(series_label, step_result, last_rows.get(series_key))
         if trace_logged:

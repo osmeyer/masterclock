@@ -35,7 +35,8 @@ never one of the three a step or a cold start is found in.
 
 :func:`filter_step` puts it all together for one series at one epoch: it
 takes the series' measurement as plain values (:class:`FilterInput`) and
-gives its row and whether it cold-started (:class:`StepResult`).
+gives its row, whether it cold-started and which kind of step it accepted
+(:class:`StepResult`).
 """
 
 import functools
@@ -267,7 +268,6 @@ class RowDraft:
     y: float | None
     d: float | None
     innovation_scale: float | None
-    segment: int
     step_offset: int
     epochs_in_segment: int
     epochs_since_accept: int
@@ -285,7 +285,6 @@ def carry(
     series_params: SeriesParams,
     *,
     slip: bool = False,
-    last_segment: int | None = None,
 ) -> RowDraft:
     """Start an epoch's row from the series' last row.
 
@@ -294,22 +293,18 @@ def carry(
     epoch_start : datetime
         The epoch start E.
     last_row : Row or None
-        The series' last row, or ``None`` for a new series.
+        The series' last row, or ``None`` for a new series, or one that
+        starts again after epochs it had no row for.
     series_params : SeriesParams
         The series' settings at E; used only for a new series.
     slip : bool, optional
         Whether the slip check corrected this epoch's measurement; the row
         then carries S.
-    last_segment : int or None, optional
-        For a series that starts again after epochs it had no row for, the
-        segment of its last row; it starts in the next one. ``None`` for a
-        new series, which starts in segment 0.
 
     Returns
     -------
     RowDraft
-        For a new series: dormant, with no state, in segment 0, or one
-        after ``last_segment`` when it is given, every counter 0, the model
+        For a new series: dormant, with no state, every counter 0, the model
         and time constants of ``series_params``. Otherwise the last row's
         fields, its state unchanged and its datetime set to ``epoch_start``,
         with no innovation, one more epoch in its segment and no flags. S
@@ -323,8 +318,8 @@ def carry(
     ...     rms_max=80,
     ... )
     >>> draft = carry(datetime(2025, 9, 23, 6, 0, tzinfo=UTC), None, settings)
-    >>> draft.segment, draft.x_fs, draft.flags
-    (0, None, '')
+    >>> draft.x_fs, draft.flags
+    (None, '')
     """
     flags = "S" if slip else ""
     if last_row is None:
@@ -335,7 +330,6 @@ def carry(
             y=None,
             d=None,
             innovation_scale=None,
-            segment=0 if last_segment is None else last_segment + 1,
             step_offset=0,
             epochs_in_segment=0,
             epochs_since_accept=0,
@@ -353,7 +347,6 @@ def carry(
         y=last_row.y,
         d=last_row.d,
         innovation_scale=last_row.innovation_scale,
-        segment=last_row.segment,
         step_offset=last_row.step_offset,
         epochs_in_segment=last_row.epochs_in_segment + 1,
         epochs_since_accept=last_row.epochs_since_accept,
@@ -371,9 +364,8 @@ def start_segment(
 ) -> None:
     """Begin a new segment on a draft, in place.
 
-    The draft's segment number becomes one more, with no rows in it yet,
-    the time constants of ``series_params`` and N among the flags. The
-    state is not touched.
+    The draft has no rows in its segment yet, the time constants of
+    ``series_params`` and N among the flags. The state is not touched.
 
     Parameters
     ----------
@@ -399,7 +391,6 @@ def start_segment(
         )
         _log.error(message)
         raise FilterError(message)
-    draft.segment += 1
     draft.epochs_in_segment = 0
     if not keep_offset:
         draft.step_offset = 0
@@ -447,7 +438,6 @@ def finish(draft: RowDraft, outcome: Outcome) -> Row:
         y=draft.y,
         d=draft.d,
         innovation_scale=draft.innovation_scale,
-        segment=draft.segment,
         step_offset=draft.step_offset,
         epochs_in_segment=draft.epochs_in_segment,
         epochs_since_accept=draft.epochs_since_accept,
@@ -484,7 +474,7 @@ def dormant(draft: RowDraft, outcome: Held, *, keep_buffer: bool = False) -> Row
     -------
     Row
         The row with no phase, rate, drift or innovation scale, flag D
-        beside ``outcome``, and segment and step offset as they were.
+        beside ``outcome``, and the step offset as it was.
 
     Raises
     ------
@@ -518,12 +508,7 @@ def writes_row(row: Row) -> bool:
 
 
 def disabled_step(
-    epoch_start: datetime,
-    series_params: SeriesParams,
-    last_row: Row | None,
-    *,
-    measured: bool,
-    last_segment: int | None = None,
+    epoch_start: datetime, series_params: SeriesParams, *, measured: bool
 ) -> StepResult:
     """Give the row of a disabled series at an epoch: no tracking (design 13.6).
 
@@ -534,33 +519,22 @@ def disabled_step(
     series_params : SeriesParams
         The settings in force at E, whose model and time constants the row
         takes.
-    last_row : Row or None
-        The series' row of the epoch before E, when it was tracked then;
-        ``None`` otherwise.
     measured : bool
         Whether the series has a reading at E.
-    last_segment : int or None, optional
-        With no ``last_row``, the segment of the series' newest row;
-        ``None`` for a new series.
 
     Returns
     -------
     StepResult
         With a reading, a row of flag O alone: no state, innovation,
-        counters or buffer, in the segment of the row before it, 0 for a new
-        series, so a series enabled again starts in the next. With none, a
-        dormant row with no measurement, which is not written (see
-        :func:`writes_row`). Never a cold start.
+        counters or buffer. With none, a dormant row with no measurement,
+        which is not written (see :func:`writes_row`). Never a cold start,
+        and never a step.
 
     Raises
     ------
     FilterError
         If the row breaks a rule of :class:`Row`.
     """
-    if last_row is not None:
-        segment = last_row.segment
-    else:
-        segment = 0 if last_segment is None else last_segment
     draft = RowDraft(
         interpolated_datetime=epoch_start,
         innovation=None,
@@ -568,7 +542,6 @@ def disabled_step(
         y=None,
         d=None,
         innovation_scale=None,
-        segment=segment,
         step_offset=0,
         epochs_in_segment=0,
         epochs_since_accept=0,
@@ -580,7 +553,7 @@ def disabled_step(
         flags="",
     )
     row = finish(draft, "O") if measured else dormant(draft, "P")
-    return StepResult(row=row, cold_started=False)
+    return StepResult(row=row, cold_started=False, step=None)
 
 
 def hold(
@@ -707,7 +680,7 @@ def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     Returns
     -------
     Row
-        Segment one more, at phase ``z`` with no rate or drift, innovation
+        A new segment at phase ``z`` with no rate or drift, innovation
         scale ``sigma0``, step offset, counters and buffer at 0, flags A
         and N, and U for a 2- or 3-state series.
 
@@ -741,6 +714,9 @@ less than this many scales from the fit.
 _STEP_REJECTS: Final[int] = 3
 """How many consecutive counted rejects a step is looked for in."""
 
+type StepKind = Literal["phase", "frequency"]
+"""The kinds of step three rejects can show."""
+
 
 @dataclass(frozen=True, slots=True)
 class Classified:
@@ -758,7 +734,7 @@ class Classified:
         otherwise.
     """
 
-    step_kind: Literal["phase", "frequency"] | None
+    step_kind: StepKind | None
     a: float | None = None
     s: float | None = None
 
@@ -990,7 +966,7 @@ def accept_step(
     z: int,
     scale_floor: float,
     series_params: SeriesParams,
-) -> Row | None:
+) -> tuple[Row, StepKind] | None:
     """Accept a measurement after a step, when the rejects show one (design 9.4).
 
     Parameters
@@ -1008,10 +984,10 @@ def accept_step(
 
     Returns
     -------
-    Row or None
-        The accepted row after a phase step (see :func:`phase_step`) or, for
-        a 2- or 3-state series, a frequency step (see
-        :func:`frequency_step`). ``None`` while the buffer holds fewer than
+    tuple of (Row, {'phase', 'frequency'}) or None
+        The accepted row and the kind of step: a phase step (see
+        :func:`phase_step`) or, for a 2- or 3-state series, a frequency
+        step (see :func:`frequency_step`). ``None`` while the buffer holds fewer than
         three rejects, which a reject over the rms limit empties, when the
         rejects show neither, and for a frequency step of a 1-state series,
         which has no rate.
@@ -1031,16 +1007,17 @@ def accept_step(
         raise FilterError(message)
     classified = classify(draft.rejects, draft.innovation_scale)
     if classified.step_kind == "phase":
-        return phase_step(draft, prediction, z, scale_floor)
+        return phase_step(draft, prediction, z, scale_floor), "phase"
     if (
         classified.step_kind == "frequency"
         and draft.filter_states > 1
         and classified.a is not None
         and classified.s is not None
     ):
-        return frequency_step(
+        row = frequency_step(
             draft, prediction, classified.a, classified.s, z, scale_floor, series_params
         )
+        return row, "frequency"
     return None
 
 
@@ -1146,8 +1123,8 @@ def anchor_of(last_row: Row | None) -> int | None:
     >>> row = Row(
     ...     interpolated_datetime=datetime(2025, 9, 23, 6, 0, tzinfo=UTC),
     ...     innovation=None, x_fs=None, y=None, d=None, innovation_scale=None,
-    ...     segment=0, step_offset=0, epochs_in_segment=0,
-    ...     epochs_since_accept=1, consecutive_rejects=0,
+    ...     step_offset=0, epochs_in_segment=0, epochs_since_accept=1,
+    ...     consecutive_rejects=0,
     ...     rejects=((datetime(2025, 9, 23, 6, 0, tzinfo=UTC), 1234577.0),),
     ...     filter_states=1, time_constant=None, scale_time_constant=50.0,
     ...     flags="RD",
@@ -1235,7 +1212,7 @@ class FilterInput:
 
 @dataclass(frozen=True, slots=True)
 class StepResult:
-    """The row a series writes at an epoch, and whether it cold-started there.
+    """The row a series writes at an epoch, and what the epoch did to the series.
 
     Parameters
     ----------
@@ -1244,10 +1221,14 @@ class StepResult:
     cold_started : bool
         Whether the row is a cold start: a triple built from this pair's
         value then goes dormant (design 12.6).
+    step : {'phase', 'frequency'} or None
+        The kind of step the row accepted (design 9.4); ``None`` for every
+        other row.
     """
 
     row: Row
     cold_started: bool
+    step: StepKind | None
 
 
 def params_changed(series_params: SeriesParams, last_row: Row) -> bool:
@@ -1279,7 +1260,6 @@ def filter_step(
     measurement: FilterInput | None,
     *,
     excluded: bool = False,
-    last_segment: int | None = None,
     pair_cold_started: bool = False,
 ) -> StepResult:
     """Give a series' row at an epoch: the whole of the decision flow (design 9.6).
@@ -1291,7 +1271,8 @@ def filter_step(
     series_params : SeriesParams
         The settings in force at E.
     last_row : Row or None
-        The series' last row, or ``None`` for a new series.
+        The series' last row, or ``None`` for a new series, or one that
+        starts again after epochs it had no row for.
     prediction : State or None
         The prediction at E from ``last_row`` (see :func:`predict`), or
         ``None`` when the series has none.
@@ -1299,11 +1280,6 @@ def filter_step(
         The series' measurement at E, or ``None`` when there is none.
     excluded : bool, optional
         Whether screening or the slip check excluded the measurement.
-    last_segment : int or None, optional
-        For a series that starts again after epochs it had no row for, so
-        that ``last_row`` is ``None``, the segment of its last row in its
-        file, the series starting in the next (see :func:`carry`); ``None``
-        for a new series.
     pair_cold_started : bool, optional
         For a triple, whether a pair it uses cold-started at E, whether or
         not the triple has a measurement there (design 12.6).
@@ -1311,7 +1287,8 @@ def filter_step(
     Returns
     -------
     StepResult
-        The row, and whether it cold-started. First, a tracked series whose
+        The row, whether it cold-started, and the kind of step it accepted,
+        if any. First, a tracked series whose
         time constants changed starts a warm segment (see
         :func:`start_segment`); the row then also carries the outcome.
         With no measurement, the row holds the prediction (see :func:`hold`),
@@ -1332,7 +1309,6 @@ def filter_step(
         last_row,
         series_params,
         slip=measurement is not None and measurement.slip,
-        last_segment=last_segment,
     )
     if (
         last_row is not None
@@ -1342,9 +1318,11 @@ def filter_step(
         start_segment(draft, series_params, keep_offset=True)
     if measurement is None:
         if pair_cold_started:
-            return StepResult(row=dormant(draft, "P"), cold_started=False)
+            return StepResult(row=dormant(draft, "P"), cold_started=False, step=None)
         return StepResult(
-            row=hold(draft, prediction, "P", series_params), cold_started=False
+            row=hold(draft, prediction, "P", series_params),
+            cold_started=False,
+            step=None,
         )
     if measurement.pair_cold_started:
         draft.rejects = ()
@@ -1356,9 +1334,11 @@ def filter_step(
             series_params,
             in_limit=_within_rms_limit(measurement, series_params),
         )
-        return StepResult(row=row, cold_started="D" not in row.flags)
-    row = _gate(draft, prediction, measurement, series_params, excluded=excluded)
-    return StepResult(row=row, cold_started=False)
+        return StepResult(row=row, cold_started="D" not in row.flags, step=None)
+    row, step_kind = _gate(
+        draft, prediction, measurement, series_params, excluded=excluded
+    )
+    return StepResult(row=row, cold_started=False, step=step_kind)
 
 
 def _gate(
@@ -1368,7 +1348,7 @@ def _gate(
     series_params: SeriesParams,
     *,
     excluded: bool,
-) -> Row:
+) -> tuple[Row, StepKind | None]:
     """Accept, hold or reject a measurement against its prediction (design 9.6).
 
     Parameters
@@ -1386,14 +1366,15 @@ def _gate(
 
     Returns
     -------
-    Row
-        Accepted when the measurement passes the gate and is not excluded.
-        Held as X when it is excluded inside the gate, not counted.
-        Otherwise a counted reject, which empties the buffer when a pair's
-        reading is over its rms limit: accepted after a step when the
-        rejects show one (see :func:`accept_step`); else, once the rejects
-        reach ``n_break``, a dormant row whose measurement starts the
-        acquisition buffer, unless it is over the rms limit; else held as R.
+    tuple of (Row, {'phase', 'frequency'} or None)
+        The row, and the kind of step it accepted, if any. Accepted when
+        the measurement passes the gate and is not excluded. Held as X when
+        it is excluded inside the gate, not counted. Otherwise a counted
+        reject, which empties the buffer when a pair's reading is over its
+        rms limit: accepted after a step when the rejects show one (see
+        :func:`accept_step`); else, once the rejects reach ``n_break``, a
+        dormant row whose measurement starts the acquisition buffer, unless
+        it is over the rms limit; else held as R.
 
     Raises
     ------
@@ -1412,21 +1393,22 @@ def _gate(
     in_gate = within_gate(innovation, draft.innovation_scale)
     in_limit = _within_rms_limit(measurement, series_params)
     if in_gate and in_limit and not excluded:
-        return accept(draft, prediction, innovation, measurement.scale_floor, nu=nu)
+        row = accept(draft, prediction, innovation, measurement.scale_floor, nu=nu)
+        return row, None
     if in_gate and excluded:
-        return hold(draft, prediction, "X", series_params)
+        return hold(draft, prediction, "X", series_params), None
     count_reject(draft, innovation)
     if not in_limit:
         draft.rejects = ()
-    step_row = accept_step(
+    accepted_step = accept_step(
         draft, prediction, measurement.z, measurement.scale_floor, series_params
     )
-    if step_row is not None:
-        return step_row
+    if accepted_step is not None:
+        return accepted_step
     if draft.consecutive_rejects >= series_params.n_break:
         draft.rejects = ()
-        return acquire(draft, measurement.z, series_params, in_limit=in_limit)
-    return hold(draft, prediction, "R", series_params)
+        return acquire(draft, measurement.z, series_params, in_limit=in_limit), None
+    return hold(draft, prediction, "R", series_params), None
 
 
 def _within_rms_limit(measurement: FilterInput, series_params: SeriesParams) -> bool:

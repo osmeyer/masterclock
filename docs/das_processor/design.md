@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-06 20:20:57 UTC
+**Date:** 2026-10-06 22:45:55 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -256,7 +256,7 @@ Each epoch rebuilds it from the series that already exist, the epoch's DAS data,
   It also starts dormant.
 - A series is never removed.
   When its measurements stop, it goes on with predicted rows up to its gap limit, and then writes no row until it is measured again (§13.3).
-  A triple whose s and c are not in one building, or one of which has no location, is left out of the epoch and writes no row; when they are in one building again, it starts cold, in the segment after its file's last row's (§6.7).
+  A triple whose s and c are not in one building, or one of which has no location, is left out of the epoch and writes no row; when they are in one building again, it starts cold, as a new series does (§6.7).
 
 ```python
 def build_registry(das_block, refs, earlier_series, locations):
@@ -454,7 +454,6 @@ class Row:  # the estimator columns of a row (§5.4, §5.5)
     y: float | None
     d: float | None
     innovation_scale: float | None
-    segment: int
     step_offset: int
     epochs_in_segment: int
     epochs_since_accept: int
@@ -514,8 +513,8 @@ Every file of a kind has the same header, of H bytes, and every row has the same
 
 | File | Row width W (characters, newline not counted) | Header lines | Header size H (bytes) |
 | --- | --- | --- | --- |
-| Measurement file | 477 | 31 | 2235 |
-| Double-difference file | 455 | 29 | 2132 |
+| Measurement file | 466 | 30 | 2189 |
+| Double-difference file | 444 | 28 | 2086 |
 
 <!-- end generated -->
 
@@ -605,21 +604,20 @@ One row per epoch holds the pair's measurement, decycled and referred to E (§7)
 | 10 | `y` | 23 | estimated rate, ps/s |
 | 11 | `d` | 23 | estimated drift, ps/s^2; 0 for a 1- or 2-state estimator |
 | 12 | `innovation_scale` | 23 | innovation scale, ps |
-| 13 | `segment` | 9 | segment number |
-| 14 | `step_offset` | 16 | sum of phase steps in this segment, ps |
-| 15 | `epochs_in_segment` | 9 | rows since the segment started |
-| 16 | `epochs_since_accept` | 9 | rows since the last accepted measurement, not counting dormant rows that buffer a measurement |
-| 17 | `consecutive_rejects` | 9 | consecutive counted rejects |
-| 18 | `reject1_mjd` | 13 | reject buffer, oldest: epoch start, MJD |
-| 19 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps |
-| 20 | `reject2_mjd` | 13 | reject buffer, middle: epoch start, MJD |
-| 21 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps; while dormant, a measurement z, ps |
-| 22 | `reject3_mjd` | 13 | reject buffer, newest: epoch start, MJD |
-| 23 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps; while dormant, a measurement z, ps |
-| 24 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
-| 25 | `time_constant` | 23 | estimator time constant, epochs |
-| 26 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
-| 27 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled |
+| 13 | `step_offset` | 16 | sum of phase steps in this segment, ps |
+| 14 | `epochs_in_segment` | 9 | rows since the segment started |
+| 15 | `epochs_since_accept` | 9 | rows since the last accepted measurement, not counting dormant rows that buffer a measurement |
+| 16 | `consecutive_rejects` | 9 | consecutive counted rejects |
+| 17 | `reject1_mjd` | 13 | reject buffer, oldest: epoch start, MJD |
+| 18 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps |
+| 19 | `reject2_mjd` | 13 | reject buffer, middle: epoch start, MJD |
+| 20 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps; while dormant, a measurement z, ps |
+| 21 | `reject3_mjd` | 13 | reject buffer, newest: epoch start, MJD |
+| 22 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps; while dormant, a measurement z, ps |
+| 23 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
+| 24 | `time_constant` | 23 | estimator time constant, epochs |
+| 25 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
+| 26 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled |
 
 <!-- end generated -->
 
@@ -683,21 +681,20 @@ The header of a measurement file:
 #  10  y                       estimated rate, ps/s
 #  11  d                       estimated drift, ps/s^2; 0 for a 1- or 2-state estimator
 #  12  innovation_scale        innovation scale, ps
-#  13  segment                 segment number
-#  14  step_offset             sum of phase steps in this segment, ps
-#  15  epochs_in_segment       rows since the segment started
-#  16  epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
-#  17  consecutive_rejects     consecutive counted rejects
-#  18  reject1_mjd             reject buffer, oldest: epoch start, MJD
-#  19  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
-#  20  reject2_mjd             reject buffer, middle: epoch start, MJD
-#  21  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
-#  22  reject3_mjd             reject buffer, newest: epoch start, MJD
-#  23  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
-#  24  filter_states           estimator states: 1, 2 or 3
-#  25  time_constant           estimator time constant, epochs
-#  26  scale_time_constant     innovation-scale averaging constant, epochs
-#  27  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
+#  13  step_offset             sum of phase steps in this segment, ps
+#  14  epochs_in_segment       rows since the segment started
+#  15  epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
+#  16  consecutive_rejects     consecutive counted rejects
+#  17  reject1_mjd             reject buffer, oldest: epoch start, MJD
+#  18  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
+#  19  reject2_mjd             reject buffer, middle: epoch start, MJD
+#  20  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
+#  21  reject3_mjd             reject buffer, newest: epoch start, MJD
+#  22  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
+#  23  filter_states           estimator states: 1, 2 or 3
+#  24  time_constant           estimator time constant, epochs
+#  25  scale_time_constant     innovation-scale averaging constant, epochs
+#  26  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->
@@ -723,21 +720,20 @@ One row per epoch holds the triple's double difference (§12) and its estimator 
 | 8 | `y` | 23 | estimated rate, ps/s |
 | 9 | `d` | 23 | estimated drift, ps/s^2; 0 for a 1- or 2-state estimator |
 | 10 | `innovation_scale` | 23 | innovation scale, ps |
-| 11 | `segment` | 9 | segment number |
-| 12 | `step_offset` | 16 | sum of phase steps in this segment, ps |
-| 13 | `epochs_in_segment` | 9 | rows since the segment started |
-| 14 | `epochs_since_accept` | 9 | rows since the last accepted measurement, not counting dormant rows that buffer a measurement |
-| 15 | `consecutive_rejects` | 9 | consecutive counted rejects |
-| 16 | `reject1_mjd` | 13 | reject buffer, oldest: epoch start, MJD |
-| 17 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps |
-| 18 | `reject2_mjd` | 13 | reject buffer, middle: epoch start, MJD |
-| 19 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps; while dormant, a measurement z, ps |
-| 20 | `reject3_mjd` | 13 | reject buffer, newest: epoch start, MJD |
-| 21 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps; while dormant, a measurement z, ps |
-| 22 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
-| 23 | `time_constant` | 23 | estimator time constant, epochs |
-| 24 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
-| 25 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled |
+| 11 | `step_offset` | 16 | sum of phase steps in this segment, ps |
+| 12 | `epochs_in_segment` | 9 | rows since the segment started |
+| 13 | `epochs_since_accept` | 9 | rows since the last accepted measurement, not counting dormant rows that buffer a measurement |
+| 14 | `consecutive_rejects` | 9 | consecutive counted rejects |
+| 15 | `reject1_mjd` | 13 | reject buffer, oldest: epoch start, MJD |
+| 16 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps |
+| 17 | `reject2_mjd` | 13 | reject buffer, middle: epoch start, MJD |
+| 18 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps; while dormant, a measurement z, ps |
+| 19 | `reject3_mjd` | 13 | reject buffer, newest: epoch start, MJD |
+| 20 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps; while dormant, a measurement z, ps |
+| 21 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
+| 22 | `time_constant` | 23 | estimator time constant, epochs |
+| 23 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
+| 24 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled |
 
 <!-- end generated -->
 
@@ -763,21 +759,20 @@ The header of a double-difference file:
 #   8  y                       estimated rate, ps/s
 #   9  d                       estimated drift, ps/s^2; 0 for a 1- or 2-state estimator
 #  10  innovation_scale        innovation scale, ps
-#  11  segment                 segment number
-#  12  step_offset             sum of phase steps in this segment, ps
-#  13  epochs_in_segment       rows since the segment started
-#  14  epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
-#  15  consecutive_rejects     consecutive counted rejects
-#  16  reject1_mjd             reject buffer, oldest: epoch start, MJD
-#  17  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
-#  18  reject2_mjd             reject buffer, middle: epoch start, MJD
-#  19  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
-#  20  reject3_mjd             reject buffer, newest: epoch start, MJD
-#  21  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
-#  22  filter_states           estimator states: 1, 2 or 3
-#  23  time_constant           estimator time constant, epochs
-#  24  scale_time_constant     innovation-scale averaging constant, epochs
-#  25  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
+#  11  step_offset             sum of phase steps in this segment, ps
+#  12  epochs_in_segment       rows since the segment started
+#  13  epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
+#  14  consecutive_rejects     consecutive counted rejects
+#  15  reject1_mjd             reject buffer, oldest: epoch start, MJD
+#  16  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
+#  17  reject2_mjd             reject buffer, middle: epoch start, MJD
+#  18  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
+#  19  reject3_mjd             reject buffer, newest: epoch start, MJD
+#  20  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
+#  21  filter_states           estimator states: 1, 2 or 3
+#  22  time_constant           estimator time constant, epochs
+#  23  scale_time_constant     innovation-scale averaging constant, epochs
+#  24  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->
@@ -1209,13 +1204,10 @@ def process_epoch(
         for key, row in newest_rows.items()
         if row.interpolated_datetime == epoch_start - T and "O" not in row.flags
     }
-    # The others start cold, in the segment after their newest row's (§6.7);
-    # a disabled pair's newest row is never a last row (§13.6).
-    last_segments = {
-        key: row.segment for key, row in newest_rows.items() if key not in last_rows
-    }
-    pair_step = process_pairs(epoch, last_rows, last_segments, day_buffer.last_z)
-    triple_step = process_triples(epoch, last_rows, pair_step, last_segments)  # §12
+    # The others start cold, as a new series does (§6.7); a disabled pair's
+    # newest row is never a last row (§13.6).
+    pair_step = process_pairs(epoch, last_rows, day_buffer.last_z)
+    triple_step = process_triples(epoch, last_rows, pair_step)  # §12
     epoch_buffer = DayBuffer(day_buffer.channel)  # the epoch's rows, all or none
     # A dormant row with no measurement gives no record.
     for series_key, record in file_records(epoch, pair_step, triple_step):
@@ -1229,7 +1221,7 @@ def process_epoch(
     return epoch_done
 
 
-def process_pairs(epoch, last_rows, last_segments, last_z):  # §7 to §11
+def process_pairs(epoch, last_rows, last_z):  # §7 to §11
     disabled = {pair for pair in epoch.pairs if epoch.series_params[pair].disabled}
     predictions = {  # §8.3; a disabled pair has none (§13.6)
         pair: None
@@ -1285,9 +1277,7 @@ def process_pairs(epoch, last_rows, last_segments, last_z):  # §7 to §11
         pair: disabled_step(  # §13.6: an O row with a reading, else no row
             epoch.interpolated_datetime,
             epoch.series_params[pair],
-            last_rows.get(pair),
             measured=pair in disabled_readings,
-            last_segment=last_segments.get(pair),
         )
         if pair in disabled
         else filter_step(
@@ -1297,7 +1287,6 @@ def process_pairs(epoch, last_rows, last_segments, last_z):  # §7 to §11
             predictions[pair],
             measurements.get(pair),
             excluded=pair in excluded_pairs,
-            last_segment=last_segments.get(pair),
         )
         for pair in epoch.pairs
     }
@@ -1306,7 +1295,7 @@ def process_pairs(epoch, last_rows, last_segments, last_z):  # §7 to §11
     )
 
 
-def process_triples(epoch, last_rows, pair_step, last_segments):
+def process_triples(epoch, last_rows, pair_step):
     # Each pair's part, from its accepted measurement only (§12.8); a pair the
     # epoch does not hold takes part as one not accepted, with no prediction.
     components = {pair: component_of(pair_step, pair) for pair in epoch.pairs}
@@ -1333,7 +1322,6 @@ def process_triples(epoch, last_rows, pair_step, last_segments):
             last_rows.get((r, s, c)),
             predictions[(r, s, c)],
             measurements.get((r, s, c)),
-            last_segment=last_segments.get((r, s, c)),
             # With a value or without one (§12.6).
             pair_cold_started=pair_restarted((r, s, c), *parts),
         )
@@ -1416,7 +1404,7 @@ flowchart TD
   When the journal is there, it is deleted once every file is cut.
 - Newest epoch. The run goes on one epoch after the newest row left among all files of the channel, measurement and double-difference.
   Files may end at different epochs: a series writes a row only for an epoch it is in, and not while it is dormant with no measurement (§13.3) or disabled with no reading (§13.6).
-  A series whose newest row is not of the epoch before E starts cold at E, as a new series does, in the segment after its newest row's.
+  A series whose newest row is not of the epoch before E starts cold at E, as a new series does.
 - Next epoch. One epoch after the newest row left.
   With no file holding a row, the epoch containing `start_from_mjd`.
   While no pair exists yet, the run starts at the first DAS data at or after that instead: an epoch before the data holds no series and writes nothing, so a run of one epoch would otherwise never get past it, and a long run would differ from runs of one epoch each.
@@ -1756,8 +1744,7 @@ It happens when a dormant series acquires (§13.3).
 
 - State: X = [z_E, 0, 0]ᵀ for 3 states, [z_E, 0]ᵀ for 2 and [z_E] for 1.
 - Innovation scale: σ_ν = σ₀.
-- Segment: segment + 1, step_offset = 0, epochs_in_segment = 0, epochs_since_accept = 0, consecutive_rejects = 0, an empty reject buffer.
-  A new series' dormant rows are in segment 0, so its first cold start begins segment 1.
+- Segment: a new one, marked N: step_offset = 0, epochs_in_segment = 0, epochs_since_accept = 0, consecutive_rejects = 0, an empty reject buffer.
 - Parameters: M and M_σ from the entry in force at the epoch; the model is the series' own.
 - Flags: A and N, and U for a 2- or 3-state series (§8.8).
 
@@ -1768,7 +1755,7 @@ It happens on a frequency step (§9.4) and at the epoch a configuration change f
 
 - State: X⁻ is carried, with the frequency-step corrections of §9.4 when they apply.
 - Carried: σ_ν and step_offset.
-- Reset: segment + 1, epochs_in_segment = 0.
+- Reset: a new segment, marked N: epochs_in_segment = 0.
 - Flags: N, and U until epochs_in_segment reaches 5M under the new M.
 - A configuration change takes its new M and M_σ from this row; the model does not change.
 
@@ -1995,27 +1982,26 @@ def filter_step(
     prediction,
     measurement,
     excluded=False,
-    last_segment=None,
     pair_cold_started=False,  # a triple: a pair it uses restarted (§12.6)
 ):
     slip = measurement is not None and measurement.slip
     # epochs_in_segment + 1.
-    draft = carry(epoch_start, last_row, series_params, slip, last_segment)
+    draft = carry(epoch_start, last_row, series_params, slip)
     tracked = last_row is not None and "D" not in last_row.flags
     if tracked and params_changed(series_params, last_row):
         start_segment(draft, series_params, keep_offset=True)  # §8.7
     if measurement is None:  # §13.1
         if pair_cold_started:  # §12.6: dormant, not written
-            return StepResult(dormant(draft, "P"), False)
-        return StepResult(hold(draft, prediction, "P", series_params), False)
+            return StepResult(dormant(draft, "P"), False, None)
+        return StepResult(hold(draft, prediction, "P", series_params), False, None)
     if measurement.pair_cold_started:  # §12.6: a pair of the triple restarted
         draft.rejects, prediction = (), None
     if prediction is None:  # new or dormant: acquisition (§13.3)
         in_limit = measurement.rms is None or measurement.rms <= series_params.rms_max
         row = acquire(draft, measurement.z, series_params, in_limit)
-        return StepResult(row, cold_started="D" not in row.flags)
-    row = gate(draft, prediction, measurement, series_params, excluded)
-    return StepResult(row, cold_started=False)
+        return StepResult(row, cold_started="D" not in row.flags, step=None)
+    row, step = gate(draft, prediction, measurement, series_params, excluded)
+    return StepResult(row, cold_started=False, step=step)  # the step, for the log
 
 
 def gate(draft, prediction, measurement, series_params, excluded):
@@ -2026,21 +2012,21 @@ def gate(draft, prediction, measurement, series_params, excluded):
     # A triple has no rms test.
     in_limit = measurement.rms is None or measurement.rms <= series_params.rms_max
     if in_gate and in_limit and not excluded:
-        return accept(draft, prediction, innovation, measurement.scale_floor)
+        return accept(draft, prediction, innovation, measurement.scale_floor), None
     if in_gate and excluded:
-        return hold(draft, prediction, "X", series_params)  # §9.5
+        return hold(draft, prediction, "X", series_params), None  # §9.5
     count_reject(draft, innovation)
     if not in_limit:  # never one of the three a step is found in (§9.4)
         draft.rejects = ()
-    step_row = accept_step(  # only with three rejects in the buffer
+    accepted_step = accept_step(  # only with three rejects in the buffer
         draft, prediction, measurement.z, measurement.scale_floor, series_params
     )
-    if step_row is not None:
-        return step_row
+    if accepted_step is not None:
+        return accepted_step  # the row and the kind of step: "phase" or "frequency"
     if draft.consecutive_rejects >= series_params.n_break:  # dormant until it acquires
         draft.rejects = ()
-        return acquire(draft, measurement.z, series_params, in_limit)
-    return hold(draft, prediction, "R", series_params)
+        return acquire(draft, measurement.z, series_params, in_limit), None
+    return hold(draft, prediction, "R", series_params), None
 
 
 def accept(draft, prediction, innovation, scale_floor):
@@ -2376,7 +2362,7 @@ A triple runs `filter_step` (§9.7) with these differences from a pair:
 When a pair whose value a triple uses cold-starts at an epoch, that pair's cycle count may start again, so dd can jump by an arbitrary amount.
 For a remote triple (r, s, c) that is any of (s, c), (r, s) and (s, r); for a local triple (r, r, c) only (r, c), since its self pair cancels (§12.4).
 The triple then goes dormant at that epoch, whether or not it has a measurement there, and acquires again from its own measurements (§13.3).
-With a measurement, the row is dormant with that measurement in its acquisition buffer; without one, the row is dormant with an empty buffer and is not written, so the triple starts again at its next measurement, in its next segment.
+With a measurement, the row is dormant with that measurement in its acquisition buffer; without one, the row is dormant with an empty buffer and is not written, so the triple starts again at its next measurement, dormant.
 Warm starts are not passed on, because z stays continuous.
 Whether a row cold-started is not written: `filter_step` gives it beside the row, and `pair_restarted` in `domain/double_difference.py` gives it to the triple.
 
@@ -2485,8 +2471,7 @@ A dormant row writes x, y, d and innovation_scale as `-`.
 A row that goes dormant from a held state, at N_break or past the gap limit, keeps the innovation it worked out; a dormant row that buffers a measurement has none.
 It carries flag D, with R when it has a measurement, or X or P as the outcome was.
 A dormant row with no measurement (D with P) is not written (`writes_row` in `domain/filter.py`): a series whose measurements stop writes predicted rows up to G_max and then none, and a dormant series writes none at an epoch without a measurement.
-A series with no row for the epoch before E starts at E as a new series does, in the segment after its newest row's (§6.7).
-A new series starts in segment 0.
+A series with no row for the epoch before E starts at E as a new series does (§6.7).
 
 Acquisition: a dormant series starts again only once its measurements agree with each other again.
 While it is dormant, its reject buffer holds its last measurements as (epoch, z) instead of innovations, and a pair decycles each new measurement against the last of them (§7.5), or with no whole periods added when the buffer is empty, as it is after the gap limit or a reading over the RMS limit.
@@ -2509,7 +2494,7 @@ stateDiagram-v2
     [*] --> Dormant: series created
     Dormant --> Dormant: measurement buffered
     Dormant --> Stopped: no measurement, no row written
-    Stopped --> Dormant: measured again, in the next segment
+    Stopped --> Dormant: measured again
     Dormant --> Unsettled: three consistent measurements (cold start)
     Dormant --> Settled: cold start of a 1-state series
     Unsettled --> Settled: epochs_in_segment reaches 5M (2 and 3 states)
@@ -2527,16 +2512,16 @@ stateDiagram-v2
     Unsettled --> Disabled: a clock of the pair disabled
     Dormant --> Disabled: a clock of the pair disabled
     Stopped --> Disabled: a clock of the pair disabled, measured
-    Disabled --> Dormant: enabled again, in the next segment
+    Disabled --> Dormant: enabled again
 ```
 
 A triple also goes dormant from any state when a pair it uses restarts (§12.6), and stops at once when it has no measurement then; the diagram leaves those arrows out.
 
-| Event | segment | State after | step_offset | Flags on the row |
+| Event | Segment | State after | step_offset | Flags on the row |
 | --- | --- | --- | --- | --- |
-| Cold start: a dormant series acquires (§13.3) | + 1 | [z_E, 0, 0], σ_ν = σ₀ | 0 | A N, and U for 2 or 3 states |
-| Frequency step | + 1 | X⁻ + (a + s t₃, s, 0), then updated | carried | A N U |
-| Configuration change | + 1 | X⁻ carried; same model | carried | N and the outcome |
+| Cold start: a dormant series acquires (§13.3) | new | [z_E, 0, 0], σ_ν = σ₀ | 0 | A N, and U for 2 or 3 states |
+| Frequency step | new | X⁻ + (a + s t₃, s, 0), then updated | carried | A N U |
+| Configuration change | new | X⁻ carried; same model | carried | N and the outcome |
 | Phase step | same | X⁻ + (Δ, 0, 0), then updated | + Δ | A |
 | Slip correction | same | updated from the corrected z_E | unchanged | S and the outcome |
 | Held | same | X⁻ | unchanged | P, X or R |
@@ -2548,10 +2533,9 @@ Every row of a 2- or 3-state series that is neither dormant nor disabled carries
 ### 13.5 Pseudocode
 
 ```python
-def carry(epoch_start, last_row, series_params, slip=False, last_segment=None):
+def carry(epoch_start, last_row, series_params, slip=False):
     if last_row is None:
-        # A new series: dormant, in segment 0; one starting again after a gap:
-        # in the segment after its last row's.
+        # A new series, or one starting again after a gap: dormant.
         draft = RowDraft(
             epoch_start,
             innovation=None,
@@ -2559,7 +2543,6 @@ def carry(epoch_start, last_row, series_params, slip=False, last_segment=None):
             y=None,
             d=None,
             innovation_scale=None,
-            segment=0 if last_segment is None else last_segment + 1,
             step_offset=0,
             epochs_in_segment=0,
             epochs_since_accept=0,
@@ -2616,17 +2599,17 @@ While it is disabled, das_processor does not track it, and never uses its measur
   A disabled pair is not predicted, decycled, screened, checked for slips, gated or updated (`disabled_step` in `domain/filter.py`).
 - Rows. At an epoch with a reading, a disabled pair writes a row of flag O alone.
   The row holds the reading's time, phase and RMS as the DAS gave them, no cycle count, and the z of the pair's newest row, or none when that row has none, so z runs on unchanged through the disabled epochs.
-  It holds no state and no innovation, its counters are zero and its buffer empty, and it keeps the segment of the row before it.
+  It holds no state and no innovation, its counters are zero and its buffer empty.
   At an epoch with no reading, it writes no row.
 - Everything else. Triples, screening and the slip check see a disabled clock as missing from the epoch's DAS data.
   A disabled reference is not in REFS(e), and a disabled pair is never accepted and has no prediction, so it gives a triple nothing (§12): a triple through it holds its prediction (P) up to its gap limit, and then stops (§13.3), as it does when its clock is not measured.
-- Enabled again. A disabled pair's row is never a last row (§6.3), so when its clocks are enabled again the pair starts afresh, as a new series does, dormant in the segment after its O rows', until it acquires (§13.3).
+- Enabled again. A disabled pair's row is never a last row (§6.3), so when its clocks are enabled again the pair starts afresh, as a new series does, dormant until it acquires (§13.3).
 - Log. Each clock is logged once at INFO at the epoch it is disabled, and at the one it is enabled again, from the configuration at that epoch and the one before, so a run of one epoch logs what a run of many does.
 
 ```mermaid
 flowchart LR
     T1[Tracked rows] -- clock disabled --> O1[O rows: the reading,<br/>z carried, no state]
-    O1 -- enabled again --> D1[Dormant rows,<br/>next segment]
+    O1 -- enabled again --> D1[Dormant rows]
     D1 -- three readings agree --> T2[Cold start, tracked]
 ```
 
@@ -2644,7 +2627,7 @@ The same triple in `das_a` and `das_b` gives two independent measurements.
 - Uncertainty: `innovation_scale`.
 - Usable rows: a row is used as a measurement only when its flags contain A and not U.
 - Phase free of steps: x − step_offset.
-- A new segment value starts a new series for that measurement, and the timescale starts its phase again for it.
+- A row with flag N starts a new segment, and so a new series for that measurement: the timescale starts its phase again for it.
 - P, R, X, D and O rows are never used as measurements; P, R and X rows still carry the state forward.
 - Correlation: triples (r, s, c) with the same (r, s), s ≠ r, share that link's error, so the timescale groups them by (r, s).
   Local triples share no link.
@@ -2896,9 +2879,9 @@ With the log level `None`, nothing is logged, though a `log_file` given is still
 Besides the standard levels there is TRACE, below DEBUG.
 
 ```text
-2026-09-24 14:10:03.512 UTC, MJD 61307.590318 | WARNING | masterclock.das_processor.run: das_a.mc2.hm7 rejected: innovation 41.7 ps, scale 3.1 ps, 1 consecutive
+2026-09-24 14:10:03.512 UTC, MJD 61307.590318 | WARNING | masterclock.das_processor.run: das_a.mc2.hm7 rejected at 2026-09-24 14:00:00+00:00: innovation 41.7 ps, scale 3.1 ps, 1 consecutive
 2026-09-24 14:10:03.514 UTC, MJD 61307.590318 | INFO | masterclock.das_processor.run: epoch 2026-09-24 14:00:00+00:00: 29 pairs, 87 triples, 114 accepted, 2 held
-2026-09-24 14:30:04.101 UTC, MJD 61307.604214 | INFO | masterclock.das_processor.run: das_a.mc2.hm7 phase step of 40 ps; step offset 40 ps
+2026-09-24 14:30:04.101 UTC, MJD 61307.604214 | INFO | masterclock.das_processor.run: das_a.mc2.hm7 phase step at 2026-09-24 14:20:00+00:00: 40 ps; step offset 40 ps
 ```
 
 | Level | Events |
@@ -2909,7 +2892,8 @@ Besides the standard levels there is TRACE, below DEBUG.
 | DEBUG | Each series' flags at each epoch; a DAS directory entry passed over; the run lock taken and freed |
 | TRACE | Each series' prediction, innovation and update |
 
-Without workers, the run logs an epoch's events once its rows are in the day buffer (`log_epoch` in `das_processor/run.py`); with them, as §6.8 says, from what screening and the slip check gave and from each series' row beside its last row: a step, dormancy or a configuration change is read from how the row differs from the last, and a cold start from the filter step's result.
+Every line about a series' row, or about an epoch's readings, names the epoch it is about, after `at`, so it can be placed in time without the epoch's own line beside it.
+Without workers, the run logs an epoch's events once its rows are in the day buffer (`log_epoch` in `das_processor/run.py`); with them, as §6.8 says, from what screening and the slip check gave and from each series' row beside its last row: dormancy or a configuration change is read from how the row differs from the last, and a cold start or a step from the filter step's result.
 Series are logged in key order, pairs first.
 Nothing is worked out for a level the log leaves out: when WARNING is not logged the epoch is not looked at, and a TRACE line is made only when TRACE is logged.
 
@@ -2943,11 +2927,11 @@ A test that carries one of these identifiers in its docstring is a test of that 
 | U6 | Gains | Eigenvalues of (I − KH)Φ for M = 10, 30, 100, 300, 1000 | Every eigenvalue within 10⁻⁴ of λ |
 | U7 | Estimator | A noise-free phase ramp (2 states) and parabola (3 states) | \|ν\| ≤ 1 ps after 20M epochs |
 | U8 | Gate | Innovations just inside and just outside 5σ_ν; rms just over the limit | A, then R; R |
-| U9 | Phase step | A step of 50σ_ν at epoch k | R at k and k + 1; A at k + 2 with step_offset += Δ within 1 ps; same segment |
-| U10 | Frequency step | A rate step of 10σ_ν per epoch at epoch k | R at k and k + 1; A N U at k + 2; segment + 1 |
+| U9 | Phase step | A step of 50σ_ν at epoch k | R at k and k + 1; A at k + 2 with step_offset += Δ within 1 ps; no N |
+| U10 | Frequency step | A rate step of 10σ_ν per epoch at epoch k | R at k and k + 1; A N U at k + 2 |
 | U11 | N_break | Large outliers that disagree with each other | Dormant when consecutive_rejects reaches N_break; a cold start only after three consistent measurements |
 | U12 | Exclusion | An excluded measurement inside the gate | X; consecutive_rejects and buffer unchanged; epochs_since_accept + 1 |
-| U13 | Gaps | No measurement for G_max epochs, then for G_max + 1 | First: an ordinary accept. Second: no row from G_max + 1 on; measured again, D rows in the next segment, then a cold start after three consistent measurements |
+| U13 | Gaps | No measurement for G_max epochs, then for G_max + 1 | First: an ordinary accept. Second: no row from G_max + 1 on; measured again, D rows, then a cold start after three consistent measurements |
 | U14 | Configuration change | A new entry with another M; a new entry with another model | A warm start at the entry's epoch with new gains; the model change refused when the file is read |
 | U15 | Reciprocity | A delay added to one direction, then to both | Only that direction excluded; then both |
 | U16 | Closure | Four references, an error in one link's two-way value | Only that link excluded |
@@ -2962,8 +2946,8 @@ A test that carries one of these identifiers in its docstring is a test of that 
 | U25 | Acquisition | A dormant series given scattered measurements, then a gap, then steady measurements with a large constant rate, a wrap included | Stays dormant through the scatter; cold-starts on the third steady measurement |
 | U26 | File length | A file cut inside its last row; cut inside its header; holding only its header; with a row of the wrong length inside it; with a first row that does not parse | Every file cut back to the damaged file's last good row, the damage logged at ERROR, and the data files then byte-identical to an uninterrupted run's; a file with no whole row, or a damaged first row, raises `DataFileError` and changes no file |
 | U27 | Exact phase | Prediction, referring back, update and double difference with phases beyond 2⁵³, and sums ending in exactly ½ | Every stored phase equals the same sum done exactly and rounded half to even |
-| U28 | Series that stop | A clock's measurements stop for longer than G_max, then come back; a data gap no series writes; run in one go and one epoch per run, with and without workers | P rows up to G_max, then no row, and one INFO line when it stops; on its return, rows again in the next segment; an epoch that writes no row is not counted as a step; data files byte-identical every way |
-| U29 | Disabled clocks | A clock disabled for three epochs, then enabled again; a disabled reference; run in one go and one epoch per run, with and without workers | O rows holding the reading and the carried z; the triples, screening and the other pairs as if the clock was missing; dormant in the next segment once enabled; one INFO line at each change; data files byte-identical every way |
+| U28 | Series that stop | A clock's measurements stop for longer than G_max, then come back; a data gap no series writes; run in one go and one epoch per run, with and without workers | P rows up to G_max, then no row, and one INFO line when it stops; on its return, rows again, dormant; an epoch that writes no row is not counted as a step; data files byte-identical every way |
+| U29 | Disabled clocks | A clock disabled for three epochs, then enabled again; a disabled reference; run in one go and one epoch per run, with and without workers | O rows holding the reading and the carried z; the triples, screening and the other pairs as if the clock was missing; dormant once enabled; one INFO line at each change; data files byte-identical every way |
 
 Each invariant of §1.3 is held by these tests: I1 by U21 and U26, I2 by U13, U28 and U29, I3 and I8 by U21, I4 and I5 by U22, U28, U29 and the property tests, I6 by the epoch-loop tests, and I7 by U2 and U27.
 
@@ -3026,8 +3010,8 @@ The rows of the pair's measurement file for this epoch and for the next, which h
 <!-- generated: worked-meas-rows -->
 
 ```text
-2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,  60941.251588,  34579,    3,            6,          1234577,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,         4,                0,       812,         0,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
-2025-09-23 06:10:00+00:00,  60941.256944,                                -,             -,      -,    -,            -,                -,          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,         4,                0,       813,         1,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        P
+2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,  60941.251588,  34579,    3,            6,          1234577,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:10:00+00:00,  60941.256944,                                -,             -,      -,    -,            -,                -,          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       813,         1,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        P
 ```
 
 <!-- end generated -->
@@ -3052,8 +3036,8 @@ Their rows, the remote triple's first; the local triple's estimate is its pair's
 <!-- generated: worked-ddiff-rows -->
 
 ```text
-2025-09-23 06:00:00+00:00,  60941.250000,          6666667, -5.3000000000000007e+00, +3.3166247903553998e+00, 111,          6666672.143, +2.0497389398973252e-02, -1.4503218177543500e-11, +3.5449682650201537e+00,         2,                0,      3107,         0,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
-2025-09-23 06:00:00+00:00,  60941.250000,          1234577, +2.6200000000000001e+00, +3.0000000000000000e+00, 111,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,         4,                0,       812,         0,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:00:00+00:00,  60941.250000,          6666667, -5.3000000000000007e+00, +3.3166247903553998e+00, 111,          6666672.143, +2.0497389398973252e-02, -1.4503218177543500e-11, +3.5449682650201537e+00,                0,      3107,         0,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:00:00+00:00,  60941.250000,          1234577, +2.6200000000000001e+00, +3.0000000000000000e+00, 111,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
 ```
 
 <!-- end generated -->

@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-06 11:57:17 UTC
+**Date:** 2026-10-06 20:20:57 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -226,6 +226,31 @@ uv run --frozen python scripts/characterize.py /srv/masterclock/characterization
 `--min-days` sets how many days of prepared rows a clock needs to be given settings, and `--jobs` how many clocks are worked at once; `--help` lists every option.
 It prints a line naming each field, then a line for each clock with a local triple, references left out: the references it used, the rows it used, the days it dropped, the measurement noise, the fitted noise coefficients and crossover time, and the suggested initial innovation scale, time constant and gap limit.
 `-` marks a value it could not work out, for example for a clock with too few rows, and a gap limit of −1 means even a gap of no epochs fails.
+
+### 4.4 Finding stretches to disable
+
+A clock can stop running properly for a while: its channel goes dead, or the clock falls back on its quartz crystal and its phase lurches from one epoch to the next.
+das_processor cannot follow it then, and the log fills with rejects and undecided slips.
+`scripts/no_signal.py` lists such stretches from the measurement files of a run, such as a characterization run, for you to look over and disable.
+[Design §15.4](design.md#154-finding-stretches-when-a-clock-is-not-running-properly) describes the method.
+
+```sh
+uv run --frozen python scripts/no_signal.py /srv/masterclock/characterization/a --rf a --skip ox
+```
+
+`--skip` takes name prefixes of clocks to leave alone; the references are always left alone.
+`--min-hours` sets the shortest stretch listed, and the shortest good spell that keeps two stretches apart, 12 hours unless given; `--jobs` sets how many clocks are worked at once.
+It prints a line naming each field, then a line for each stretch: the clock, the MJD from which to disable it, the MJD at which to enable it again, the hours between, whether it held `no_signal` or a `quartz` signal, and the references that agreed.
+A `-` in place of the enable MJD means the clock never ran properly again before the data end.
+
+To disable a stretch, give the clock two more entries, with the two MJDs as listed:
+
+```yaml
+  hm7:
+    - {type: maser, location: 7}
+    - {effective_mjd: 60941.041666, disabled: true}
+    - {effective_mjd: 60941.805555, disabled: false}
+```
 
 ## 5. Running
 
@@ -599,3 +624,4 @@ A data file that holds no whole row, or whose first row is damaged, stops only i
 | Turn logging off | add `--log-level None`; an error in a setting or path, or an error that is not the program's own, is then printed on standard error, and any other failure shows only in the exit status |
 | Stop a run cleanly | send SIGINT, SIGTERM or SIGHUP |
 | Choose clock settings | `uv run --frozen python scripts/characterize.py RUN --rf a` on a characterization run |
+| Find stretches to disable | `uv run --frozen python scripts/no_signal.py RUN --rf a` on a run's files |

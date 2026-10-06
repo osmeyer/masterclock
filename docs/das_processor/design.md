@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-06 11:57:17 UTC
+**Date:** 2026-10-06 20:20:57 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -33,7 +33,8 @@ Outside das_processor:
 - the DAS itself;
 - the computation of the steering applied to the references;
 - the timescale algorithm;
-- the offline characterization that chooses each clock's time constants, which §15.3 describes.
+- the offline characterization that chooses each clock's time constants, which §15.3 describes;
+- the offline search for stretches when a clock is not running properly, to be disabled, which §15.4 describes.
 
 ### 1.3 Invariants
 
@@ -2802,6 +2803,39 @@ xychart-beta
 The falling line is the measurement's white phase noise and the rising line the clock's own noise; M is where they cross.
 `scripts/characterize.py` carries out this section on a characterization run's files and prints one line per clock, with the days it dropped; a clock with fewer prepared rows than a given number of days' worth of epochs gets no settings, and the command line can change how many days that is.
 It searches G_max up to a fixed limit, and gives −1 when even a gap of no epochs fails.
+
+### 15.4 Finding stretches when a clock is not running properly
+
+A clock that is not running properly shows it in its readings in one of two ways.
+A channel whose clock is off or disconnected gives readings with no clock signal: their phase is spread over the whole period.
+A clock reduced to its quartz crystal gives a signal, but its phase lurches by tens of nanoseconds from one epoch to the next.
+Either way the estimator cannot follow it: its pairs reject, are excluded for undecided slips and start afresh again and again, and its triples give double differences that mean nothing.
+Such a stretch is disabled (§13.6) by two dated entries in the clock configuration (§15.2): one that disables the clock, and one that enables it again.
+
+`scripts/no_signal.py` finds these stretches in the measurement files of a run, for a person to look over before any goes into the configuration.
+The references, and clocks whose names start with a prefix given to `--skip`, are left alone.
+For every other clock, in these steps, in order:
+
+1. Changes. For each reference r measuring clock c, the raw `measured_phase` of every row of the pair (r, c) with a reading, and its change from the reading one epoch before, wrapped into the half period either way.
+   The raw phase is used rather than z, so the judgement does not depend on what the estimator did.
+2. Judging. An epoch is unlike a running clock when the changes within 12 epochs either side of it typically depart from their median by more than 10 ns: the test of §15.3 step 3, on a window that slides from epoch to epoch rather than on a day.
+   A window with fewer than 9 changes judges nothing.
+   Only the spread of the changes is judged, never their size, so a clock far off frequency, or one whose phase jumps, is not caught: it runs properly between its jumps.
+3. Agreement. An epoch counts as bad only when every reference that judged it found it so, so a fault in one reference's measurement is never taken for the clock's.
+   A run of bad epochs ends only at an epoch judged like a running clock; epochs no one judged do not end it.
+4. Joining. Runs that lie less than the shortest stretch apart are joined, so a short good spell between two bad ones is not enabled.
+5. Ends. A window blurs each end by half its width, so each end is found again to the epoch from the changes alone, against the clock's own changes in the window beside it.
+   The clock is disabled from the first reading whose change strays from them by more than 5 robust spreads, and enabled at the reading the last straying change ends on: with no signal, the first proper reading, whose change still starts from a bad one; with a signal that lurched, the reading the last lurch ends on, from which the clock runs properly.
+   The earliest start and the latest end that any reference gives are kept, and stretches are joined again as in step 4, so no two overlap.
+6. Length. A stretch shorter than the shortest is left out.
+   The shortest is 12 hours, unless the command line says otherwise.
+   A stretch that lasts to the last epoch judged has no end, and the clock is not enabled again.
+7. Kind. Inside a stretch, the references' changes at each epoch are compared, each taken relative to the first and wrapped.
+   With no signal, the references read independently, and their changes typically lie about 31 ns apart, and over twelve hours never less than 22 ns; readings of one signal lie far closer.
+   A stretch whose references' changes typically lie more than 20 ns apart is marked `no_signal`, any other `quartz`, and one with fewer than three references to compare at any epoch is left unmarked.
+
+The script prints a line naming each field, then one line per stretch: the clock, the MJD from which to disable it, the MJD at which to enable it again, the hours between, the kind and the references.
+Each MJD is the epoch start rounded down to six decimals, so the first epoch at or after it is the epoch meant.
 
 ## 16. Error handling and logging
 

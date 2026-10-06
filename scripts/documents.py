@@ -42,7 +42,7 @@ document. A usage error exits 2.
 import argparse
 import re
 import shutil
-import subprocess  # nosec B404
+import subprocess  # nosec B404 - runs git, to read each document's date
 import sys
 from datetime import UTC, datetime
 from pathlib import Path

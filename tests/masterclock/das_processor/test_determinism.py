@@ -9,7 +9,7 @@ them, whatever each process's hash seed.
 """
 
 import os
-import subprocess
+import subprocess  # nosec B404 - runs das_processor, one process an epoch
 import sys
 import tempfile
 from datetime import UTC, datetime, timedelta

@@ -25,7 +25,7 @@ status main returns.
 
 import json
 import runpy
-import subprocess
+import subprocess  # nosec B404 - for the finished runs the tests give
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime

@@ -82,7 +82,7 @@ def restore_root_logger() -> Iterator[None]:
 
 def seeded(seed: int) -> random.Random:
     """Give a generator of invented noise, the same on every run."""
-    return random.Random(seed)  # noqa: S311 - repeatable test data, not a secret
+    return random.Random(seed)  # noqa: S311  # nosec B311 - repeatable test data, not a secret
 
 
 # ------------------------------------------------------------ steps 1 and 2

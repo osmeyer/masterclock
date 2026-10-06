@@ -15,7 +15,7 @@ A usage error exits 2.
 """
 
 import argparse
-import subprocess
+import subprocess  # nosec B404 - runs pytest on each test module
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Final

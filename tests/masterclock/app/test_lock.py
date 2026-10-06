@@ -19,7 +19,7 @@ import errno
 import fcntl
 import logging
 import os
-import subprocess
+import subprocess  # nosec B404 - runs a second process to try the lock
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -54,7 +54,7 @@ def try_from_another_process(
     lock_directory: Path, lock_file_name: str = LOCK_FILE_NAME
 ) -> str:
     """Return what another process printed on trying the lock."""
-    finished_process = subprocess.run(  # noqa: S603 - fixed arguments, this interpreter
+    finished_process = subprocess.run(  # noqa: S603  # nosec B603 - fixed arguments, this interpreter
         [
             sys.executable,
             "-c",

@@ -28,7 +28,7 @@ is reported with its error output and exit status 1.
 
 import argparse
 import statistics
-import subprocess  # nosec B404
+import subprocess  # nosec B404 - runs das_processor, to time it
 import sys
 import time
 from datetime import UTC, datetime, timedelta

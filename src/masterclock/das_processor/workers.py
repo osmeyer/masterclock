@@ -37,7 +37,7 @@ import contextlib
 import functools
 import logging
 import multiprocessing
-import pickle
+import pickle  # nosec B403 - only between this run's own processes
 import signal
 import zlib
 from collections.abc import Mapping

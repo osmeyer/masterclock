@@ -18,7 +18,7 @@ the script exits with the status main returns.
 import os
 import runpy
 import shutil
-import subprocess
+import subprocess  # nosec B404 - runs git, to make a repository to test in
 import sys
 from collections.abc import Callable
 from datetime import UTC, datetime

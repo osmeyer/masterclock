@@ -99,6 +99,15 @@ _PAIR: Final[int] = 2
 _STOP_WAIT: Final[float] = 10.0
 """How long the main process waits for a worker to end before ending it, s."""
 
+ANSWER_WAIT: float = 600.0
+"""How long the main process waits for each worker's answer, s.
+
+A worker's part of one exchange takes well under a second, so this is
+only a limit for a worker that hangs while still running: the time between
+two scheduled runs, by which a run that is still waiting has already run
+into the next one. Not Final, so a test can make it short.
+"""
+
 
 @functools.cache
 def owner_of(series_key: SeriesKey, num_workers: int) -> int:
@@ -962,12 +971,15 @@ class WorkerPool:
         ------
         MasterClockError
             The failure a worker sent back, its log records written first;
-            or a :class:`WorkerError` for a worker that stopped answering or
-            gave another kind of answer.
+            or a :class:`WorkerError` for a worker that stopped answering,
+            gave no answer within :data:`ANSWER_WAIT`, or gave another kind
+            of answer.
         """
         answers = []
         for worker, connection in enumerate(self._connections):
             try:
+                if not connection.poll(ANSWER_WAIT):
+                    _fail(f"worker {worker} gave no answer within {ANSWER_WAIT:g} s")
                 answer = connection.recv()
             except (
                 EOFError,

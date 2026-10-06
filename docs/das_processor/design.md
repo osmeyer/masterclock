@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-05 22:02:46 UTC
+**Date:** 2026-10-06 00:34:44 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -1510,7 +1510,7 @@ A worker logs at the main process's level, so nothing is worked out for a level 
 A worker ignores SIGINT and SIGTERM: the main process stops between epochs (§6.6), then asks each worker to stop, waits a short time for it, and ends one that has not stopped.
 A worker does not ignore SIGHUP, so a hangup sent to the whole process group ends the workers, and the main process stops with `WorkerError` when it next sends to one or waits for one; a hangup after the epoch's last exchange ends the run as a signal does, its rows written.
 A failure in a worker is logged there, sent back with its records, and raised again by the main process, which stops the run as any failure does.
-A worker whose pipe closes, or that gives an answer of the wrong kind, raises `WorkerError`, as does a failure in a worker that is not one of the project's own errors; a worker that hangs while still running is waited for without limit.
+A worker whose pipe closes, or that gives an answer of the wrong kind, raises `WorkerError`, as does a failure in a worker that is not one of the project's own errors, and a worker that gives no answer within `ANSWER_WAIT` in `das_processor/workers.py`, the time between two scheduled runs, though it is still running.
 
 ## 7. Pair processing: steering input, decycling, referring to the epoch start
 

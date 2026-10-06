@@ -677,6 +677,17 @@ def test_a_worker_that_closed_its_pipe_has_stopped(
     assert [log_record.levelname for log_record in caplog.records] == ["ERROR"] * 2
 
 
+def test_a_worker_that_gives_no_answer_in_time_has_stopped(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Raise and log WorkerError for a worker still running but silent too long."""
+    monkeypatch.setattr(workers, "ANSWER_WAIT", 0.05)
+    worker_pool, (_worker_end,) = pool_on_pipes(1)
+    with pytest.raises(WorkerError, match=r"worker 0 gave no answer within 0\.05 s"):
+        worker_pool._answers(workers.SeriesDone)
+    assert [log_record.levelname for log_record in caplog.records] == ["ERROR"]
+
+
 def test_a_worker_must_give_the_answer_the_exchange_asks_for() -> None:
     """Raise WorkerError for an answer of another kind."""
     worker_pool, (worker_end,) = pool_on_pipes(1)

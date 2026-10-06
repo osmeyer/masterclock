@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-05 22:02:46 UTC
+**Date:** 2026-10-06 00:34:44 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -574,7 +574,7 @@ With `--log-level None` nothing is written, but a `log_file` given is still open
 | `steering file …` followed by a problem, or `cannot read steering file …` | A steering file has a line that cannot be read, or is out of order, or the file cannot be read at all | Correct the steering file; das_processor stops until it can trust it |
 | `clock configuration …` followed by a problem | The clock configuration cannot be used | Correct it; the run stops before it changes anything |
 | `cannot read data file …`, `cannot write …`, `cannot flush …` | The operating system refused a file | Look at the disk and the file's permissions; the next run carries on |
-| `worker … stopped answering`, `a worker failed: …` | A worker process ended or failed | Look at the error; the next run does the work again |
+| `worker … stopped answering`, `worker … gave no answer within …`, `a worker failed: …` | A worker process ended, hung or failed | Look at the error; the next run does the work again |
 | `stopped on an unexpected error: …`, with a traceback | A fault in das_processor itself | Keep the log and report it; the next run tries again |
 | `no cd5m5m data files found in …` | The data directory holds no DAS files | Check `cd5m5m_path` |
 

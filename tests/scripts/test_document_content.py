@@ -29,10 +29,12 @@ from masterclock.das_processor.files import (
     DDIFF_HEADER_LINES,
     DDIFF_WIDTH,
     HEADER_LINES,
+    HEADER_SIZES,
     MEAS_COLUMNS,
     MEAS_HEADER_LINES,
     MEAS_WIDTH,
     Column,
+    header,
 )
 from masterclock.domain.filter import gains
 from masterclock.domain.phase import EPOCH_SECONDS
@@ -117,11 +119,21 @@ def test_a_column_table_lists_the_file_s_columns(
     )
 
 
-def test_the_line_widths_are_the_program_s() -> None:
-    """Give each kind of file its line width and header lines."""
-    assert table_rows(document_content.line_widths()) == [
-        ["Measurement file", str(MEAS_WIDTH), str(HEADER_LINES["meas"])],
-        ["Double-difference file", str(DDIFF_WIDTH), str(HEADER_LINES["ddiff"])],
+def test_the_row_widths_are_the_program_s() -> None:
+    """Give each kind of file its row width, header lines and header size."""
+    assert table_rows(document_content.row_widths()) == [
+        [
+            "Measurement file",
+            str(MEAS_WIDTH),
+            str(HEADER_LINES["meas"]),
+            str(HEADER_SIZES["meas"]),
+        ],
+        [
+            "Double-difference file",
+            str(DDIFF_WIDTH),
+            str(HEADER_LINES["ddiff"]),
+            str(HEADER_SIZES["ddiff"]),
+        ],
     ]
 
 
@@ -279,13 +291,13 @@ def test_the_gains_are_the_estimator_s() -> None:
     [("meas", MEAS_HEADER_LINES), ("ddiff", DDIFF_HEADER_LINES)],
 )
 def test_an_example_header_is_the_program_s(file_kind: str, header_lines: int) -> None:
-    """Give a file's header as the program writes it, padding taken off."""
+    """Give a kind of file's header exactly as the program writes it."""
     header_block = document_content.BLOCKS[f"{file_kind}-header"]()
     block_lines = header_block.splitlines()
     assert block_lines[0] == "```text"
     assert block_lines[-1] == "```"
     assert len(block_lines) - 2 == header_lines
-    assert all(line == line.rstrip() for line in block_lines)
+    assert block_lines[1:-1] == header(file_kind).splitlines()  # type: ignore[arg-type]
     assert block_lines[2].startswith("# WARNING")
 
 

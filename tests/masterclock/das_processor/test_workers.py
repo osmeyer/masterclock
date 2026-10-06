@@ -361,7 +361,7 @@ def test_the_pool_knows_a_series_once_it_writes_a_row(tmp_path: Path) -> None:
     das_block = next(
         read_all_blocks(config.das.cd5m5m_path, datetime_to_mjd(FIRST_EPOCH))
     )
-    day_buffer = DayBuffer("a")
+    day_buffer = DayBuffer()
     with workers.WorkerPool(
         1, config.processed.processed_path, config.das.rf
     ) as worker_pool:
@@ -426,7 +426,7 @@ def test_a_worker_that_stopped_stops_the_run(
             worker_pool.process_epoch(
                 FIRST_EPOCH,
                 das_block,
-                DayBuffer("a"),
+                DayBuffer(),
                 config,
                 clock_config_of(config),
             )

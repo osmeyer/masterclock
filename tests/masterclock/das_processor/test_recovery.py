@@ -23,7 +23,7 @@ import pytest
 
 from masterclock.app.shutdown import ShutdownHandler
 from masterclock.app.timeutil import datetime_to_mjd
-from masterclock.das_processor import files, run
+from masterclock.das_processor import files, registry, run
 from masterclock.das_processor.clock_config import read_clock_config
 from masterclock.das_processor.config import AppConfig
 from masterclock.das_processor.exceptions import DataFileError
@@ -418,12 +418,12 @@ def test_a_line_damaged_by_hand_cuts_every_file_and_the_run_is_redone(
     config = make_deployment(tmp_path)
     epochs_run, damaged_row = (5, 3) if file_kind == "meas" else (5, 1)
     run_once(config, steps=epochs_run)
-    file_name = "das_a.mc1.hm1.dat" if file_kind == "meas" else "das_a.mc1.mc1.mc2.dat"
-    data_file = config.processed.processed_path / file_kind / file_name
+    series_key = ("mc1", "hm1") if file_kind == "meas" else ("mc1", "mc1", "mc2")
+    data_file = registry.series_file(config.processed.processed_path, "a", series_key)
     line_size = files.WIDTHS[file_kind] + 1  # type: ignore[index]
-    header_lines = files.HEADER_LINES[file_kind]  # type: ignore[index]
+    header_size = len(files.header(file_kind))  # type: ignore[arg-type]
     file_bytes = bytearray(data_file.read_bytes())
-    file_bytes[(header_lines + damaged_row) * line_size + 5] = ord("#")
+    file_bytes[header_size + damaged_row * line_size + 5] = ord("#")
     data_file.write_bytes(bytes(file_bytes[:-line_size] + b"torn"))
     run_once(config)
     assert archived_files(config) == uninterrupted_files

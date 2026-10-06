@@ -401,7 +401,7 @@ def test_a_redo_recomputes_its_rows_with_the_settings_now(tmp_path: Path) -> Non
     assert len(file_after_redo) == len(file_before_redo)
     assert file_after_redo != file_before_redo
     line_size = files.MEAS_WIDTH + 1
-    kept_length = (files.MEAS_HEADER_LINES + 2) * line_size
+    kept_length = len(files.header("meas")) + 2 * line_size
     assert file_after_redo[:kept_length] == file_before_redo[:kept_length]
 
 

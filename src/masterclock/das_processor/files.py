@@ -1,11 +1,13 @@
 """The two output files: their columns, headers and rows.
 
 Every series has one file: a pair a measurement file, a triple a
-double-difference file. Each line of a file, header lines included, is the
-same width W, worked out from the file's column table, and ends with a
-newline. The header says in words what the file is and what each column
-holds, and warns that only das_processor may write the file; the program
-never reads the header back.
+double-difference file. A file is its header, then its rows. The header
+says in words what the kind of file is and what each column holds,
+numbered, and warns that only das_processor may write the file; each
+header line is as long as its text, and every file of a kind has the same
+header, so the same size. The file's name says which series it holds.
+Every row is the same width W, worked out from the file's column table.
+Every line ends with a newline. The program never reads the header back.
 
 A row is the values of one epoch, each right-justified in a column exactly
 as wide as its values need and separated by ``", "``; ``-`` marks an empty
@@ -69,7 +71,6 @@ from masterclock.domain.measurements import (
     TripleMeasurement,
 )
 from masterclock.domain.phase import EPOCH_SECONDS, FS_PER_PS, PHASE_MAX
-from masterclock.domain.references import REFERENCE_PATTERN
 from masterclock.domain.series import (
     FilterStates,
     PairKey,
@@ -180,13 +181,7 @@ SEPARATOR: Final[str] = ", "
 EMPTY: Final[str] = "-"
 """What an empty field holds."""
 
-_PAIR: Final[int] = 2
-"""How many names a pair key holds."""
-
-_TRIPLE: Final[int] = 3
-"""How many names a triple key holds."""
-
-_PREAMBLE: Final[int] = 6
+_PREAMBLE: Final[int] = 4
 """How many header lines come before the column lines."""
 
 
@@ -207,10 +202,10 @@ def _width(columns: tuple[Column, ...]) -> int:
 
 
 MEAS_WIDTH: Final[int] = _width(MEAS_COLUMNS)
-"""The width W of every line of a measurement file, newline not counted."""
+"""The width W of every row of a measurement file, newline not counted."""
 
 DDIFF_WIDTH: Final[int] = _width(DDIFF_COLUMNS)
-"""The width W of every line of a double-difference file, newline not counted."""
+"""The width W of every row of a double-difference file, newline not counted."""
 
 MEAS_HEADER_LINES: Final[int] = _PREAMBLE + len(MEAS_COLUMNS)
 """How many header lines a measurement file has."""
@@ -219,7 +214,7 @@ DDIFF_HEADER_LINES: Final[int] = _PREAMBLE + len(DDIFF_COLUMNS)
 """How many header lines a double-difference file has."""
 
 WIDTHS: Final[dict[FileKind, int]] = {"meas": MEAS_WIDTH, "ddiff": DDIFF_WIDTH}
-"""The line width of each kind of file."""
+"""The row width of each kind of file."""
 
 HEADER_LINES: Final[dict[FileKind, int]] = {
     "meas": MEAS_HEADER_LINES,
@@ -397,105 +392,41 @@ def _check_measured(has_measurement: bool, row: Row) -> None:
 # ------------------------------------------------------------------ headers
 
 
-def header(file_kind: FileKind, channel: RfChannel, series_key: SeriesKey) -> str:
-    """Give the header of a series' file (design 5.2, 5.4, 5.5).
+def header(file_kind: FileKind) -> str:
+    """Give the header of a file of a kind (design 5.2, 5.4, 5.5).
 
     Parameters
     ----------
     file_kind : {'meas', 'ddiff'}
         The kind of file.
-    channel : {'a', 'b'}
-        The RF channel.
-    series_key : (str, str) or (str, str, str)
-        The pair of a measurement file, the triple of a double-difference
-        file.
 
     Returns
     -------
     str
-        The header lines, each padded with spaces to the file's width and
-        ending with a newline: the kind of file and its format, a warning
-        not to modify it, the channel and the series, the series in words,
-        the line format, then one line per column with its name and
-        meaning.
-
-    Raises
-    ------
-    DataFileError
-        If ``series_key`` is not a pair for a measurement file or a triple for a
-        double-difference file.
+        The header lines, each as long as its text and ending with a
+        newline: the kind of file and its format, a warning not to modify
+        it, the line format, then one line per column with its number, from
+        1, its name and its meaning. It is the same for every file of the
+        kind; the file's name says which series it holds.
     """
     columns = MEAS_COLUMNS if file_kind == "meas" else DDIFF_COLUMNS
     header_lines_text = [
         f"# das_processor {_TITLES[file_kind]} file, format 1",
         _WARNING,
-        f"# RF channel {channel}. {_named(file_kind, series_key)}",
-        f"# {_described(file_kind, series_key)}",
         f"# One row per 10-minute epoch; '{EMPTY}' marks an empty field.",
         f"# Columns: right-justified, fixed width, separated by '{SEPARATOR}'.",
-        *(f"#   {column.name:<24}{column.meaning}" for column in columns),
+        *(
+            f"#  {number:>2}  {column.name:<24}{column.meaning}"
+            for number, column in enumerate(columns, start=1)
+        ),
     ]
-    line_width = WIDTHS[file_kind]
-    return "".join(
-        f"{header_line.ljust(line_width)}\n" for header_line in header_lines_text
-    )
+    return "".join(f"{header_line}\n" for header_line in header_lines_text)
 
 
-def _named(file_kind: FileKind, series_key: SeriesKey) -> str:
-    """Name a series for the header.
-
-    Parameters
-    ----------
-    file_kind : {'meas', 'ddiff'}
-        The kind of file.
-    series_key : (str, str) or (str, str, str)
-        The series; its length must fit the kind of file.
-
-    Returns
-    -------
-    str
-        ``Pair (a, b).`` or ``Triple (r, s, c).``.
-
-    Raises
-    ------
-    DataFileError
-        If the key's length does not fit the kind of file.
-    """
-    key_length, series_word = (
-        (_PAIR, "pair") if file_kind == "meas" else (_TRIPLE, "triple")
-    )
-    if len(series_key) != key_length:
-        _fail(f"a {_TITLES[file_kind]} file is for a {series_word}: {series_key}")
-    return f"{series_word.capitalize()} ({', '.join(series_key)})."
-
-
-def _described(file_kind: FileKind, series_key: SeriesKey) -> str:
-    """Say in words what a series measures.
-
-    Parameters
-    ----------
-    file_kind : {'meas', 'ddiff'}
-        The kind of file.
-    series_key : (str, str) or (str, str, str)
-        The series, of the length the kind needs.
-
-    Returns
-    -------
-    str
-        For a pair, the reference measured against itself, a reference or
-        a clock; for a triple, the clock against its local reference, or
-        against a remote one through its local one.
-    """
-    if file_kind == "meas":
-        a, b = series_key[0], series_key[1]
-        if a == b:
-            return f"Reference {a} measured against itself."
-        b_role = "reference" if re.fullmatch(REFERENCE_PATTERN, b) else "clock"
-        return f"Reference {a} measured against {b_role} {b}."
-    r, s, c = series_key[0], series_key[1], series_key[-1]
-    if r == s:
-        return f"Clock {c} against its local reference {r}."
-    return f"Clock {c} against remote reference {r}, through local reference {s}."
+HEADER_SIZES: Final[dict[FileKind, int]] = {
+    file_kind: len(header(file_kind)) for file_kind in ("meas", "ddiff")
+}
+"""The size H of each kind of file's header, bytes."""
 
 
 # ------------------------------------------------------------- formatting
@@ -1448,7 +1379,7 @@ def row_epoch(slot: bytes, file_kind: FileKind) -> datetime | None:
     Parameters
     ----------
     slot : bytes
-        One line slot of a file, with its newline if it has one.
+        One row slot of a file, with its newline if it has one.
     file_kind : {'meas', 'ddiff'}
         The kind of file.
 
@@ -1464,12 +1395,12 @@ def row_epoch(slot: bytes, file_kind: FileKind) -> datetime | None:
 
 
 def _examined(slot: bytes, file_kind: FileKind) -> tuple[datetime | None, str]:
-    """Give a line slot's epoch, or what is wrong with it.
+    """Give a row slot's epoch, or what is wrong with it.
 
     Parameters
     ----------
     slot : bytes
-        One line slot of a file.
+        One row slot of a file.
     file_kind : {'meas', 'ddiff'}
         The kind of file.
 
@@ -1499,25 +1430,70 @@ def _examined(slot: bytes, file_kind: FileKind) -> tuple[datetime | None, str]:
     return file_record.row.interpolated_datetime, ""
 
 
-def _slot(open_file: BinaryIO, slot_index: int, line_size: int) -> bytes:
-    """Read one line slot of a file.
+def _slot(
+    open_file: BinaryIO, header_end: int, slot_index: int, line_size: int
+) -> bytes:
+    """Read one row slot of a file.
 
     Parameters
     ----------
     open_file : BinaryIO
         The open file.
+    header_end : int
+        Where its header ends, bytes from its start.
     slot_index : int
-        The slot, from 0 at the first header line.
+        The slot, from 0 at the first row.
     line_size : int
-        A line's size, newline included.
+        A row's size, newline included.
 
     Returns
     -------
     bytes
         The slot's bytes.
     """
-    open_file.seek(slot_index * line_size)
+    open_file.seek(header_end + slot_index * line_size)
     return open_file.read(line_size)
+
+
+def _not_sound(data_file: Path, file_length: int) -> str:
+    """Say that a file is not its header and whole rows.
+
+    Parameters
+    ----------
+    data_file : Path
+        The file.
+    file_length : int
+        Its length, bytes.
+
+    Returns
+    -------
+    str
+        The message.
+    """
+    return (
+        f"data file {data_file} is not sound: its {file_length} bytes are not"
+        " its header and whole rows"
+    )
+
+
+def _row_slots(file_length: int, file_kind: FileKind) -> tuple[int, int]:
+    """Count a file's whole row slots after its header.
+
+    Parameters
+    ----------
+    file_length : int
+        The file's length, bytes.
+    file_kind : {'meas', 'ddiff'}
+        Its kind.
+
+    Returns
+    -------
+    tuple of (int, int)
+        How many whole rows fit after the header, and the bytes left over
+        after them, which a sound file has none of; none of either for a
+        file no longer than its header.
+    """
+    return divmod(max(file_length - HEADER_SIZES[file_kind], 0), WIDTHS[file_kind] + 1)
 
 
 class FileCheck(NamedTuple):
@@ -1584,8 +1560,9 @@ def check_file(
     FileCheck
         For a sound file, one whose length is its header plus whole rows
         and whose last row is good: that row's epoch, found with one short
-        read, and ``damaged`` false. Otherwise the epoch of the row before
-        its first line that is not a good row; after a stopped write,
+        read, and ``damaged`` false.
+        Otherwise the epoch of the row before its first line that is not a
+        good row; after a stopped write,
         ``None`` when the file holds no whole row or its first row is not
         good. A damaged file is logged once at ERROR, naming where it is
         damaged and why.
@@ -1597,22 +1574,22 @@ def check_file(
         it holds no whole row or its first row is not good, so its rows
         cannot be placed in time.
     """
-    line_size, header_lines = WIDTHS[file_kind] + 1, HEADER_LINES[file_kind]
+    line_size = WIDTHS[file_kind] + 1
     try:
         with data_file.open("rb") as open_file:
-            file_length = open_file.seek(0, os.SEEK_END)
-            row_slots = file_length // line_size - header_lines
+            header_end = HEADER_SIZES[file_kind]
+            row_slots, left_over = _row_slots(open_file.seek(0, os.SEEK_END), file_kind)
             if row_slots < 1:
                 good_epoch, damage_reason = None, "it holds no whole row"
-            elif file_length % line_size == 0 and (
+            elif left_over == 0 and (
                 last_epoch := row_epoch(
-                    _slot(open_file, header_lines + row_slots - 1, line_size), file_kind
+                    _slot(open_file, header_end, row_slots - 1, line_size), file_kind
                 )
             ):
                 return FileCheck(good_through=last_epoch, damaged=False)
             else:
                 good_epoch, damage_reason = _first_damage(
-                    open_file, row_slots, header_lines, line_size, file_kind
+                    open_file, row_slots, header_end, line_size, file_kind
                 )
     except OSError as exc:
         _fail(f"cannot read data file {data_file}: {exc}", exc)
@@ -1631,7 +1608,7 @@ def check_file(
 def _first_damage(
     open_file: BinaryIO,
     row_slots: int,
-    header_lines: int,
+    header_end: int,
     line_size: int,
     file_kind: FileKind,
 ) -> tuple[datetime | None, str]:
@@ -1642,11 +1619,11 @@ def _first_damage(
     open_file : BinaryIO
         The file, open.
     row_slots : int
-        Its whole line slots after the header.
-    header_lines : int
-        Its header's lines.
+        Its whole row slots after the header.
+    header_end : int
+        Where its header ends, bytes from its start.
     line_size : int
-        Its line width, newline included.
+        Its row width, newline included.
     file_kind : {'meas', 'ddiff'}
         Its kind.
 
@@ -1660,7 +1637,7 @@ def _first_damage(
     good_epoch = None
     for slot_index in range(row_slots):
         slot_epoch, damage_reason = _examined(
-            _slot(open_file, header_lines + slot_index, line_size), file_kind
+            _slot(open_file, header_end, slot_index, line_size), file_kind
         )
         if slot_epoch is None:
             return good_epoch, damage_reason
@@ -1742,14 +1719,15 @@ def read_last_record(data_file: Path, file_kind: FileKind) -> MeasRecord | Ddiff
         If the file cannot be read, is not sound, or its last row is not a
         row of the file.
     """
-    line_size, header_lines = WIDTHS[file_kind] + 1, HEADER_LINES[file_kind]
+    line_size = WIDTHS[file_kind] + 1
     try:
         with data_file.open("rb") as open_file:
             file_length = open_file.seek(0, os.SEEK_END)
-            row_slots = file_length // line_size - header_lines
-            if row_slots < 1 or file_length % line_size != 0:
-                _fail(f"data file {data_file} is not sound: {file_length} bytes")
-            last_slot = _slot(open_file, header_lines + row_slots - 1, line_size)
+            header_end = HEADER_SIZES[file_kind]
+            row_slots, left_over = _row_slots(file_length, file_kind)
+            if row_slots < 1 or left_over != 0:
+                _fail(_not_sound(data_file, file_length))
+            last_slot = _slot(open_file, header_end, row_slots - 1, line_size)
     except OSError as exc:
         _fail(f"cannot read data file {data_file}: {exc}", exc)
     try:
@@ -1820,8 +1798,6 @@ class DayBuffer:
 
     Parameters
     ----------
-    channel : {'a', 'b'}
-        The RF channel, whose name a new file's header gives.
     journal : Path or None, optional
         The write journal kept from the first write to the final one (see
         :func:`write_buffer`); no journal is kept when ``None``.
@@ -1851,18 +1827,15 @@ class DayBuffer:
         The directories of the files among them that the writes created.
     """
 
-    def __init__(self, channel: RfChannel, journal: Path | None = None) -> None:
+    def __init__(self, journal: Path | None = None) -> None:
         """Start an empty buffer.
 
         Parameters
         ----------
-        channel : {'a', 'b'}
-            The RF channel.
         journal : Path or None, optional
             The write journal kept from the first write to the final one
             (see :func:`write_buffer`); no journal is kept when ``None``.
         """
-        self.channel: RfChannel = channel
         self.journal = journal
         self.earliest_epoch: datetime | None = None
         self.rows_added = 0
@@ -2177,13 +2150,13 @@ def _prepared(day_buffer: DayBuffer) -> dict[Path, bytes]:
     """
     file_bytes: dict[Path, bytes] = {}
     for data_file, file_lines in day_buffer.file_lines.items():
-        file_kind, series_key = day_buffer.series_of(data_file)
+        file_kind, _ = day_buffer.series_of(data_file)
         if os.path.lexists(data_file):
             _check_existing(data_file, file_kind)
             header_text = ""
         else:
             _check_new(data_file)
-            header_text = header(file_kind, day_buffer.channel, series_key)
+            header_text = header(file_kind)
         try:
             file_bytes[data_file] = (header_text + "".join(file_lines)).encode("ascii")
         except UnicodeEncodeError as exc:
@@ -2210,19 +2183,16 @@ def _check_existing(data_file: Path, file_kind: FileKind) -> None:
     ------
     DataFileError
         If it is not a regular file, this process cannot write it, or its
-        length is not its header plus one or more whole rows.
+        length is not its header and one or more whole rows.
     """
     if data_file.is_symlink() or not data_file.is_file():
         _fail(f"data file {data_file} is not a regular file")
     if not os.access(data_file, os.W_OK):
         _fail(f"data file {data_file} cannot be written")
-    line_size = WIDTHS[file_kind] + 1
     file_length = data_file.stat().st_size
-    if (
-        file_length % line_size != 0
-        or file_length // line_size <= HEADER_LINES[file_kind]
-    ):
-        _fail(f"data file {data_file} is not sound: {file_length} bytes")
+    row_slots, left_over = _row_slots(file_length, file_kind)
+    if row_slots < 1 or left_over != 0:
+        _fail(_not_sound(data_file, file_length))
 
 
 def _check_new(new_file: Path) -> None:
@@ -2336,21 +2306,22 @@ def _keep_through(
     A file's rows are in time order, though an epoch may have none: a
     series writes no row while it is left out of the epochs, nor while it
     is dormant with no measurement or disabled with no reading. The rows
-    kept are found by a binary search over the line slots, a slot that is not a
+    kept are found by a binary search over the row slots, a slot that is not a
     good row counting as after ``last_kept_epoch``: every row up to it is
     good, so the damage lies after it.
     """
-    line_size, header_lines = WIDTHS[file_kind] + 1, HEADER_LINES[file_kind]
+    line_size = WIDTHS[file_kind] + 1
     try:
         with data_file.open("rb") as open_file:
             file_length = open_file.seek(0, os.SEEK_END)
-            row_slots = max(file_length // line_size - header_lines, 0)
+            header_end = HEADER_SIZES[file_kind]
+            row_slots, _ = _row_slots(file_length, file_kind)
             kept_rows = 0
             if last_kept_epoch is not None:
                 kept_rows = _rows_through(
                     open_file,
                     row_slots,
-                    header_lines,
+                    header_end,
                     line_size,
                     file_kind,
                     last_kept_epoch,
@@ -2360,7 +2331,7 @@ def _keep_through(
     if kept_rows == 0:
         _delete(data_file)
         return "deleted"
-    new_length = (header_lines + kept_rows) * line_size
+    new_length = header_end + kept_rows * line_size
     if new_length == file_length:
         return "kept"
     _truncate(data_file, new_length)
@@ -2370,7 +2341,7 @@ def _keep_through(
 def _rows_through(
     open_file: BinaryIO,
     row_slots: int,
-    header_lines: int,
+    header_end: int,
     line_size: int,
     file_kind: FileKind,
     last_kept_epoch: datetime,
@@ -2382,11 +2353,11 @@ def _rows_through(
     open_file : BinaryIO
         The file, open.
     row_slots : int
-        Its whole line slots after the header.
-    header_lines : int
-        Its header's lines.
+        Its whole row slots after the header.
+    header_end : int
+        Where its header ends, bytes from its start.
     line_size : int
-        Its line width, newline included.
+        Its row width, newline included.
     file_kind : {'meas', 'ddiff'}
         Its kind.
     last_kept_epoch : datetime
@@ -2402,7 +2373,7 @@ def _rows_through(
     while low < high:
         middle = (low + high) // 2
         middle_epoch = row_epoch(
-            _slot(open_file, header_lines + middle, line_size), file_kind
+            _slot(open_file, header_end, middle, line_size), file_kind
         )
         if middle_epoch is not None and middle_epoch <= last_kept_epoch:
             low = middle + 1

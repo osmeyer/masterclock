@@ -1,63 +1,64 @@
 """Tests for src/masterclock/das_processor/files.py.
 
 The rules covered: the column table gives the measurement file a width of
-477 and 33 header lines and the double-difference file 455 and 31; every
-header line is exactly that wide and starts with '#', in the design's order
-with the warning second, and only for its kind of series, which it names in
-words; rows are right-justified fixed-width columns separated by ', ', with
-'-' for an empty field, floats as {:+.16e} and the estimator's phase as
-whole femtoseconds written in ps with three decimals; the design's example
-rows come out byte for byte; a value too wide for its column raises
-DataFileError; parsing a row gives back the record it was formatted from and
-refuses a line that is not exactly what formatting gives (U20), one of the
-right width with a field wider than its column included, which the file
-check then counts as damaged with nothing logged; and a record pairs its
-measurement with its row consistently: a measurement exactly when the row is
-not P, of the row's epoch, a pair's slip correction exactly when the row
-carries S, S never on a triple, and a disabled pair's reading exactly when
-the row is O, written with no cycle count and the z it carries, or none.
+477 and 31 header lines and the double-difference file 455 and 29, and each
+kind its header's size; every header line is only its text and starts with
+'#', in the design's order with the warning second, the columns numbered
+from 1, and every file of a kind gets the same header; rows are
+right-justified fixed-width columns separated by ', ', with '-' for an empty
+field, floats as {:+.16e} and the estimator's phase as whole femtoseconds
+written in ps with three decimals; the design's example rows come out byte
+for byte; a value too wide for its column raises DataFileError; parsing a
+row gives back the record it was formatted from and refuses a line that is
+not exactly what formatting gives (U20), one of the right width with a field
+wider than its column included, which the file check then counts as damaged
+with nothing logged; and a record pairs its measurement with its row
+consistently: a measurement exactly when the row is not P, of the row's
+epoch, a pair's slip correction exactly when the row carries S, S never on a
+triple, and a disabled pair's reading exactly when the row is O, written
+with no cycle count and the z it carries, or none.
 
-The file check: a file whose length is its header plus whole rows, with a
-last row that parses, is sound and good through that row, its other rows
-not read; otherwise it is good through the row before its first line that
-does not parse, and is refused when it holds no whole row or its first row
-does not parse, unless a write stopped part way, when it holds nothing
-good; a file that cannot be read is refused; a damaged file is explained
-once at ERROR, where and why; and the last row of a sound file
+The file check: the rows lie at fixed places after the kind's header size,
+so a header of another size puts no row in place; a file that is its header
+and whole rows, with a last row that parses, is sound and good through that
+row, its other rows not read; otherwise it is good through the row before
+its first line that does not parse, and is refused when it holds no whole
+row or its first row does not parse, unless a write stopped part way, when
+it holds nothing good; a file that cannot be read is refused; a damaged file
+is explained once at ERROR, where and why; and the last row of a sound file
 is read back as its row, and only from a sound file whose last row is ASCII
 (U26). A roll-back keeps a file's rows up to an epoch, the cut found by a
-search, since some epochs have no row, says what it did to the file and
-logs nothing. The last epoch every file keeps is the earliest of a given
-limit and every damaged file's last good row. A redo checks every file
-before it cuts any, refusing a file that cannot be placed in time with no
-file changed, removes every row at or after its epoch, or after a damaged
-file's last good row when that is earlier, from every file, deletes a file
-with no earlier row, finishes when run again after it stopped part way,
-and is logged once at INFO.
+search, since some epochs have no row, says what it did to the file and logs
+nothing. The last epoch every file keeps is the earliest of a given limit
+and every damaged file's last good row. A redo checks every file before it
+cuts any, refusing a file that cannot be placed in time with no file
+changed, removes every row at or after its epoch, or after a damaged file's
+last good row when that is earlier, from every file, deletes a file with no
+earlier row, finishes when run again after it stopped part way, and is
+logged once at INFO.
 
 A file keeps one series, and a buffer takes all of another buffer's rows or
-none. A row too wide is refused before it is buffered. A line made
-elsewhere is buffered for its series as a record's line is, its epoch noted
-and no row kept, and the row kept for a record is the one its line gives
-back, so a pair's is kept without its innovation. The write: every check is
-made before a file is opened, and a failed one changes nothing; a new file
-gets its header and its rows in one write, and a later write appends;
-files are written one at a time, measurement files first; a write empties
-the buffered text and keeps each series' newest row. A day's write flushes
-no data file: only the final write does, each file written since once,
-measurement files first, then the directories of new files, and an empty
-buffer writes and flushes nothing. With a journal, the run's first write
-flushes its earliest epoch to it before any data file opens, it stays
-through later writes, and it is deleted after the final write's flushes; a
-journal already there is refused, one not whole is read as no write
-stopped, and clearing deletes it.
+none. A row too wide is refused before it is buffered. A line made elsewhere
+is buffered for its series as a record's line is, its epoch noted and no row
+kept, and the row kept for a record is the one its line gives back, so a
+pair's is kept without its innovation. The write: every check is made before
+a file is opened, and a failed one changes nothing; a new file gets its
+header and its rows in one write, and a later write appends; files are
+written one at a time, measurement files first; a write empties the buffered
+text and keeps each series' newest row. A day's write flushes no data file:
+only the final write does, each file written since once, measurement files
+first, then the directories of new files, and an empty buffer writes and
+flushes nothing. With a journal, the run's first write flushes its earliest
+epoch to it before any data file opens, it stays through later writes, and
+it is deleted after the final write's flushes; a journal already there is
+refused, one not whole is read as no write stopped, and clearing deletes it.
 
 A row read back is checked by pydantic models with a row's, a pair
-measurement's and a triple measurement's fields, in their order: each
-value of its kind, a datetime with its timezone, no counter below 0, a
-reading within one period, an rms and a sigma not below 0, every float
-finite, components 111, 110 or 101 only, no unknown field, and every rule a
-row keeps.
+measurement's and a triple measurement's fields, in their order: each value
+of its kind, a datetime with its timezone, no counter below 0, a reading
+within one period, an rms and a sigma not below 0, every float finite,
+components 111, 110 or 101 only, no unknown field, and every rule a row
+keeps.
 
 A row that parses but breaks a record's rules is a damaged line; every
 refusal, device fault, roll-back and redo message is word for word, and each
@@ -100,7 +101,6 @@ from masterclock.domain.phase import PHASE_MAX, exact
 from masterclock.domain.series import (
     PairKey,
     Row,
-    SeriesKey,
     State,
     TripleKey,
     check_row,
@@ -205,57 +205,59 @@ DDIFF_EXAMPLE: Final = (
 
 
 def test_the_column_table_gives_the_widths_and_header_lengths() -> None:
-    """Work out W = 477 and 455 and 33 and 31 header lines from the table."""
-    assert (files.MEAS_WIDTH, files.MEAS_HEADER_LINES) == (477, 33)
-    assert (files.DDIFF_WIDTH, files.DDIFF_HEADER_LINES) == (455, 31)
+    """Work out W = 477 and 455, and 31 and 29 header lines, from the table."""
+    assert (files.MEAS_WIDTH, files.MEAS_HEADER_LINES) == (477, 31)
+    assert (files.DDIFF_WIDTH, files.DDIFF_HEADER_LINES) == (455, 29)
+    assert {
+        file_kind: len(files.header(file_kind)) for file_kind in ("meas", "ddiff")
+    } == files.HEADER_SIZES
 
 
 # ------------------------------------------------------------------- headers
 
-KINDS_AND_SERIES: Final[tuple[tuple[files.FileKind, SeriesKey], ...]] = (
-    ("meas", ("mc2", "ox23")),
-    ("meas", ("mc1", "mc1")),
-    ("meas", ("mc1", "mc2")),
-    ("ddiff", ("mc1", "mc2", "ox23")),
-    ("ddiff", ("mc2", "mc2", "ox23")),
-)
-"""A series of every kind."""
+FILE_KINDS: Final[tuple[files.FileKind, ...]] = ("meas", "ddiff")
+"""Every kind of file."""
 
 
-@pytest.mark.parametrize(("file_kind", "series_key"), KINDS_AND_SERIES)
-def test_every_header_line_is_w_wide_and_starts_with_a_hash(
-    file_kind: files.FileKind, series_key: SeriesKey
+@pytest.mark.parametrize("file_kind", FILE_KINDS)
+def test_every_header_line_is_only_its_text_and_starts_with_a_hash(
+    file_kind: files.FileKind,
 ) -> None:
-    """Pad every header line to W, each a comment, the count from the table."""
-    header_lines = files.header(file_kind, "a", series_key).split("\n")
+    """End every header line at its text, each a comment, the count from the table."""
+    header_lines = files.header(file_kind).split("\n")
     assert header_lines[-1] == ""
-    line_width, header_count = files.WIDTHS[file_kind], files.HEADER_LINES[file_kind]
-    assert len(header_lines[:-1]) == header_count
+    assert len(header_lines[:-1]) == files.HEADER_LINES[file_kind]
     assert all(
-        len(header_line) == line_width and header_line.startswith("#")
+        header_line.startswith("#") and header_line == header_line.rstrip()
         for header_line in header_lines[:-1]
     )
 
 
+@pytest.mark.parametrize("file_kind", FILE_KINDS)
+def test_the_column_lines_are_numbered_from_one(file_kind: files.FileKind) -> None:
+    """Number each column line, in the order of the columns, from 1."""
+    columns = files.MEAS_COLUMNS if file_kind == "meas" else files.DDIFF_COLUMNS
+    column_lines = files.header(file_kind).split("\n")[4:-1]
+    assert [column_line.split()[1:3] for column_line in column_lines] == [
+        [str(number), column.name] for number, column in enumerate(columns, start=1)
+    ]
+
+
 def test_the_measurement_header_is_the_design_s() -> None:
     """Give the lines of design 5.4 in order, the warning second."""
-    header_lines = [
-        header_line.rstrip()
-        for header_line in files.header("meas", "a", ("mc2", "ox23")).split("\n")
-    ]
-    assert header_lines[:6] == [
+    header_lines = files.header("meas").split("\n")
+    assert header_lines[:4] == [
         "# das_processor measurement file, format 1",
         "# WARNING: do not modify this file. Only das_processor may write it;"
         " any other change damages the archive.",
-        "# RF channel a. Pair (mc2, ox23).",
-        "# Reference mc2 measured against clock ox23.",
         "# One row per 10-minute epoch; '-' marks an empty field.",
         "# Columns: right-justified, fixed width, separated by ', '.",
     ]
-    assert header_lines[6] == "#   interpolated_datetime   epoch start E, UTC"
-    assert header_lines[32] == (
-        "#   flags                   A accepted, R rejected, X excluded, P predicted,"
-        " O disabled, D dormant, S slip corrected, N new segment, U unsettled"
+    assert header_lines[4] == "#   1  interpolated_datetime   epoch start E, UTC"
+    assert header_lines[30] == (
+        "#  27  flags                   A accepted, R rejected, X excluded,"
+        " P predicted, O disabled, D dormant, S slip corrected, N new segment,"
+        " U unsettled"
     )
 
 
@@ -274,50 +276,36 @@ def test_a_reject_slot_says_what_it_holds_while_dormant(
 
 def test_the_double_difference_header_is_the_design_s() -> None:
     """Give the lines of design 5.5 in order, the warning second."""
-    header_text = files.header("ddiff", "b", ("mc1", "mc2", "ox23"))
-    header_lines = [header_line.rstrip() for header_line in header_text.split("\n")]
+    header_lines = files.header("ddiff").split("\n")
     assert header_lines[0] == "# das_processor double-difference file, format 1"
-    assert header_lines[2:4] == [
-        "# RF channel b. Triple (mc1, mc2, ox23).",
-        "# Clock ox23 against remote reference mc1, through local reference mc2.",
-    ]
-    assert (
-        header_lines[8] == "#   z                       double difference dd at E, ps"
+    assert header_lines[6] == (
+        "#   3  z                       double difference dd at E, ps"
     )
-    assert header_lines[10] == "#   double_difference_sigma measurement sigma of dd, ps"
-
-
-@pytest.mark.parametrize(
-    ("file_kind", "series_key"),
-    [("meas", ("mc1", "mc2", "ox23")), ("ddiff", ("mc1", "ox23"))],
-)
-def test_a_header_is_for_its_kind_of_series(
-    file_kind: files.FileKind, series_key: SeriesKey
-) -> None:
-    """Raise DataFileError for a triple's measurement file or a pair's other file."""
-    with pytest.raises(DataFileError, match="is for a"):
-        files.header(file_kind, "a", series_key)
-
-
-@pytest.mark.parametrize(
-    ("file_kind", "series_key", "header_line"),
-    [
-        ("meas", ("mc1", "mc1"), "# Reference mc1 measured against itself."),
-        ("meas", ("mc1", "mc2"), "# Reference mc1 measured against reference mc2."),
-        (
-            "ddiff",
-            ("mc2", "mc2", "ox23"),
-            "# Clock ox23 against its local reference mc2.",
-        ),
-    ],
-)
-def test_the_header_says_what_the_series_is(
-    file_kind: files.FileKind, series_key: SeriesKey, header_line: str
-) -> None:
-    """Describe self and link pairs and local triples in words."""
-    assert (
-        files.header(file_kind, "a", series_key).split("\n")[3].rstrip() == header_line
+    assert header_lines[8] == (
+        "#   5  double_difference_sigma measurement sigma of dd, ps"
     )
+
+
+def test_every_file_of_a_kind_starts_with_the_same_header(tmp_path: Path) -> None:
+    """Write the kind's header, the same bytes, whatever the channel and series.
+
+    The file's name says which series it holds, so the header never does.
+    """
+    archive = tmp_path / "meas"
+    archive.mkdir()
+    day_buffer = files.DayBuffer()
+    for pair_key in (("mc1", "mc1"), ("mc1", "mc2"), PAIR_KEY):
+        day_buffer.add(
+            archive / f"das_b.{pair_key[0]}.{pair_key[1]}.dat",
+            pair_key,
+            predicted_record(0),
+        )
+    files.write_buffer(day_buffer)
+    header_bytes = {
+        meas_path.read_bytes()[: files.HEADER_SIZES["meas"]]
+        for meas_path in archive.iterdir()
+    }
+    assert header_bytes == {files.header("meas").encode("ascii")}
 
 
 # ---------------------------------------------------------------- examples
@@ -826,9 +814,7 @@ def write_meas_file(
 ) -> Path:
     """Write a measurement file of the pair: its header and ``row_text``."""
     meas_path = tmp_path / "das_a.mc2.ox23.dat"
-    file_header = (
-        files.header("meas", "a", PAIR_KEY) if header_text is None else header_text
-    )
+    file_header = files.header("meas") if header_text is None else header_text
     meas_path.write_bytes((file_header + row_text).encode("ascii"))
     return meas_path
 
@@ -848,9 +834,7 @@ def test_a_file_cut_inside_its_last_row_is_good_through_the_row_before(
     assert files.good_through(meas_path, "meas") == E + 2 * ONE_EPOCH
 
 
-@pytest.mark.parametrize(
-    "cut_bytes", [0, 1, files.MEAS_WIDTH + 1, 10 * (files.MEAS_WIDTH + 1) + 7]
-)
+@pytest.mark.parametrize("cut_bytes", [0, 1, 500, -1])
 def test_a_file_without_a_whole_row_cannot_be_placed_in_time(
     tmp_path: Path, cut_bytes: int
 ) -> None:
@@ -859,20 +843,41 @@ def test_a_file_without_a_whole_row_cannot_be_placed_in_time(
     Its series' rows are gone and nothing says from when, so no epoch can
     be found that every file could be cut back to.
     """
-    whole_header = files.header("meas", "a", PAIR_KEY)
+    whole_header = files.header("meas")
     for header_text in (whole_header[:cut_bytes], whole_header):
         meas_path = write_meas_file(tmp_path, "", header_text=header_text)
         with pytest.raises(DataFileError, match="it holds no whole row"):
             files.good_through(meas_path, "meas")
 
 
-@pytest.mark.parametrize("cut_bytes", [0, 1, files.MEAS_WIDTH + 1])
+@pytest.mark.parametrize("cut_bytes", [0, 1, 500, -1])
 def test_after_a_stopped_write_a_file_without_a_whole_row_holds_nothing_good(
     tmp_path: Path, cut_bytes: int
 ) -> None:
     """Give None for a file a stopped write was creating (U26)."""
-    whole_header = files.header("meas", "a", PAIR_KEY)
+    whole_header = files.header("meas")
     meas_path = write_meas_file(tmp_path, "", header_text=whole_header[:cut_bytes])
+    assert files.good_through(meas_path, "meas", stopped_write=True) is None
+
+
+@pytest.mark.parametrize("size_change", [-1, 1])
+def test_a_header_of_another_size_puts_no_row_in_place(
+    tmp_path: Path, size_change: int
+) -> None:
+    """Find no good row in a file whose header is not its kind's size.
+
+    The rows lie at fixed places after the kind's header size, so a header
+    one byte short or long moves every row off them.
+    """
+    whole_header = files.header("meas")
+    header_text = (
+        whole_header[:-2] + "\n" if size_change < 0 else whole_header[:-1] + " \n"
+    )
+    meas_path = write_meas_file(
+        tmp_path, "".join(predicted_row_lines(3)), header_text=header_text
+    )
+    with pytest.raises(DataFileError, match="damaged first row"):
+        files.good_through(meas_path, "meas")
     assert files.good_through(meas_path, "meas", stopped_write=True) is None
 
 
@@ -1020,8 +1025,7 @@ def test_the_last_row_of_a_sound_file_is_read(tmp_path: Path) -> None:
 def test_the_last_row_of_a_double_difference_file_is_read(tmp_path: Path) -> None:
     """Read a double-difference file's last row."""
     ddiff_path = tmp_path / "das_a.mc1.mc2.ox23.dat"
-    triple_key = ("mc1", "mc2", "ox23")
-    file_text = files.header("ddiff", "a", triple_key) + DDIFF_EXAMPLE[0] + "\n"
+    file_text = files.header("ddiff") + DDIFF_EXAMPLE[0] + "\n"
     ddiff_path.write_bytes(file_text.encode("ascii"))
     assert files.read_last_row(ddiff_path, "ddiff").x_fs == 6_666_667_291
     assert files.good_through(ddiff_path, "ddiff") == E
@@ -1097,7 +1101,7 @@ def filled_buffer(
         meas_directory / "das_a.mc2.ox23.dat",
         ddiff_directory / "das_a.mc1.mc2.ox23.dat",
     )
-    day_buffer = files.DayBuffer("a")
+    day_buffer = files.DayBuffer()
     for epoch_index in range(epoch_count):
         day_buffer.add(triple_path, TRIPLE_KEY, predicted_triple_record(epoch_index))
         day_buffer.add(pair_path, PAIR_KEY, predicted_record(epoch_index))
@@ -1108,7 +1112,7 @@ def test_a_new_file_gets_its_header_and_rows_in_one_write(tmp_path: Path) -> Non
     """Create each file with its header then its rows, all at once (5.8)."""
     day_buffer, pair_path, triple_path = filled_buffer(tmp_path)
     files.write_buffer(day_buffer)
-    expected_text = files.header("meas", "a", PAIR_KEY) + "".join(
+    expected_text = files.header("meas") + "".join(
         files.format_meas_row(predicted_record(i)) + "\n" for i in range(2)
     )
     assert pair_path.read_text(encoding="ascii") == expected_text
@@ -1163,7 +1167,7 @@ def test_after_a_write_the_text_is_empty_and_the_last_rows_remain(
 def test_the_newest_row_is_the_one_a_later_run_reads(tmp_path: Path) -> None:
     """Keep the row as the file holds it: a pair's without its innovation (I5)."""
     meas, _ = make_archives(tmp_path)
-    day_buffer = files.DayBuffer("a")
+    day_buffer = files.DayBuffer()
     file_record = files.MeasRecord(
         measurement=APPENDIX_A_MEASUREMENT, row=worked_row(innovation=2.62)
     )
@@ -1190,7 +1194,7 @@ def test_a_pair_s_newest_z_is_kept_as_its_file_holds_it(
     """Keep each pair's newest z, none for a row without one, and move it on take."""
     meas, ddiff = make_archives(tmp_path)
     row = disabled_row(E, 3, 4) if flags == "O" else worked_row(flags=flags)
-    epoch_buffer = files.DayBuffer("a")
+    epoch_buffer = files.DayBuffer()
     epoch_buffer.add(
         meas / "das_a.mc2.ox23.dat",
         PAIR_KEY,
@@ -1199,7 +1203,7 @@ def test_a_pair_s_newest_z_is_kept_as_its_file_holds_it(
     epoch_buffer.add(
         ddiff / "das_a.mc1.mc2.ox23.dat", TRIPLE_KEY, predicted_triple_record(0)
     )
-    day_buffer = files.DayBuffer("a")
+    day_buffer = files.DayBuffer()
     day_buffer.take(epoch_buffer)
     assert epoch_buffer.last_z == day_buffer.last_z == {PAIR_KEY: kept_z}
 
@@ -1215,7 +1219,7 @@ def test_the_last_record_of_a_sound_file_is_read_with_its_z(
         if flags == "O"
         else files.MeasRecord(measurement=APPENDIX_A_MEASUREMENT, row=worked_row())
     )
-    day_buffer = files.DayBuffer("a")
+    day_buffer = files.DayBuffer()
     day_buffer.add(meas / "das_a.mc2.ox23.dat", PAIR_KEY, file_record)
     files.write_final(day_buffer)
     assert files.read_last_record(meas / "das_a.mc2.ox23.dat", "meas") == file_record
@@ -1225,7 +1229,7 @@ def test_the_last_record_of_a_sound_file_is_read_with_its_z(
 def test_a_triple_s_newest_row_keeps_its_innovation(tmp_path: Path) -> None:
     """Keep a triple's innovation, which its file holds, as a later run reads it."""
     _, ddiff = make_archives(tmp_path)
-    day_buffer = files.DayBuffer("a")
+    day_buffer = files.DayBuffer()
     file_record = files.DdiffRecord(
         measurement=TripleMeasurement(
             z=6_666_667,
@@ -1246,7 +1250,7 @@ def test_a_triple_s_newest_row_keeps_its_innovation(tmp_path: Path) -> None:
 def test_a_row_too_wide_is_refused_before_it_is_buffered(tmp_path: Path) -> None:
     """Raise DataFileError at add, before any text is kept."""
     meas, _ = make_archives(tmp_path)
-    day_buffer = files.DayBuffer("a")
+    day_buffer = files.DayBuffer()
     file_record = files.MeasRecord(
         measurement=None, row=worked_row(step_offset=10**16, flags="P")
     )
@@ -1279,7 +1283,7 @@ def test_files_are_written_then_flushed_one_at_a_time_in_order(
 ) -> None:
     """Write, then at the final write flush, measurement files first, one at a time."""
     meas_directory, ddiff_directory = make_archives(tmp_path)
-    day_buffer = files.DayBuffer("a")
+    day_buffer = files.DayBuffer()
     pair_keys: list[PairKey] = [("mc2", "ox23"), ("mc1", "mc2"), ("mc1", "mc1")]
     triple_keys: list[TripleKey] = [("mc2", "mc2", "ox23"), ("mc1", "mc2", "ox23")]
     for triple in triple_keys:
@@ -1468,8 +1472,8 @@ def test_an_empty_buffer_writes_nothing(
 ) -> None:
     """Change and flush nothing when no rows were ever buffered."""
     synced = recorded_fsyncs(monkeypatch)
-    files.write_buffer(files.DayBuffer("a"))
-    files.write_final(files.DayBuffer("a", tmp_path / "das_processor_a.writing"))
+    files.write_buffer(files.DayBuffer())
+    files.write_final(files.DayBuffer(tmp_path / "das_processor_a.writing"))
     assert list(tmp_path.iterdir()) == []
     assert synced == []
 
@@ -1548,7 +1552,7 @@ def written_meas_file(meas_path: Path, row_count: int) -> Path:
     """Write the pair's file with ``row_count`` rows from E, and give its path."""
     meas_path.parent.mkdir(exist_ok=True)
     meas_path.write_text(
-        files.header("meas", "a", PAIR_KEY) + "".join(predicted_row_lines(row_count)),
+        files.header("meas") + "".join(predicted_row_lines(row_count)),
         encoding="ascii",
     )
     return meas_path
@@ -1556,17 +1560,12 @@ def written_meas_file(meas_path: Path, row_count: int) -> Path:
 
 def row_epochs_of(meas_path: Path) -> list[datetime]:
     """Give the epoch of every row of the pair's file."""
-    line_size = files.MEAS_WIDTH + 1
-    file_bytes = meas_path.read_bytes()
-    row_slots = [
-        file_bytes[slot_start : slot_start + line_size]
-        for slot_start in range(
-            files.MEAS_HEADER_LINES * line_size, len(file_bytes), line_size
-        )
+    row_lines = meas_path.read_text(encoding="ascii").split("\n")[
+        files.MEAS_HEADER_LINES : -1
     ]
     return [
-        files.parse_meas_row(row_slot.decode()[:-1]).row.interpolated_datetime
-        for row_slot in row_slots
+        files.parse_meas_row(row_line).row.interpolated_datetime
+        for row_line in row_lines
     ]
 
 
@@ -1625,7 +1624,7 @@ def gapped_meas_file(meas_path: Path) -> Path:
     meas_path.parent.mkdir(exist_ok=True)
     row_lines = predicted_row_lines(max(GAPPED_ROWS) + 1)
     meas_path.write_text(
-        files.header("meas", "a", PAIR_KEY)
+        files.header("meas")
         + "".join(row_lines[epoch_index] for epoch_index in GAPPED_ROWS),
         encoding="ascii",
     )
@@ -1670,9 +1669,7 @@ def write_archive(tmp_path: Path) -> list[tuple[Path, files.FileKind]]:
     row_lines = "".join(
         files.format_ddiff_row(predicted_triple_record(i)) + "\n" for i in range(3)
     )
-    triple_path.write_text(
-        files.header("ddiff", "a", TRIPLE_KEY) + row_lines, encoding="ascii"
-    )
+    triple_path.write_text(files.header("ddiff") + row_lines, encoding="ascii")
     return [(pair_path, "meas"), (triple_path, "ddiff")]
 
 
@@ -1783,8 +1780,8 @@ def test_a_redo_cuts_every_file_before_a_damaged_line_it_meets(
     assert [
         files.good_through(meas_path, file_kind) for meas_path, file_kind in data_files
     ] == good_epochs
-    assert all(
-        meas_path.stat().st_size % (files.WIDTHS[file_kind] + 1) == 0
+    assert not any(
+        files.check_file(meas_path, file_kind).damaged
         for meas_path, file_kind in data_files
     )
 
@@ -1861,7 +1858,7 @@ def test_a_processed_path_that_cannot_be_made_is_refused(tmp_path: Path) -> None
 def test_a_buffer_takes_another_s_rows(tmp_path: Path) -> None:
     """Move one epoch's rows into the day's buffer, texts and newest rows."""
     day_buffer, pair_path, triple_path = filled_buffer(tmp_path)
-    epoch_buffer = files.DayBuffer("a")
+    epoch_buffer = files.DayBuffer()
     epoch_buffer.add(pair_path, PAIR_KEY, predicted_record(2))
     epoch_buffer.add(triple_path, TRIPLE_KEY, predicted_triple_record(2))
     day_buffer.take(epoch_buffer)
@@ -1874,7 +1871,7 @@ def test_a_buffer_takes_nothing_from_a_clashing_one(tmp_path: Path) -> None:
     """Refuse rows of another series for a path, leaving the buffer as it was."""
     day_buffer, pair_path, _ = filled_buffer(tmp_path)
     buffer_before = buffered_lines(day_buffer), dict(day_buffer.last_rows)
-    epoch_buffer = files.DayBuffer("a")
+    epoch_buffer = files.DayBuffer()
     epoch_buffer.add(
         pair_path.parent / "das_a.mc2.cs7.dat", ("mc2", "cs7"), predicted_record(2)
     )
@@ -1889,7 +1886,7 @@ def test_a_line_made_elsewhere_is_buffered_as_a_record_is(tmp_path: Path) -> Non
     pair_path = tmp_path / "das_a.mc2.ox23.dat"
     line_text, kept_row = files.record_line(predicted_record(3))
     assert kept_row == dataclasses.replace(predicted_record(3).row, innovation=None)
-    day_buffer = files.DayBuffer("a")
+    day_buffer = files.DayBuffer()
     day_buffer.add_line(pair_path, "meas", PAIR_KEY, line_text, E + 3 * ONE_EPOCH)
     day_buffer.add_line(pair_path, "meas", PAIR_KEY, line_text, E + ONE_EPOCH)
     assert day_buffer.file_lines == {pair_path: [line_text, line_text]}
@@ -1907,7 +1904,7 @@ def journaled_buffer(tmp_path: Path) -> tuple[files.DayBuffer, Path, Path]:
     """Give a buffer with a journal and two epochs' rows, its journal and a file."""
     plain_buffer, pair_path, _ = filled_buffer(tmp_path)
     journal = tmp_path / "das_processor_a.writing"
-    day_buffer = files.DayBuffer("a", journal)
+    day_buffer = files.DayBuffer(journal)
     day_buffer.take(plain_buffer)
     return day_buffer, journal, pair_path
 
@@ -1916,7 +1913,7 @@ def test_a_buffer_knows_its_first_epoch(tmp_path: Path) -> None:
     """Keep the earliest epoch buffered since the last write, and forget it after."""
     day_buffer, _, pair_path = journaled_buffer(tmp_path)
     assert day_buffer.earliest_epoch == E
-    later_buffer = files.DayBuffer("a")
+    later_buffer = files.DayBuffer()
     later_buffer.add(pair_path, PAIR_KEY, predicted_record(2))
     day_buffer.take(later_buffer)
     assert day_buffer.earliest_epoch == E
@@ -1980,8 +1977,8 @@ def test_a_journal_already_there_changes_no_file(tmp_path: Path) -> None:
 def test_an_empty_buffer_writes_no_journal(tmp_path: Path) -> None:
     """Write no journal when no rows are buffered."""
     journal = tmp_path / "das_processor_a.writing"
-    files.write_buffer(files.DayBuffer("a", journal))
-    files.write_final(files.DayBuffer("a", journal))
+    files.write_buffer(files.DayBuffer(journal))
+    files.write_final(files.DayBuffer(journal))
     assert not journal.exists()
 
 
@@ -2130,7 +2127,11 @@ def test_a_redo_checks_every_file_before_it_cuts_any(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("check_problem", "message_template"),
     [
-        ("torn", "data file {pair} is not sound: {length} bytes"),
+        (
+            "torn",
+            "data file {pair} is not sound: its {length} bytes are not its header"
+            " and whole rows",
+        ),
         ("not_regular", "data file {triple} is not a regular file"),
         ("read_only", "data file {triple} cannot be written"),
         ("no_directory", "file {gone} cannot be created in {gone_parent}"),
@@ -2189,12 +2190,8 @@ def test_free_space_just_enough_is_enough(
 ) -> None:
     """Write when the free space is exactly the bytes to write, refuse one less."""
     day_buffer, pair_path, triple_path = filled_buffer(tmp_path)
-    pair_text = files.header("meas", "a", PAIR_KEY) + "".join(
-        day_buffer.file_lines[pair_path]
-    )
-    triple_text = files.header("ddiff", "a", TRIPLE_KEY) + "".join(
-        day_buffer.file_lines[triple_path]
-    )
+    pair_text = files.header("meas") + "".join(day_buffer.file_lines[pair_path])
+    triple_text = files.header("ddiff") + "".join(day_buffer.file_lines[triple_path])
     byte_total = len(pair_text) + len(triple_text)
     monkeypatch.setattr(
         shutil, "disk_usage", lambda _: SimpleNamespace(free=byte_total - 1)
@@ -2219,12 +2216,10 @@ def test_free_space_is_counted_per_device(
     day_buffer, pair_path, triple_path = filled_buffer(tmp_path)
     bytes_by_directory = {
         pair_path.parent: len(
-            files.header("meas", "a", PAIR_KEY)
-            + "".join(day_buffer.file_lines[pair_path])
+            files.header("meas") + "".join(day_buffer.file_lines[pair_path])
         ),
         triple_path.parent: len(
-            files.header("ddiff", "a", TRIPLE_KEY)
-            + "".join(day_buffer.file_lines[triple_path])
+            files.header("ddiff") + "".join(day_buffer.file_lines[triple_path])
         ),
     }
     device_by_directory = {pair_path.parent: 1, triple_path.parent: 2}
@@ -2280,16 +2275,6 @@ def test_a_value_too_wide_names_its_row_s_epoch() -> None:
     )
     with pytest.raises(DataFileError, match=r"^row of 2025-09-23 06:00:00\+00:00: "):
         files.format_ddiff_row(ddiff_record)
-
-
-def test_a_key_of_the_wrong_size_for_its_file_is_named() -> None:
-    """Say a measurement file is for a pair, a double-difference file a triple."""
-    with pytest.raises(DataFileError) as refusal:
-        files.header("meas", "a", TRIPLE_KEY)
-    assert "file is for a pair: " in str(refusal.value)
-    with pytest.raises(DataFileError) as refusal:
-        files.header("ddiff", "a", PAIR_KEY)
-    assert "file is for a triple: " in str(refusal.value)
 
 
 def with_field_replaced(row_line: str, field_index: int, field_text: str) -> str:

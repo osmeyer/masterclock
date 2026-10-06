@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-06 00:36:32 UTC
+**Date:** 2026-10-06 11:57:17 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -506,23 +506,25 @@ A clock name that is empty or holds a dot or a slash cannot name a file that rea
 
 ### 5.2 Fixed-width line format
 
-Every line of an output file has the same width W, fixed for each kind of file, not counting the newline:
+A file is its header, then its rows.
+Every file of a kind has the same header, of H bytes, and every row has the same width W, fixed for each kind of file, not counting the newline:
 
-<!-- generated: line-widths -->
+<!-- generated: row-widths -->
 
-| File | Line width W (characters, newline not counted) | Header lines |
-| --- | --- | --- |
-| Measurement file | 477 | 33 |
-| Double-difference file | 455 | 31 |
+| File | Row width W (characters, newline not counted) | Header lines | Header size H (bytes) |
+| --- | --- | --- | --- |
+| Measurement file | 477 | 31 | 2235 |
+| Double-difference file | 455 | 29 | 2132 |
 
 <!-- end generated -->
 
-Fixed-width lines make a file's soundness a matter of arithmetic, and let the program find any row by its position.
+A fixed header size and fixed-width rows make a file's soundness a matter of arithmetic, and let the program find any row by its position.
 
 - Characters and lines: ASCII only.
   Every line ends with `\n`.
-- Header: lines starting with `#`, padded with spaces to W, written once with the file's first row.
-  In order: the kind of file and its format version; a warning not to modify the file; the RF channel and the pair or triple; the series in words; the line format, over two lines; then one line per column with its name and meaning.
+- Header: lines starting with `#`, each ending at its text, written once with the file's first row.
+  In order: the kind of file and its format version; a warning not to modify the file; the line format, over two lines; then one line per column with its number, from 1, its name and its meaning.
+  It names no channel and no series: the file's name gives them (§5.1).
   The header is for people; the program never reads it.
 - Columns: each column is exactly as wide as its values need (§5.4, §5.5).
   Values are right-justified, and columns are separated by a comma and one space.
@@ -531,7 +533,7 @@ Fixed-width lines make a file's soundness a matter of arithmetic, and let the pr
 - Reading back: a row read from a file is formatted again and refused unless it gives back exactly the same line, so a row is accepted only in the one form das_processor writes.
   The measurement file holds no innovation, so a measurement row reads back without one; a triple's cold-start mark is not written either.
 
-A file is *sound* when its length is exactly (h + n)(W + 1) bytes for its h header lines and n ≥ 1 rows, and its last row is good: a whole line, ending in its newline, that parses.
+A file is *sound* when its length is exactly H + n(W + 1) bytes for n ≥ 1 rows, and its last row is good: a whole line, ending in its newline, that parses.
 The program checks every file when a run starts.
 A sound file is found with one short read of its last line.
 A file that is not sound is *damaged*: it is scanned for its first line that is not a good row, and every file of the channel is cut back to the row before it, so the files stay in step.
@@ -666,37 +668,35 @@ The header of a measurement file:
 ```text
 # das_processor measurement file, format 1
 # WARNING: do not modify this file. Only das_processor may write it; any other change damages the archive.
-# RF channel a. Pair (mc2, hm7).
-# Reference mc2 measured against clock hm7.
 # One row per 10-minute epoch; '-' marks an empty field.
 # Columns: right-justified, fixed width, separated by ', '.
-#   interpolated_datetime   epoch start E, UTC
-#   interpolated_mjd        epoch start E, MJD
-#   measurement_datetime    measurement time, UTC
-#   measurement_mjd         measurement time, MJD
-#   measured_phase          raw phase from the DAS, ps
-#   rms                     RMS from the DAS, ps
-#   cycle_count             whole periods added in decycling; - when disabled
-#   z                       decycled phase interpolated to E, ps
-#   x                       estimated phase at E, ps, to the femtosecond
-#   y                       estimated rate, ps/s
-#   d                       estimated drift, ps/s^2; 0 for a 1- or 2-state estimator
-#   innovation_scale        innovation scale, ps
-#   segment                 segment number
-#   step_offset             sum of phase steps in this segment, ps
-#   epochs_in_segment       rows since the segment started
-#   epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
-#   consecutive_rejects     consecutive counted rejects
-#   reject1_mjd             reject buffer, oldest: epoch start, MJD
-#   reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
-#   reject2_mjd             reject buffer, middle: epoch start, MJD
-#   reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
-#   reject3_mjd             reject buffer, newest: epoch start, MJD
-#   reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
-#   filter_states           estimator states: 1, 2 or 3
-#   time_constant           estimator time constant, epochs
-#   scale_time_constant     innovation-scale averaging constant, epochs
-#   flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
+#   1  interpolated_datetime   epoch start E, UTC
+#   2  interpolated_mjd        epoch start E, MJD
+#   3  measurement_datetime    measurement time, UTC
+#   4  measurement_mjd         measurement time, MJD
+#   5  measured_phase          raw phase from the DAS, ps
+#   6  rms                     RMS from the DAS, ps
+#   7  cycle_count             whole periods added in decycling; - when disabled
+#   8  z                       decycled phase interpolated to E, ps
+#   9  x                       estimated phase at E, ps, to the femtosecond
+#  10  y                       estimated rate, ps/s
+#  11  d                       estimated drift, ps/s^2; 0 for a 1- or 2-state estimator
+#  12  innovation_scale        innovation scale, ps
+#  13  segment                 segment number
+#  14  step_offset             sum of phase steps in this segment, ps
+#  15  epochs_in_segment       rows since the segment started
+#  16  epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
+#  17  consecutive_rejects     consecutive counted rejects
+#  18  reject1_mjd             reject buffer, oldest: epoch start, MJD
+#  19  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
+#  20  reject2_mjd             reject buffer, middle: epoch start, MJD
+#  21  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
+#  22  reject3_mjd             reject buffer, newest: epoch start, MJD
+#  23  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
+#  24  filter_states           estimator states: 1, 2 or 3
+#  25  time_constant           estimator time constant, epochs
+#  26  scale_time_constant     innovation-scale averaging constant, epochs
+#  27  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->
@@ -750,35 +750,33 @@ The header of a double-difference file:
 ```text
 # das_processor double-difference file, format 1
 # WARNING: do not modify this file. Only das_processor may write it; any other change damages the archive.
-# RF channel a. Triple (mc1, mc2, hm7).
-# Clock hm7 against remote reference mc1, through local reference mc2.
 # One row per 10-minute epoch; '-' marks an empty field.
 # Columns: right-justified, fixed width, separated by ', '.
-#   interpolated_datetime   epoch start E, UTC
-#   interpolated_mjd        epoch start E, MJD
-#   z                       double difference dd at E, ps
-#   innovation              innovation: z minus the prediction, ps
-#   double_difference_sigma measurement sigma of dd, ps
-#   components_used         components used: (s,c) (r,s) (s,r)
-#   x                       estimated phase at E, ps, to the femtosecond
-#   y                       estimated rate, ps/s
-#   d                       estimated drift, ps/s^2; 0 for a 1- or 2-state estimator
-#   innovation_scale        innovation scale, ps
-#   segment                 segment number
-#   step_offset             sum of phase steps in this segment, ps
-#   epochs_in_segment       rows since the segment started
-#   epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
-#   consecutive_rejects     consecutive counted rejects
-#   reject1_mjd             reject buffer, oldest: epoch start, MJD
-#   reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
-#   reject2_mjd             reject buffer, middle: epoch start, MJD
-#   reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
-#   reject3_mjd             reject buffer, newest: epoch start, MJD
-#   reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
-#   filter_states           estimator states: 1, 2 or 3
-#   time_constant           estimator time constant, epochs
-#   scale_time_constant     innovation-scale averaging constant, epochs
-#   flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
+#   1  interpolated_datetime   epoch start E, UTC
+#   2  interpolated_mjd        epoch start E, MJD
+#   3  z                       double difference dd at E, ps
+#   4  innovation              innovation: z minus the prediction, ps
+#   5  double_difference_sigma measurement sigma of dd, ps
+#   6  components_used         components used: (s,c) (r,s) (s,r)
+#   7  x                       estimated phase at E, ps, to the femtosecond
+#   8  y                       estimated rate, ps/s
+#   9  d                       estimated drift, ps/s^2; 0 for a 1- or 2-state estimator
+#  10  innovation_scale        innovation scale, ps
+#  11  segment                 segment number
+#  12  step_offset             sum of phase steps in this segment, ps
+#  13  epochs_in_segment       rows since the segment started
+#  14  epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
+#  15  consecutive_rejects     consecutive counted rejects
+#  16  reject1_mjd             reject buffer, oldest: epoch start, MJD
+#  17  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
+#  18  reject2_mjd             reject buffer, middle: epoch start, MJD
+#  19  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
+#  20  reject3_mjd             reject buffer, newest: epoch start, MJD
+#  21  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
+#  22  filter_states           estimator states: 1, 2 or 3
+#  23  time_constant           estimator time constant, epochs
+#  24  scale_time_constant     innovation-scale averaging constant, epochs
+#  25  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->
@@ -809,15 +807,17 @@ A file replaced, or shorter than what was read, is read again from its start; a 
 ```python
 def check_file(data_file, file_kind, *, stopped_write=False):
     """How far a file is good: its last good row's epoch, and whether it is damaged."""
-    line_size, header_lines = WIDTHS[file_kind] + 1, HEADER_LINES[file_kind]
+    line_size = WIDTHS[file_kind] + 1
     # DataFileError if it cannot be read.
     with open_or_refuse(data_file) as open_file:
         file_length = open_file.seek(0, os.SEEK_END)
-        # Whole line slots after the header.
-        row_slots = file_length // line_size - header_lines
+        # Whole row slots after the header, and the bytes left over.
+        row_slots, left_over = divmod(
+            max(file_length - HEADER_SIZES[file_kind], 0), line_size
+        )
         if row_slots < 1:
             good_epoch, reason = None, "it holds no whole row"
-        elif file_length % line_size == 0 and (
+        elif left_over == 0 and (
             last := row_epoch(read_slot(open_file, -1), file_kind)
         ):
             # Sound: the usual case, found with one short read.

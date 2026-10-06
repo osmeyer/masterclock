@@ -960,13 +960,8 @@ def rows_of(config: AppConfig, series_key: SeriesKey) -> list[Row]:
         config.processed.processed_path, "a", series_key
     )
     file_kind: files.FileKind = "meas" if len(series_key) == 2 else "ddiff"
-    line_size = files.WIDTHS[file_kind] + 1
-    row_bytes = series_file_path.read_bytes()[
-        files.HEADER_LINES[file_kind] * line_size :
-    ]
-    row_lines = [
-        row_bytes[line_start : line_start + line_size - 1].decode()
-        for line_start in range(0, len(row_bytes), line_size)
+    row_lines = series_file_path.read_text(encoding="ascii").split("\n")[
+        files.HEADER_LINES[file_kind] : -1
     ]
     if file_kind == "meas":
         return [files.parse_meas_row(row_line).row for row_line in row_lines]
@@ -1145,7 +1140,8 @@ def test_a_damaged_line_found_at_the_start_cuts_every_file_before_it(
     )
     file_bytes = bytearray(data_file.read_bytes())
     line_size = files.MEAS_WIDTH + 1
-    file_bytes[(files.MEAS_HEADER_LINES + 2) * line_size + 3] = ord("x")
+    header_size = len(files.header("meas"))
+    file_bytes[header_size + 2 * line_size + 3] = ord("x")
     data_file.write_bytes(bytes(file_bytes[: -line_size // 2]))
     caplog.clear()
     assert run.next_epoch(config) == LATE_START + 2 * T
@@ -1291,7 +1287,7 @@ def test_an_epoch_that_fails_adds_none_of_its_rows(
     """Leave the day buffer as it was when an epoch fails part way (5.8 step 1)."""
     config, clock_config = make_loop_deployment(tmp_path)
     write_das_files(tmp_path, [LATE_START + i * T for i in range(3)])
-    day_buffer = files.DayBuffer("a")
+    day_buffer = files.DayBuffer()
     das_blocks = list(read_all_blocks(tmp_path / "das", datetime_to_mjd(LATE_START)))
     files.ensure_archives(config.processed.processed_path)
     run.process_epoch(LATE_START, das_blocks[0], day_buffer, config, clock_config)
@@ -1858,7 +1854,7 @@ def test_an_epoch_s_log_names_the_series_of_its_channel(
     files.ensure_archives(config.processed.processed_path)
     with caplog.at_level(logging.DEBUG, logger=RUN_LOGGER):
         run.process_epoch(
-            LATE_START, first_block, files.DayBuffer("a"), config, clock_config
+            LATE_START, first_block, files.DayBuffer(), config, clock_config
         )
     debug_messages = [
         log_record.getMessage()
@@ -2011,7 +2007,7 @@ def test_a_new_file_left_without_its_rows_by_a_stopped_write_is_made_again(
     processed_path = stopped_config.processed.processed_path
     data_file = registry.series_file(processed_path, "a", ("mc1", "ox23"))
     data_file.write_bytes(
-        data_file.read_bytes()[: files.MEAS_HEADER_LINES * (files.MEAS_WIDTH + 1)]
+        data_file.read_bytes()[: len(files.header("meas"))]
         + b"\0" * (files.MEAS_WIDTH + 1) * 2
     )
     with pytest.raises(DataFileError, match="damaged first row"):
@@ -2603,14 +2599,10 @@ def disabling_deployment(
 def meas_records_of(config: AppConfig, pair: tuple[str, str]) -> list[files.MeasRecord]:
     """Read every record of a pair's measurement file."""
     series_file_path = registry.series_file(config.processed.processed_path, "a", pair)
-    line_size = files.MEAS_WIDTH + 1
-    row_bytes = series_file_path.read_bytes()[files.MEAS_HEADER_LINES * line_size :]
-    return [
-        files.parse_meas_row(
-            row_bytes[line_start : line_start + line_size - 1].decode()
-        )
-        for line_start in range(0, len(row_bytes), line_size)
+    row_lines = series_file_path.read_text(encoding="ascii").split("\n")[
+        files.MEAS_HEADER_LINES : -1
     ]
+    return [files.parse_meas_row(row_line) for row_line in row_lines]
 
 
 def test_a_disabled_clock_s_pair_writes_o_rows_and_starts_afresh_when_enabled(

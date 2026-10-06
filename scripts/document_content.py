@@ -47,6 +47,7 @@ from masterclock.das_processor.exceptions import RefusedLineError
 from masterclock.das_processor.files import (
     DDIFF_COLUMNS,
     HEADER_LINES,
+    HEADER_SIZES,
     MEAS_COLUMNS,
     WIDTHS,
     Column,
@@ -90,7 +91,6 @@ from masterclock.domain.series import (
     FLAG_ORDER,
     FilterStates,
     Row,
-    SeriesKey,
     SeriesParams,
     State,
 )
@@ -392,23 +392,29 @@ _FILE_TITLES: Final[dict[FileKind, str]] = {
 """What each kind of file is called in the documents."""
 
 
-def line_widths() -> str:
-    """Give each kind of file's line width and header lines.
+def row_widths() -> str:
+    """Give each kind of file's row width, header lines and header size.
 
     Returns
     -------
     str
-        A table of each kind of file's line width W, the newline not
-        counted, and how many header lines it has.
+        A table of each kind of file's row width W, the newline not
+        counted, how many header lines it has, and its header's size H.
     """
     return table(
         [
             "File",
-            "Line width W (characters, newline not counted)",
+            "Row width W (characters, newline not counted)",
             "Header lines",
+            "Header size H (bytes)",
         ],
         [
-            [title, str(WIDTHS[file_kind]), str(HEADER_LINES[file_kind])]
+            [
+                title,
+                str(WIDTHS[file_kind]),
+                str(HEADER_LINES[file_kind]),
+                str(HEADER_SIZES[file_kind]),
+            ]
             for file_kind, title in _FILE_TITLES.items()
         ],
     )
@@ -441,24 +447,20 @@ def flag_table() -> str:
     )
 
 
-def _header_block(file_kind: FileKind, series_key: SeriesKey) -> str:
-    """Give an example header of a file, as the program writes it.
+def _header_block(file_kind: FileKind) -> str:
+    """Give the header of a kind of file, as the program writes it.
 
     Parameters
     ----------
     file_kind : {'meas', 'ddiff'}
         The kind of file.
-    series_key : tuple of str
-        An invented series of that kind.
 
     Returns
     -------
     str
-        The header of channel a's file for the series, each line without
-        the spaces that pad it to the file's width.
+        The header, the same for every file of the kind.
     """
-    header_text = header(file_kind, "a", series_key)
-    return fenced("text", [line.rstrip() for line in header_text.splitlines()])
+    return fenced("text", header(file_kind).splitlines())
 
 
 # ------------------------------------------------------- errors and modules
@@ -1389,10 +1391,10 @@ BLOCKS: Final[dict[str, Callable[[], str]]] = {
     "help": help_text,
     "meas-columns": lambda: column_table(MEAS_COLUMNS),
     "ddiff-columns": lambda: column_table(DDIFF_COLUMNS),
-    "line-widths": line_widths,
+    "row-widths": row_widths,
     "flags": flag_table,
-    "meas-header": lambda: _header_block("meas", ("mc2", "hm7")),
-    "ddiff-header": lambda: _header_block("ddiff", ("mc1", "mc2", "hm7")),
+    "meas-header": lambda: _header_block("meas"),
+    "ddiff-header": lambda: _header_block("ddiff"),
     "refused-lines": refused_lines,
     "errors": error_table,
     "modules": module_table,

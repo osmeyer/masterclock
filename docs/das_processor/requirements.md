@@ -1,6 +1,6 @@
 # das_processor requirements
 
-**Date:** 2026-10-05 22:02:46 UTC
+**Date:** 2026-10-06 11:57:17 UTC
 
 This document lists what `das_processor` must do, as numbered requirements a test or a reader can check.
 The [design](design.md) says how it does each one, and the [user manual](user_manual.md) says how to use it.
@@ -150,7 +150,7 @@ flowchart LR
 | ID | Requirement | Design |
 | --- | --- | --- |
 | OUT-1 | It writes each pair's rows to its own file in the <!-- figure: MEAS_SUBDIRECTORY -->`meas`<!-- end figure --> directory and each triple's to its own file in the <!-- figure: DDIFF_SUBDIRECTORY -->`ddiff`<!-- end figure --> directory under the processed directory, each file named for its RF channel and its series. | §5.1 |
-| OUT-2 | Every line of an output file, its header included, is ASCII text of one fixed width for its kind of file, ending in a newline. | §5.2 |
+| OUT-2 | Every line of an output file is ASCII text ending in a newline. Each header line is only its text, and every file of a kind has the same header; every row after the header is of one fixed width for its kind of file. | §5.2 |
 | OUT-3 | A file's header, written with its first row, says what the file holds and what every column means, and warns that only das_processor may change it. | §5.2 |
 | OUT-4 | Each row of a series holds the series' epoch, its measurement when it has one, its estimate, its counters and its flags, in the columns of its kind of file. A row read back from its file and written again gives the same line exactly; a measurement row's innovation and a triple's restart mark are not written, so they are not read back. | §5.4, §5.5 |
 | OUT-5 | A series writes one row for every epoch it is in, except while it is dormant with no measurement or disabled with no reading. | §13.3, §13.6 |

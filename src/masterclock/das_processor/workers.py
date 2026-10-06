@@ -842,7 +842,7 @@ class WorkerPool:
         DataFileError
             If a path is given another series.
         """
-        epoch_buffer = DayBuffer(self._channel)
+        epoch_buffer = DayBuffer()
         for done in workers_done:
             for series_key, line_text in done.lines:
                 epoch_buffer.add_line(

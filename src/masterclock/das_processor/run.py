@@ -1639,7 +1639,7 @@ def process_epoch(
     )
     pair_step = process_pairs(epoch, last_rows, last_segments, day_buffer.last_z)
     triple_step = process_triples(epoch, last_rows, pair_step, last_segments)
-    epoch_buffer = DayBuffer(day_buffer.channel)
+    epoch_buffer = DayBuffer()
     processed_path = config.processed.processed_path
     for series_key, file_record in _file_records(epoch, pair_step, triple_step):
         epoch_buffer.add(
@@ -1804,7 +1804,7 @@ def run(
         epoch_start = max(epoch_start, next_das_block.interpolated_datetime)
     _log.info("run of channel %s starts at epoch %s", channel, epoch_start)
     journal = processed_path / JOURNAL_FILE_TEMPLATE.format(rf=channel)
-    day_buffer = DayBuffer(channel, journal)
+    day_buffer = DayBuffer(journal)
     last_epoch: Epoch | None = None
     steering_files = SteeringFiles(config.das.steering_path)
     epochs_done = 0

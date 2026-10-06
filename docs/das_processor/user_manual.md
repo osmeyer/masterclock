@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-06 00:34:44 UTC
+**Date:** 2026-10-06 11:57:17 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -393,15 +393,16 @@ A file that holds no whole row, or whose first row is damaged, cannot be placed 
 
 ### 6.2 What a file looks like
 
-Every line of a file, header included, has the same width.
-The header lines start with `#`; in every other line the fields are separated by `, ` and padded with spaces on the left, so a tool that skips the header, splits on `, ` and trims the spaces reads every field.
+A file is its header, then its rows.
+The header lines start with `#`, end at their text, and number the columns from 1; every file of a kind has the same header, and the file's name says which pair or triple it holds.
+Every row has the same width; its fields are separated by `, ` and padded with spaces on the left, so a tool that skips the header, splits on `, ` and trims the spaces reads every field.
 
-<!-- generated: line-widths -->
+<!-- generated: row-widths -->
 
-| File | Line width W (characters, newline not counted) | Header lines |
-| --- | --- | --- |
-| Measurement file | 477 | 33 |
-| Double-difference file | 455 | 31 |
+| File | Row width W (characters, newline not counted) | Header lines | Header size H (bytes) |
+| --- | --- | --- | --- |
+| Measurement file | 477 | 31 | 2235 |
+| Double-difference file | 455 | 29 | 2132 |
 
 <!-- end generated -->
 
@@ -412,35 +413,33 @@ The header says what the file is and what every column holds:
 ```text
 # das_processor double-difference file, format 1
 # WARNING: do not modify this file. Only das_processor may write it; any other change damages the archive.
-# RF channel a. Triple (mc1, mc2, hm7).
-# Clock hm7 against remote reference mc1, through local reference mc2.
 # One row per 10-minute epoch; '-' marks an empty field.
 # Columns: right-justified, fixed width, separated by ', '.
-#   interpolated_datetime   epoch start E, UTC
-#   interpolated_mjd        epoch start E, MJD
-#   z                       double difference dd at E, ps
-#   innovation              innovation: z minus the prediction, ps
-#   double_difference_sigma measurement sigma of dd, ps
-#   components_used         components used: (s,c) (r,s) (s,r)
-#   x                       estimated phase at E, ps, to the femtosecond
-#   y                       estimated rate, ps/s
-#   d                       estimated drift, ps/s^2; 0 for a 1- or 2-state estimator
-#   innovation_scale        innovation scale, ps
-#   segment                 segment number
-#   step_offset             sum of phase steps in this segment, ps
-#   epochs_in_segment       rows since the segment started
-#   epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
-#   consecutive_rejects     consecutive counted rejects
-#   reject1_mjd             reject buffer, oldest: epoch start, MJD
-#   reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
-#   reject2_mjd             reject buffer, middle: epoch start, MJD
-#   reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
-#   reject3_mjd             reject buffer, newest: epoch start, MJD
-#   reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
-#   filter_states           estimator states: 1, 2 or 3
-#   time_constant           estimator time constant, epochs
-#   scale_time_constant     innovation-scale averaging constant, epochs
-#   flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
+#   1  interpolated_datetime   epoch start E, UTC
+#   2  interpolated_mjd        epoch start E, MJD
+#   3  z                       double difference dd at E, ps
+#   4  innovation              innovation: z minus the prediction, ps
+#   5  double_difference_sigma measurement sigma of dd, ps
+#   6  components_used         components used: (s,c) (r,s) (s,r)
+#   7  x                       estimated phase at E, ps, to the femtosecond
+#   8  y                       estimated rate, ps/s
+#   9  d                       estimated drift, ps/s^2; 0 for a 1- or 2-state estimator
+#  10  innovation_scale        innovation scale, ps
+#  11  segment                 segment number
+#  12  step_offset             sum of phase steps in this segment, ps
+#  13  epochs_in_segment       rows since the segment started
+#  14  epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
+#  15  consecutive_rejects     consecutive counted rejects
+#  16  reject1_mjd             reject buffer, oldest: epoch start, MJD
+#  17  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
+#  18  reject2_mjd             reject buffer, middle: epoch start, MJD
+#  19  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
+#  20  reject3_mjd             reject buffer, newest: epoch start, MJD
+#  21  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
+#  22  filter_states           estimator states: 1, 2 or 3
+#  23  time_constant           estimator time constant, epochs
+#  24  scale_time_constant     innovation-scale averaging constant, epochs
+#  25  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->

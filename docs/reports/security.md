@@ -1,6 +1,6 @@
 # Security report
 
-**Updated:** 2026-10-05 21:53:34 UTC
+**Updated:** 2026-10-06 00:39:28 UTC
 
 ## Context
 
@@ -14,32 +14,26 @@ The project requires bandit to find nothing of high severity, and every commit c
 
 | High | Medium | Low |
 | --- | --- | --- |
-| 0 | 0 | 2035 |
+| 0 | 0 | 2032 |
 
 | Test | Severity | Findings |
 | --- | --- | --- |
-| B101 | low | 2027 |
-| B311 | low | 1 |
-| B403 | low | 1 |
-| B404 | low | 5 |
-| B603 | low | 1 |
+| B101 | low | 2032 |
 
 No finding is above low severity.
 
-Findings silenced by a comment: 17.
+Findings silenced by a comment: 25.
 
 <!-- end measured -->
 
 ## Analysis
 
 bandit finds nothing of high or medium severity, so the commit check, which fails only on high severity, passes with room to spare.
-Nearly every low finding is `B101`, an `assert` in the tests, where pytest needs it; the commit check leaves that test out for the tests folder.
-The other low findings are the use of `subprocess` and `pickle`, and a seeded random generator in a test.
-Each is the project doing what it must: running its own tools and das_processor, starting worker processes, which pickle what they exchange, and making repeatable test data.
-None takes input from outside the project; das_processor's worker processes exchange data only with the process that started them.
-Some of those lines silence ruff's check but not bandit's, though they are the same finding: `tests/masterclock/app/test_lock.py` (`S603`, bandit `B603`) and `tests/scripts/test_characterize.py` (`S311`, bandit `B311`).
+Every low finding left is `B101`, an `assert` in the tests, where pytest needs it; the commit check leaves that test out for the tests folder.
+Every other finding is silenced by a comment that gives its reason: the scripts and tests run the project's own tools, git, Chrome and das_processor, das_processor's worker processes pickle what they exchange with the process that started them, and a test makes repeatable random data.
+None of them takes input from outside the project.
 
 ## Recommendations
 
-- Add the matching `# nosec` to the two test lines that silence only ruff's check of the same finding, as the project's rule asks.
-- Leave the other low findings unsilenced: they are known, harmless here, and the commit check ignores them.
+- No change is needed.
+- Keep a new silencing comment to the project's form: its rule, both tools' where they overlap, and its reason.

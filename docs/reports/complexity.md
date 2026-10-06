@@ -1,6 +1,6 @@
 # Complexity report
 
-**Updated:** 2026-10-05 21:52:08 UTC
+**Updated:** 2026-10-06 00:39:29 UTC
 
 ## Context
 
@@ -14,7 +14,7 @@ The project allows a block at most rank B, a module and the average at most rank
 
 | Block rank | Blocks |
 | --- | --- |
-| A | 535 |
+| A | 536 |
 | B | 103 |
 
 Blocks at rank B, the highest a block may have:
@@ -48,31 +48,31 @@ Blocks at rank B, the highest a block may have:
 | `scripts/documents.py:500` | `main` | 6 |
 | `scripts/epoch_timing.py:99` | `measured_pairs_for` | 6 |
 | `scripts/epoch_timing.py:156` | `build_deployment` | 8 |
-| `scripts/reports.py:260` | `lint_block` | 8 |
-| `scripts/reports.py:335` | `security_block` | 7 |
-| `scripts/reports.py:397` | `complexity_block` | 9 |
-| `scripts/reports.py:632` | `main` | 6 |
+| `scripts/reports.py:259` | `lint_block` | 8 |
+| `scripts/reports.py:334` | `security_block` | 7 |
+| `scripts/reports.py:393` | `complexity_block` | 9 |
+| `scripts/reports.py:628` | `main` | 6 |
 | `src/masterclock/app/config.py:195` | `_checked` | 8 |
 | `src/masterclock/app/config.py:246` | `_unknown_names` | 7 |
 | `src/masterclock/app/config.py:596` | `merge` | 7 |
 | `src/masterclock/app/exceptions.py:115` | `describe_error` | 6 |
 | `src/masterclock/app/lock.py:84` | `RunLock.__init__` | 6 |
 | `src/masterclock/das_processor/__init__.py:185` | `_run` | 6 |
-| `src/masterclock/das_processor/clock_config.py:339` | `RmsLimits` | 8 |
-| `src/masterclock/das_processor/clock_config.py:365` | `RmsLimits._check_names` | 7 |
-| `src/masterclock/das_processor/clock_config.py:539` | `ClockConfig._type_default` | 8 |
-| `src/masterclock/das_processor/clock_config.py:585` | `ClockConfig._default_of` | 7 |
-| `src/masterclock/das_processor/clock_config.py:729` | `ClockConfig.locations_at` | 6 |
-| `src/masterclock/das_processor/clock_config.py:763` | `ClockConfig.disabled_at` | 6 |
-| `src/masterclock/das_processor/files.py:272` | `MeasRecord` | 8 |
-| `src/masterclock/das_processor/files.py:296` | `MeasRecord.__post_init__` | 7 |
-| `src/masterclock/das_processor/files.py:612` | `_joined` | 6 |
-| `src/masterclock/das_processor/files.py:1555` | `check_file` | 8 |
-| `src/masterclock/das_processor/files.py:2029` | `write_buffer` | 9 |
-| `src/masterclock/das_processor/files.py:2087` | `write_final` | 6 |
-| `src/masterclock/das_processor/files.py:2147` | `_prepared` | 8 |
-| `src/masterclock/das_processor/files.py:2187` | `_check_existing` | 6 |
-| `src/masterclock/das_processor/files.py:2635` | `read_journal` | 6 |
+| `src/masterclock/das_processor/clock_config.py:339` | `RmsLimits` | 9 |
+| `src/masterclock/das_processor/clock_config.py:365` | `RmsLimits._check_names` | 8 |
+| `src/masterclock/das_processor/clock_config.py:543` | `ClockConfig._type_default` | 8 |
+| `src/masterclock/das_processor/clock_config.py:589` | `ClockConfig._default_of` | 7 |
+| `src/masterclock/das_processor/clock_config.py:733` | `ClockConfig.locations_at` | 6 |
+| `src/masterclock/das_processor/clock_config.py:767` | `ClockConfig.disabled_at` | 6 |
+| `src/masterclock/das_processor/files.py:284` | `MeasRecord` | 8 |
+| `src/masterclock/das_processor/files.py:308` | `MeasRecord.__post_init__` | 7 |
+| `src/masterclock/das_processor/files.py:624` | `_joined` | 6 |
+| `src/masterclock/das_processor/files.py:1567` | `check_file` | 8 |
+| `src/masterclock/das_processor/files.py:2041` | `write_buffer` | 9 |
+| `src/masterclock/das_processor/files.py:2099` | `write_final` | 6 |
+| `src/masterclock/das_processor/files.py:2159` | `_prepared` | 8 |
+| `src/masterclock/das_processor/files.py:2199` | `_check_existing` | 6 |
+| `src/masterclock/das_processor/files.py:2647` | `read_journal` | 6 |
 | `src/masterclock/das_processor/read_cd5m5m.py:485` | `parse_line` | 6 |
 | `src/masterclock/das_processor/read_cd5m5m.py:749` | `read_measurements` | 6 |
 | `src/masterclock/das_processor/read_cd5m5m.py:886` | `find_data_files` | 6 |
@@ -92,14 +92,14 @@ Blocks at rank B, the highest a block may have:
 | `src/masterclock/das_processor/run.py:1443` | `_kept_epochs` | 6 |
 | `src/masterclock/das_processor/run.py:1570` | `process_epoch` | 7 |
 | `src/masterclock/das_processor/run.py:1747` | `run` | 10 |
-| `src/masterclock/das_processor/run.py:1913` | `log_screening` | 7 |
-| `src/masterclock/das_processor/run.py:1954` | `_log_series` | 6 |
-| `src/masterclock/das_processor/run.py:1985` | `_log_changes` | 7 |
-| `src/masterclock/das_processor/workers.py:480` | `SeriesShard._done` | 7 |
-| `src/masterclock/das_processor/workers.py:666` | `WorkerPool.process_epoch` | 9 |
-| `src/masterclock/das_processor/workers.py:773` | `WorkerPool._finish_pairs` | 6 |
-| `src/masterclock/das_processor/workers.py:868` | `WorkerPool._start_pairs` | 10 |
-| `src/masterclock/das_processor/workers.py:948` | `WorkerPool._answers` | 6 |
+| `src/masterclock/das_processor/run.py:1930` | `log_screening` | 7 |
+| `src/masterclock/das_processor/run.py:1971` | `_log_series` | 6 |
+| `src/masterclock/das_processor/run.py:2002` | `_log_changes` | 7 |
+| `src/masterclock/das_processor/workers.py:489` | `SeriesShard._done` | 7 |
+| `src/masterclock/das_processor/workers.py:675` | `WorkerPool.process_epoch` | 9 |
+| `src/masterclock/das_processor/workers.py:782` | `WorkerPool._finish_pairs` | 6 |
+| `src/masterclock/das_processor/workers.py:877` | `WorkerPool._start_pairs` | 10 |
+| `src/masterclock/das_processor/workers.py:957` | `WorkerPool._answers` | 7 |
 | `src/masterclock/domain/double_difference.py:218` | `_remote` | 7 |
 | `src/masterclock/domain/filter.py:79` | `gains` | 7 |
 | `src/masterclock/domain/filter.py:411` | `finish` | 8 |

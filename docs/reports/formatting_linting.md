@@ -1,6 +1,6 @@
 # Formatting and linting report
 
-**Updated:** 2026-10-05 21:53:34 UTC
+**Updated:** 2026-10-06 00:39:27 UTC
 
 ## Context
 
@@ -22,10 +22,11 @@ ruff found nothing.
 
 | Where | Comment |
 | --- | --- |
+| `scripts/check_test_modules_alone.py:18` | `# nosec B404 - runs pytest on each test module` |
 | `scripts/check_test_modules_alone.py:57` | `# noqa: S603  # nosec B603` |
-| `scripts/documents.py:45` | `# nosec B404` |
+| `scripts/documents.py:45` | `# nosec B404 - runs git, to read each document's date` |
 | `scripts/documents.py:243` | `# noqa: S603  # nosec B603` |
-| `scripts/epoch_timing.py:31` | `# nosec B404` |
+| `scripts/epoch_timing.py:31` | `# nosec B404 - runs das_processor, to time it` |
 | `scripts/epoch_timing.py:265` | `# noqa: S603  # nosec B603` |
 | `scripts/pdfs.py:26` | `# nosec B404 - runs Chrome, given by its full path` |
 | `scripts/pdfs.py:186` | `# noqa: S603  # nosec B603` |
@@ -33,32 +34,30 @@ ruff found nothing.
 | `scripts/reports.py:49` | `# nosec B405 - reads only pytest's own file` |
 | `scripts/reports.py:131` | `# noqa: S603  # nosec B603 B607 - uv, as checks run` |
 | `scripts/reports.py:132` | `# noqa: S607 - uv, as checks run` |
-| `scripts/reports.py:168` | `# noqa: S314  # nosec B314 - pytest's own file` |
-| `scripts/reports.py:169` | `# noqa: S101 - pytest always writes one suite` |
-| `scripts/reports.py:195` | `# noqa: S101 - coverage's JSON holds a mapping` |
-| `scripts/reports.py:317` | `# nosec B603 B607 - git, as a user runs it` |
-| `scripts/reports.py:318` | `# noqa: S607 - git, as a user runs it` |
-| `scripts/reports.py:351` | `# noqa: S101 - bandit's JSON holds a list` |
-| `scripts/reports.py:352` | `# noqa: S101 - and a mapping` |
-| `scripts/reports.py:381` | `# noqa: S101 - bandit's JSON holds a mapping` |
+| `scripts/reports.py:169` | `# noqa: S314  # nosec B314 - pytest's own file` |
+| `scripts/reports.py:316` | `# nosec B603 B607 - git, as a user runs it` |
+| `scripts/reports.py:317` | `# noqa: S607 - git, as a user runs it` |
+| `src/masterclock/das_processor/workers.py:40` | `# nosec B403 - only between this run's own processes` |
 | `src/masterclock/domain/phase.py:205` | `# noqa: RUF046 - round() of an mpq gives an mpz, not an int` |
-| `tests/masterclock/app/test_lock.py:57` | `# noqa: S603 - fixed arguments, this interpreter` |
+| `tests/masterclock/app/test_lock.py:22` | `# nosec B404 - runs a second process to try the lock` |
+| `tests/masterclock/app/test_lock.py:57` | `# noqa: S603  # nosec B603 - fixed arguments, this interpreter` |
+| `tests/masterclock/das_processor/test_determinism.py:12` | `# nosec B404 - runs das_processor, one process an epoch` |
 | `tests/masterclock/das_processor/test_determinism.py:290` | `# noqa: S603  # nosec B603` |
-| `tests/scripts/test_characterize.py:85` | `# noqa: S311 - repeatable test data, not a secret` |
+| `tests/scripts/test_characterize.py:85` | `# noqa: S311  # nosec B311 - repeatable test data, not a secret` |
+| `tests/scripts/test_documents.py:21` | `# nosec B404 - runs git, to make a repository to test in` |
 | `tests/scripts/test_documents.py:63` | `# noqa: S603  # nosec B603` |
 | `tests/scripts/test_documents.py:247` | `# noqa: S603  # nosec B603` |
+| `tests/scripts/test_reports.py:28` | `# nosec B404 - for the finished runs the tests give` |
 
 <!-- end measured -->
 
 ## Analysis
 
 ruff leaves every file as it is and finds nothing, with the project's full rule set.
-Every suppression names the rule it silences, and where ruff and bandit check the same thing, one line carries both.
-The project also requires each to give its reason.
-Most give it on the same line or in a comment on the line above; `import subprocess  # nosec B404` in `scripts/documents.py` and `scripts/epoch_timing.py` gives none.
-`src` holds a single suppression, in `domain/phase.py`, where ruff's advice would make a value of the wrong type.
+Every suppression names the rule it silences and gives its reason, on its own line or in a comment on the line above, and where ruff and bandit check the same thing, one line carries both, as the project requires.
+`src` holds two suppressions: in `domain/phase.py`, where ruff's advice would make a value of the wrong type, and in `das_processor/workers.py`, whose pickling passes only between the run's own processes.
 
 ## Recommendations
 
-- Give the two `import subprocess` lines in `scripts/documents.py` and `scripts/epoch_timing.py` their reason, as the other scripts do: what the script runs.
+- Keep a new suppression to the same form: its rule, both tools' where they overlap, and its reason.
 - Keep `src` free of suppressions where the code can be changed instead.

@@ -1,6 +1,6 @@
 # Mutation report
 
-**Updated:** 2026-10-05 21:52:08 UTC
+**Updated:** 2026-10-06 00:44:09 UTC
 
 ## Context
 
@@ -15,7 +15,7 @@ mutmut is run by hand, `uv run --frozen mutmut run` and then `uv run --frozen mu
 
 | Mutants | Killed | Survived | No tests | Timed out | Suspicious | Skipped |
 | --- | --- | --- | --- | --- | --- | --- |
-| 6816 | 6750 | 61 | 0 | 5 | 0 | 0 |
+| 6852 | 6785 | 61 | 0 | 6 | 0 | 0 |
 
 | Module | Function | Survived |
 | --- | --- | --- |

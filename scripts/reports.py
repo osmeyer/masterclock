@@ -50,7 +50,7 @@ import xml.etree.ElementTree as ET  # nosec B405 - reads only pytest's own file
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, cast
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -165,8 +165,8 @@ def tests_block(junit_xml: str, coverage: Mapping[str, object]) -> str:
     str
         The tests by outcome, the skipped tests, and coverage by folder.
     """
-    suite = ET.fromstring(junit_xml).find("testsuite")  # noqa: S314  # nosec B314 - pytest's own file
-    assert suite is not None  # noqa: S101 - pytest always writes one suite
+    # pytest writes one testsuite in its testsuites.
+    suite = ET.fromstring(junit_xml)[0]  # noqa: S314  # nosec B314 - pytest's own file
     counts = {
         key: int(suite.get(key, "0"))
         for key in ("tests", "failures", "errors", "skipped")
@@ -191,8 +191,7 @@ def tests_block(junit_xml: str, coverage: Mapping[str, object]) -> str:
 def _coverage_table(coverage: Mapping[str, object]) -> str:
     """Write the line and branch coverage of each folder apart."""
     totals = {folder: [0, 0, 0, 0] for folder in COVERAGE_FOLDERS}
-    files = coverage["files"]
-    assert isinstance(files, dict)  # noqa: S101 - coverage's JSON holds a mapping
+    files = cast("dict[str, dict[str, dict[str, int]]]", coverage["files"])
     for file_name, file_data in files.items():
         summary = file_data["summary"]
         folder_total = totals[file_name.split("/")[0]]
@@ -346,10 +345,8 @@ def security_block(bandit: Mapping[str, object]) -> str:
         The findings by severity and by test, every finding above low, and
         how many findings comments silenced.
     """
-    results = bandit["results"]
-    metrics = bandit["metrics"]
-    assert isinstance(results, list)  # noqa: S101 - bandit's JSON holds a list
-    assert isinstance(metrics, dict)  # noqa: S101 - and a mapping
+    results = cast("list[dict[str, str]]", bandit["results"])
+    metrics = cast("dict[str, object]", bandit["metrics"])
     severities = Counter(result["issue_severity"].lower() for result in results)
     by_test = Counter(
         (result["test_id"], result["issue_severity"].lower()) for result in results
@@ -377,8 +374,7 @@ def security_block(bandit: Mapping[str, object]) -> str:
 
 def _silenced(metrics: Mapping[str, object]) -> int:
     """Count the findings comments silenced: bare nosec, and nosec naming a test."""
-    totals = metrics["_totals"]
-    assert isinstance(totals, dict)  # noqa: S101 - bandit's JSON holds a mapping
+    totals = cast("dict[str, int]", metrics["_totals"])
     return int(totals["nosec"]) + int(totals["skipped_tests"])
 
 

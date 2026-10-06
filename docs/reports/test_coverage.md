@@ -1,6 +1,6 @@
 # Test and coverage report
 
-**Updated:** 2026-10-05 21:52:28 UTC
+**Updated:** 2026-10-06 00:44:24 UTC
 
 ## Context
 
@@ -14,7 +14,7 @@ The project requires every test to pass and 100% line and branch coverage of eac
 
 | Passed | Failed | Errors | Skipped | Tests | Time (s) |
 | --- | --- | --- | --- | --- | --- |
-| 2282 | 0 | 0 | 0 | 2282 | 13.6 |
+| 2292 | 0 | 0 | 0 | 2292 | 13.8 |
 
 Skipped tests:
 
@@ -22,9 +22,9 @@ No test was skipped.
 
 | Folder | Lines | Branches | Coverage |
 | --- | --- | --- | --- |
-| src | 3460 of 3460 | 864 of 864 | 100.00% |
-| scripts | 1401 of 1401 | 314 of 314 | 100.00% |
-| tests | 8751 of 8751 | 448 of 448 | 100.00% |
+| src | 3476 of 3476 | 870 of 870 | 100.00% |
+| scripts | 1396 of 1396 | 314 of 314 | 100.00% |
+| tests | 8785 of 8785 | 452 of 452 | 100.00% |
 
 <!-- end measured -->
 

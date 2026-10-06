@@ -232,6 +232,9 @@ def test_an_unknown_clock_has_no_entry(tmp_path: Path) -> None:
         ("references: {mc2: 40}", "references: {mc2: -4}", "references"),
         ("pairs: {mc2.ox23: 80}", "pairs: {mc2.ox23: 8.5}", "pairs"),
         ("pairs: {mc2.ox23: 80}", "pairs: {ox23: 80}", "pair ox23"),
+        ("pairs: {mc2.ox23: 80}", "pairs: {mc2.ox23.x: 80}", r"pair mc2\.ox23\.x"),
+        ("pairs: {mc2.ox23: 80}", "pairs: {mc2.ox/23: 80}", "pair mc2.ox/23"),
+        ("pairs: {mc2.ox23: 80}", "pairs: {'mc2.': 80}", "pair mc2. "),
         ("references: {mc2: 40}", "references: {ox2: 40}", "reference ox2"),
         ("  cs7: [{type: cesium}]", "  cs7: [{type: rubidium}]", "type rubidium"),
         (

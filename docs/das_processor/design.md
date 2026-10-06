@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-06 00:34:44 UTC
+**Date:** 2026-10-06 00:36:32 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -2728,7 +2728,7 @@ A clock listed under `ignore` is left out the same way, with nothing logged.
 - a clock under `ignore` is named twice, or also has entries;
 - an entry gives both `disabled` and `enabled`, or either as other than `true` or `false`;
 - `rejects_before_restart` is below 3, or above the gap limit of any type or of any clock at any date;
-- an RMS limit is not a whole number above zero, a reference under `references` is not named as a reference, or a pair under `pairs` is not a reference's name, a dot and some text after it;
+- an RMS limit is not a whole number above zero, a reference under `references` is not named as a reference, or a pair under `pairs` is not a reference's name, a dot and a clock's name, which holds no dot or slash;
 - an `effective_mjd` is not on a day from <!-- figure: FIRST_DAY -->50000<!-- end figure --> to <!-- figure: LAST_DAY -->99999<!-- end figure -->.
 
 ### 15.3 Choosing the time constants

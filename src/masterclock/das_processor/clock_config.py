@@ -374,7 +374,8 @@ class RmsLimits(BaseModel):
         ------
         ValueError
             If a reference does not match the reference name pattern, or a
-            pair is not a reference, a dot and a clock.
+            pair is not a reference, a dot and a clock, whose name holds no
+            dot or slash.
         """
         for reference_name in self.references:
             if not is_reference(reference_name):
@@ -384,7 +385,10 @@ class RmsLimits(BaseModel):
                 raise ValueError(message)
         for pair_name in self.pairs:
             reference, dot, clock = pair_name.partition(".")
-            if not (dot and clock and is_reference(reference)):
+            # A clock name holds no dot or slash: its series' files are named
+            # with dots between the names (see registry.series_file).
+            clock_named = clock and not {".", "/"} & set(clock)
+            if not (dot and clock_named and is_reference(reference)):
                 message = f"rms_limit pair {pair_name} is not written reference.clock"
                 raise ValueError(message)
         return self

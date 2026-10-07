@@ -1496,7 +1496,7 @@ def test_a_cold_start_and_dormancy_are_logged_at_info(
         logged_events(caplog, epoch, nearly_over_last_rows), "INFO"
     )
     assert (
-        f"das_a.mc1.mc1 dormant at {E}: reject fraction 0.51 over the limit 0.50"
+        f"das_a.mc1.mc1 dormant at {E}: reject fraction 0.510 over the limit 0.500"
         in info_messages
     )
 

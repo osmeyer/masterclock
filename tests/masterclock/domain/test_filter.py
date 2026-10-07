@@ -2290,7 +2290,7 @@ def test_a_reject_fraction_over_its_limit_makes_the_series_dormant() -> None:
     )
     assert (step_result.row.flags, step_result.row.consecutive_rejects) == ("RD", 0)
     assert step_result.row.rejects == ((NEXT_EPOCH_START, float(WORKED_Z + 100)),)
-    assert step_result.dormant_reason == "reject fraction 0.52 over the limit 0.50"
+    assert step_result.dormant_reason == "reject fraction 0.520 over the limit 0.500"
     at_limit = filter_step_after(
         last_row(reject_fraction=0.375), pair_input(WORKED_Z + 100), series_params
     )

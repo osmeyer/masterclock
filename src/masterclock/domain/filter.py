@@ -1608,8 +1608,8 @@ def _dormant_reason(draft: RowDraft, series_params: SeriesParams) -> str | None:
         return f"{draft.consecutive_rejects} rejects in a row"
     if draft.reject_fraction > series_params.reject_fraction_limit:
         return (
-            f"reject fraction {draft.reject_fraction:.2f} over the limit"
-            f" {series_params.reject_fraction_limit:.2f}"
+            f"reject fraction {draft.reject_fraction:.3f} over the limit"
+            f" {series_params.reject_fraction_limit:.3f}"
         )
     return None
 

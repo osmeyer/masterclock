@@ -686,7 +686,9 @@ def valid_rows(draw: st.DrawFn, *, has_measurement: bool, for_pair: bool) -> Row
         x_fs=draw(st.integers(1 - 10**18, 10**18 - 1)) if is_tracked else None,
         y=(draw(COLUMN_FLOATS) if filter_states > 1 else 0.0) if is_tracked else None,
         d=(draw(COLUMN_FLOATS) if filter_states == 3 else 0.0) if is_tracked else None,
-        innovation_scale=abs(draw(COLUMN_FLOATS)) if is_tracked else None,
+        innovation_scale=abs(draw(COLUMN_FLOATS))
+        if is_tracked or draw(st.booleans())
+        else None,
         step_offset=draw(st.integers(-(10**14), 10**14)),
         epochs_in_segment=draw(st.integers(0, 10**8)),
         epochs_since_accept=draw(st.integers(0, 10**8)),

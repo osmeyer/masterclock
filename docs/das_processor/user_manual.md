@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-07 01:21:13 UTC
+**Date:** 2026-10-07 20:20:36 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -535,7 +535,8 @@ Every row carries exactly one of A, R, X, P and O:
 
 The others are added to it:
 
-- **D**: the series is dormant, with no estimate; x, y, d and innovation_scale are empty.
+- **D**: the series is dormant, with no estimate; x, y and d are empty.
+  innovation_scale is empty too, unless the reject fraction made the series dormant: then it holds the scale the series had reached, which its next start keeps.
 - **S**: the reading was a whole period out, and was put right.
 - **N**: the estimator starts again here, in a new segment.
   A series that comes back after a gap, or after being disabled, starts dormant, on rows without N; its first accepted row then starts a new segment, with N.

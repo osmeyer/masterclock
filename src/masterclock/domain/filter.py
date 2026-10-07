@@ -465,7 +465,13 @@ def finish(draft: RowDraft, outcome: Outcome) -> Row:
     return row
 
 
-def dormant(draft: RowDraft, outcome: Held, *, keep_buffer: bool = False) -> Row:
+def dormant(
+    draft: RowDraft,
+    outcome: Held,
+    *,
+    keep_buffer: bool = False,
+    keep_scale: bool = False,
+) -> Row:
     """Finish a draft as a dormant row: one with no valid state.
 
     Parameters
@@ -477,20 +483,26 @@ def dormant(draft: RowDraft, outcome: Held, *, keep_buffer: bool = False) -> Row
     keep_buffer : bool, optional
         Whether the buffer stays: it does while a dormant series gathers
         measurements to acquire from; otherwise it is emptied.
+    keep_scale : bool, optional
+        Whether the innovation scale stays, as the draft has it: it does
+        while a dormant series acquires, so a scale its reject fraction
+        left it is kept for its cold start; otherwise it is emptied.
 
     Returns
     -------
     Row
-        The row with no phase, rate, drift or innovation scale, a reject
-        fraction of 0, flag D beside ``outcome``, and the step offset as it
-        was.
+        The row with no phase, rate or drift, no innovation scale unless it
+        is kept, a reject fraction of 0, flag D beside ``outcome``, and the
+        step offset as it was.
 
     Raises
     ------
     FilterError
         If the finished row breaks a rule of :class:`Row`.
     """
-    draft.x_fs = draft.y = draft.d = draft.innovation_scale = None
+    draft.x_fs = draft.y = draft.d = None
+    if not keep_scale:
+        draft.innovation_scale = None
     draft.reject_fraction = 0.0
     if not keep_buffer:
         draft.rejects = ()
@@ -689,7 +701,8 @@ def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     Parameters
     ----------
     draft : RowDraft
-        The row as built so far, of a dormant series.
+        The row as built so far, of a dormant series; its innovation scale
+        is the one its reject fraction left it, or ``None``.
     z : int
         The measurement at the epoch, ps.
     series_params : SeriesParams
@@ -699,9 +712,10 @@ def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     Returns
     -------
     Row
-        A new segment at phase ``z`` with no rate or drift, innovation
-        scale ``sigma0``, step offset, counters, reject fraction and buffer
-        at 0, flags A and N, and U for a 2- or 3-state series.
+        A new segment at phase ``z`` with no rate or drift, the innovation
+        scale the draft kept, else ``sigma0`` (design 8.6), step offset,
+        counters, reject fraction and buffer at 0, flags A and N, and U for
+        a 2- or 3-state series.
 
     Raises
     ------
@@ -711,7 +725,8 @@ def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     """
     start_segment(draft, series_params, keep_offset=False)
     draft.x_fs, draft.y, draft.d = to_fs(z), 0.0, 0.0
-    draft.innovation_scale = series_params.sigma0
+    if draft.innovation_scale is None:
+        draft.innovation_scale = series_params.sigma0
     draft.reject_fraction = 0.0
     draft.consecutive_rejects = draft.epochs_since_accept = 0
     draft.rejects = ()
@@ -1112,8 +1127,10 @@ def acquire(
     ----------
     draft : RowDraft
         The row as built so far, of a series with no prediction or one that
-        has just reached ``n_break`` counted rejects, its buffer holding the
-        measurements it has gathered, as (epoch, z).
+        has just gone dormant on its rejects, its buffer holding the
+        measurements it has gathered, as (epoch, z). Its innovation scale,
+        when it has one, is kept to the cold start: the caller leaves one
+        only for a series its reject fraction made dormant.
     z : int
         The measurement at the epoch, ps. A pair's is decycled against its
         prediction, or, with none, against the last buffered measurement
@@ -1146,14 +1163,14 @@ def acquire(
     draft.consecutive_rejects = 0
     draft.reject_fraction = 0.0
     if not in_limit:
-        return dormant(draft, "R")
+        return dormant(draft, "R", keep_scale=True)
     buffer_entry = (draft.interpolated_datetime, float(z))
     draft.rejects = (*draft.rejects, buffer_entry)[-MAX_REJECTS:]
     if len(draft.rejects) == MAX_REJECTS and _consecutive(draft.rejects):
         z1, z2, z3 = (exact(buffered_z) for _, buffered_z in draft.rejects)
         if abs(z3 - 2 * z2 + z1) <= exact(_ACQUIRE_LIMIT * series_params.sigma0):
             return cold_start(draft, z, series_params)
-    return dormant(draft, "R", keep_buffer=True)
+    return dormant(draft, "R", keep_buffer=True, keep_scale=True)
 
 
 def anchor_of(last_row: Row | None) -> int | None:
@@ -1389,6 +1406,7 @@ def filter_step(
     tracked = prediction is not None
     if measurement.pair_cold_started:
         draft.rejects = ()
+        draft.innovation_scale = None
         prediction = None
     if prediction is None:
         row = acquire(
@@ -1566,10 +1584,15 @@ def _held(
 def _dormant_reason(draft: RowDraft, series_params: SeriesParams) -> str | None:
     """Say why a counted reject makes the series dormant, or that it does not.
 
+    A series made dormant by its rejects in a row loses its innovation
+    scale here, so its cold start takes ``sigma0``; one made dormant by its
+    reject fraction keeps it (design 8.6).
+
     Parameters
     ----------
     draft : RowDraft
-        The row as built so far, the current reject counted.
+        The row as built so far, the current reject counted; changed in
+        place.
     series_params : SeriesParams
         The settings in force.
 
@@ -1581,6 +1604,7 @@ def _dormant_reason(draft: RowDraft, series_params: SeriesParams) -> str | None:
         ``None``.
     """
     if draft.consecutive_rejects >= series_params.n_break:
+        draft.innovation_scale = None
         return f"{draft.consecutive_rejects} rejects in a row"
     if draft.reject_fraction > series_params.reject_fraction_limit:
         return (

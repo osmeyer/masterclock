@@ -53,7 +53,10 @@ cold-starts from the third of three from consecutive epochs whose second
 difference is within 5 sqrt(6) sigma0; a missing epoch empties the buffer;
 counted rejects reaching N_break make a series dormant, as does the reject
 fraction, raised by each counted reject, passing its limit, and a dormant
-row carries a fraction of 0; and the last buffered measurement is what a
+row carries a fraction of 0; a series the reject fraction made dormant
+keeps its innovation scale through acquisition and cold-starts with it,
+and every other way of going dormant leaves no scale, so the cold start
+takes sigma0; and the last buffered measurement is what a
 dormant pair is decycled against.
 
 The filter step: a configuration change starts a warm segment before the
@@ -1803,6 +1806,7 @@ def test_rejects_reaching_n_break_make_the_series_dormant() -> None:
     assert (step_result.row.flags, step_result.cold_started) == ("RD", False)
     assert step_result.row.rejects == ((NEXT_EPOCH_START, float(WORKED_Z - 500)),)
     assert step_result.row.consecutive_rejects == 0
+    assert step_result.row.innovation_scale is None
 
 
 def test_a_component_cold_start_makes_a_triple_dormant() -> None:
@@ -2356,3 +2360,80 @@ def test_a_tracked_series_says_why_it_went_dormant() -> None:
     assert restarted_without_a_value.dormant_reason == "a pair it uses started again"
     assert filter_step_after(last_row(), pair_input(WORKED_Z)).dormant_reason is None
     assert filter_step_after(None, pair_input(WORKED_Z)).dormant_reason is None
+
+
+# ----------------------------------------- the scale kept across a restart
+
+
+def fraction_dormant_row(innovation_scale: float) -> Row:
+    """Send a tracked series dormant on its reject fraction, its scale given."""
+    previous_row = last_row(reject_fraction=0.4, innovation_scale=innovation_scale)
+    prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
+    assert prediction is not None
+    step_result = filter_step_after(
+        previous_row,
+        pair_input(round_even(prediction.x) + 100 * round(innovation_scale)),
+        make_series_params(reject_fraction_weight=0.2, n_break=36),
+    )
+    assert step_result.dormant_reason is not None
+    assert step_result.dormant_reason.startswith("reject fraction")
+    return step_result.row
+
+
+def test_a_reject_fraction_restart_keeps_the_innovation_scale() -> None:
+    """Carry the scale the series reached into its dormant row (8.6, 9.4)."""
+    row = fraction_dormant_row(900.0)
+    assert (row.flags, row.innovation_scale, row.x_fs) == ("RD", 900.0, None)
+
+
+def test_the_kept_scale_lasts_through_acquisition_and_starts_the_segment() -> None:
+    """Keep the scale while buffering, and cold-start with it, not sigma0."""
+    series_params = make_series_params(sigma0=5.0)
+    previous_row = fraction_dormant_row(900.0)
+    z = previous_row.rejects[-1][1]
+    for _ in range(2):
+        previous_row = filter_step_after(
+            previous_row, pair_input(round(z)), series_params
+        ).row
+    assert (previous_row.flags, previous_row.innovation_scale) == ("ANU", 900.0)
+
+
+def test_a_reading_over_the_rms_limit_keeps_the_scale_while_acquiring() -> None:
+    """Keep the scale through a reading never buffered, which empties the buffer."""
+    previous_row = fraction_dormant_row(900.0)
+    row = filter_step_after(previous_row, pair_input(WORKED_Z, rms=81)).row
+    assert (row.flags, row.rejects, row.innovation_scale) == ("RD", (), 900.0)
+
+
+def test_a_pair_restart_clears_a_kept_scale() -> None:
+    """Start a triple afresh, with sigma0, when a pair it uses restarts."""
+    dormant_triple = dormant_row(1_000.0, 2_000.0, innovation_scale=900.0)
+    row = filter_step_after(
+        dormant_triple,
+        triple_input(3_000, pair_cold_started=True),
+        make_series_params(rms_max=None),
+    ).row
+    assert (row.flags, row.innovation_scale) == ("RD", None)
+
+
+@pytest.mark.parametrize("previous_scale", [None, 900.0])
+def test_a_cold_start_takes_sigma0_unless_a_scale_was_kept(
+    previous_scale: float | None,
+) -> None:
+    """Begin the segment with sigma0 when the dormant row carries no scale."""
+    previous_row = dormant_row(1_000.0, 51_000.0, innovation_scale=previous_scale)
+    row = estimator.acquire(
+        moved_on(previous_row), 101_000, make_series_params(sigma0=5.0)
+    )
+    assert (row.flags, row.innovation_scale) == ("ANU", previous_scale or 5.0)
+
+
+def test_a_dormant_series_with_no_reading_drops_a_kept_scale() -> None:
+    """Leave no scale on the unwritten row of an epoch with no reading."""
+    previous_row = dormant_row(1_000.0, innovation_scale=900.0)
+    row = filter_step_after(previous_row, None).row
+    assert (row.flags, row.innovation_scale, estimator.writes_row(row)) == (
+        "PD",
+        None,
+        False,
+    )

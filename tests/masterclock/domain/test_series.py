@@ -208,12 +208,18 @@ def test_a_one_state_row_is_never_unsettled() -> None:
         checked_row(flags="AU", **ONE_STATE_FIELDS)
 
 
-@pytest.mark.parametrize("state_field", ["x_fs", "y", "d", "innovation_scale"])
+@pytest.mark.parametrize("state_field", ["x_fs", "y", "d"])
 def test_a_dormant_row_has_no_state(state_field: str) -> None:
-    """Refuse a dormant row that holds any part of a state."""
+    """Refuse a dormant row that holds its phase, rate or drift."""
     row_fields = {**DORMANT_FIELDS, state_field: 1 if state_field == "x_fs" else 1.0}
     with pytest.raises(ValueError, match="dormant"):
         checked_row(flags="RD", **row_fields)
+
+
+def test_a_dormant_row_may_carry_an_innovation_scale() -> None:
+    """Take a dormant row with a scale, kept from a reject-fraction restart."""
+    row = checked_row(flags="RD", **{**DORMANT_FIELDS, "innovation_scale": 900.0})
+    assert row.innovation_scale == 900.0
 
 
 @pytest.mark.parametrize("state_field", ["x_fs", "y", "d", "innovation_scale"])

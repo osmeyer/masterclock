@@ -1,6 +1,6 @@
 # das_processor requirements
 
-**Date:** 2026-10-07 01:21:13 UTC
+**Date:** 2026-10-07 20:20:36 UTC
 
 This document lists what `das_processor` must do, as numbered requirements a test or a reader can check.
 The [design](design.md) says how it does each one, and the [user manual](user_manual.md) says how to use it.
@@ -134,7 +134,7 @@ flowchart LR
 | PR-12 | It updates the innovation scale on accepted rows only, by an exponential average with weight 1/M_σ, never below the measurement's own RMS for a pair or σ_dd for a triple. | §9.2 |
 | PR-13 | After three counted rejects in a row, each of a pair's within its RMS limit, it accepts the third as a phase step when the three innovations agree within <!-- figure: K_STEP -->3<!-- end figure --> innovation scales of their mean, or, for a 2- or 3-state series, as a frequency step when they lie that close to a fitted line, starting a new segment. | §9.4 |
 | PR-14 | A series goes dormant when its counted rejects in a row reach the configured number, when its reject fraction, raised by each counted reject and lowered by each accepted reading with the configured weight, passes the configured limit, when it has gone more epochs than its gap limit without an accepted measurement, or, for a triple, when a pair whose value it uses restarts, whether or not the triple has a measurement at that epoch: any of its three pairs for a remote triple, and only (r, c) for a local triple (r, r, c), whose self pair cancels. | §13.3, §12.6 |
-| PR-15 | A dormant series restarts from its current measurement once it has three measurements from consecutive epochs, each of a pair's within its RMS limit, whose second difference is within 5√6 times its initial innovation scale. | §13.3 |
+| PR-15 | A dormant series restarts from its current measurement once it has three measurements from consecutive epochs, each of a pair's within its RMS limit, whose second difference is within 5√6 times its initial innovation scale; it starts with its initial innovation scale, or, when its reject fraction made it dormant, the innovation scale it had reached. | §13.3, §8.6 |
 | PR-16 | A change to a clock's time constants starts a new segment of each of its series at the change's epoch, carrying the estimate across. | §8.7 |
 | PR-17 | A row of a 2- or 3-state series that is neither dormant nor disabled is marked unsettled while its segment has run fewer than <!-- figure: SETTLE_FACTOR -->5<!-- end figure --> times M rows. | §8.8 |
 | PR-18 | Before any pair is filtered, it screens the references: a reference whose self pair falls outside the gate has the pairs sharing that shift excluded; a link whose two directions do not cancel has its bad direction, or both, excluded; and a link in every failing triangle of references and no passing one is excluded both ways. | §10 |

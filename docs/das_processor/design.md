@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-07 01:21:13 UTC
+**Date:** 2026-10-07 20:20:36 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -626,7 +626,7 @@ One row per epoch holds the pair's measurement, decycled and referred to E (§7)
 
 The measurement columns, from `measurement_datetime` to `z`, are empty on a row with no measurement.
 On a disabled pair's row (O), `cycle_count` is empty, since the reading is not decycled, and `z` is carried from the pair's newest row, or empty when that row has none (§13.6).
-`x`, `y`, `d` and `innovation_scale` are empty on a dormant row.
+`x`, `y` and `d` are empty on a dormant row, and `innovation_scale` too unless its reject fraction made the series dormant: then it holds the scale the series had reached, kept for its cold start (§8.6).
 A reject slot not in use is empty.
 While a series is dormant, the reject slots hold the measurements it has gathered, as (epoch, z), instead of rejected innovations (§13.3).
 `time_constant` is empty for a 1-state series.
@@ -658,7 +658,7 @@ When each flag is set:
 | X | Excluded by screening or the slip check, inside the gate, and not counted (§9.5) |
 | P | No measurement at this epoch |
 | O | The pair is disabled (§13.6): no state, no innovation, and no other flag |
-| D | No valid state: x, y, d and innovation_scale are empty |
+| D | No valid state: x, y and d are empty, and innovation_scale unless kept from a reject-fraction restart |
 | S | The slip check corrected the cycle count (§11) |
 | N | A new segment starts at this row |
 | U | Unsettled: the segment has run fewer than <!-- figure: SETTLE_FACTOR -->5<!-- end figure --> times M rows (§8.8) |
@@ -1749,7 +1749,9 @@ A cold start begins a new segment from the current measurement alone.
 It happens when a dormant series acquires (§13.3).
 
 - State: X = [z_E, 0, 0]ᵀ for 3 states, [z_E, 0]ᵀ for 2 and [z_E] for 1.
-- Innovation scale: σ_ν = σ₀.
+- Innovation scale: σ_ν = σ₀, unless the series went dormant on its reject fraction (§9.4): then the scale it had reached, kept on its dormant rows.
+  A series whose readings scatter far more than σ₀ allows rejects most of them, and a rejected reading never widens σ_ν; restarting it at σ₀ each time would only repeat that, so the scale it had learned is kept.
+  Every other way of going dormant, N_break, the gap limit or a pair's restart, starts again from σ₀.
 - Segment: a new one, marked N: step_offset = 0, epochs_in_segment = 0, epochs_since_accept = 0, consecutive_rejects = 0, reject_fraction = 0, an empty reject buffer.
 - Parameters: M and M_σ from the entry in force at the epoch; the model is the series' own.
 - Flags: A and N, and U for a 2- or 3-state series (§8.8).
@@ -1878,7 +1880,7 @@ It is updated on accepted rows only, from the innovation before the state update
 ```
 
 σ_floor is the measurement's own rms for a pair, and σ_dd for a triple.
-Rejected, excluded and predicted rows carry σ_ν unchanged, and a cold start sets σ_ν = σ₀.
+Rejected, excluded and predicted rows carry σ_ν unchanged, and a cold start sets σ_ν = σ₀, or the scale a reject-fraction restart kept (§8.6).
 M_σ sets how precise σ_ν is: an average with weight 1/M_σ has a relative error of about 1/√(2(2M_σ − 1)), so M_σ = 50 gives about 7%.
 
 ### 9.3 Counters and reject buffer
@@ -1936,7 +1938,7 @@ x^- \leftarrow x^- + a + s\,t_3, \qquad y^- \leftarrow y^- + s
 ```
 
 Neither: the row stays rejected.
-When consecutive_rejects reaches N_break, or the reject fraction f (§9.3) is above f_max, from `reject_fraction_limit` (§15.2), the series goes dormant, and starts again only once it acquires (§13.3).
+When consecutive_rejects reaches N_break, or the reject fraction f (§9.3) is above f_max, from `reject_fraction_limit` (§15.2), the series goes dormant, and starts again only once it acquires (§13.3); after the reject fraction it keeps its σ_ν for that cold start (§8.6).
 N_break catches a run of rejects; f_max catches rejects spaced by accepted readings, which set the count back to 0: a series rejected four readings in every five takes f past a limit of one half within about N_f readings, and never reaches N_break.
 
 ### 9.5 Excluded measurements
@@ -2011,7 +2013,11 @@ def filter_step(
             row, False, None, "gap limit passed" if "D" in row.flags else None
         )
     if measurement.pair_cold_started:  # §12.6: a pair of the triple restarted
-        draft.rejects, prediction = (), None
+        draft.rejects, draft.innovation_scale, prediction = (
+            (),
+            None,
+            None,
+        )  # sigma0 again
     if prediction is None:  # new or dormant: acquisition (§13.3)
         in_limit = measurement.rms is None or measurement.rms <= series_params.rms_max
         row = acquire(draft, measurement.z, series_params, in_limit)
@@ -2045,6 +2051,8 @@ def gate(draft, prediction, measurement, series_params, excluded):
     reason = dormant_reason(draft, series_params)  # N_break reached, or f over f_max
     if reason is not None:  # dormant until it acquires
         draft.rejects = ()
+        if draft.consecutive_rejects >= series_params.n_break:
+            draft.innovation_scale = None  # only a reject-fraction restart keeps it
         return acquire(draft, measurement.z, series_params, in_limit), None, reason
     row = hold(draft, prediction, "R", series_params)
     return row, None, "gap limit passed" if "D" in row.flags else None
@@ -2489,7 +2497,7 @@ It becomes dormant:
 - when consecutive_rejects reaches N_break, or the reject fraction passes f_max (§9.4);
 - for a triple, when a pair whose value it uses cold-starts, with or without a measurement of the triple at that epoch (§12.6).
 
-A dormant row writes x, y, d and innovation_scale as `-`, and a reject fraction of 0.
+A dormant row writes x, y and d as `-`, and a reject fraction of 0; it writes innovation_scale as `-` too, unless its reject fraction made the series dormant, when it carries the scale the series had reached through acquisition to the cold start (§8.6).
 A row that goes dormant from a held state, at N_break or past the gap limit, keeps the innovation it worked out; a dormant row that buffers a measurement has none.
 It carries flag D, with R when it has a measurement, or X or P as the outcome was.
 A dormant row with no measurement (D with P) is not written (`writes_row` in `domain/filter.py`): a series whose measurements stop writes predicted rows up to G_max and then none, and a dormant series writes none at an epoch without a measurement.
@@ -2541,7 +2549,7 @@ A triple also goes dormant from any state when a pair it uses restarts (§12.6),
 
 | Event | Segment | State after | step_offset | Flags on the row |
 | --- | --- | --- | --- | --- |
-| Cold start: a dormant series acquires (§13.3) | new | [z_E, 0, 0], σ_ν = σ₀ | 0 | A N, and U for 2 or 3 states |
+| Cold start: a dormant series acquires (§13.3) | new | [z_E, 0, 0], σ_ν = σ₀ or the scale kept (§8.6) | 0 | A N, and U for 2 or 3 states |
 | Frequency step | new | X⁻ + (a + s t₃, s, 0), then updated | carried | A N U |
 | Configuration change | new | X⁻ carried; same model | carried | N and the outcome |
 | Phase step | same | X⁻ + (Δ, 0, 0), then updated | + Δ | A |
@@ -2595,18 +2603,20 @@ def acquire(draft, z, series_params, in_limit=True):
     """Buffer a dormant series' measurement; cold-start on three consistent ones."""
     draft.consecutive_rejects, draft.reject_fraction = 0, 0.0
     if not in_limit:  # a pair's reading over its RMS limit is never buffered
-        return dormant(draft, "R")
+        return dormant(draft, "R", keep_scale=True)
     draft.rejects = (*draft.rejects, (draft.interpolated_datetime, float(z)))[-3:]
     if len(draft.rejects) == 3 and consecutive_epochs(draft.rejects):
         z1, z2, z3 = (exact(buffered_z) for _, buffered_z in draft.rejects)
         limit = exact(K_OUT * math.sqrt(6) * series_params.sigma0)  # compared exactly
         if abs(z3 - 2 * z2 + z1) <= limit:
             return cold_start(draft, z, series_params)
-    return dormant(draft, "R", keep_buffer=True)
+    return dormant(draft, "R", keep_buffer=True, keep_scale=True)
 
 
-def dormant(draft, outcome, keep_buffer=False):
-    draft.x_fs = draft.y = draft.d = draft.innovation_scale = None
+def dormant(draft, outcome, keep_buffer=False, keep_scale=False):
+    draft.x_fs = draft.y = draft.d = None
+    if not keep_scale:  # kept only while a reject-fraction restart acquires
+        draft.innovation_scale = None
     draft.reject_fraction = 0.0
     if not keep_buffer:
         draft.rejects = ()

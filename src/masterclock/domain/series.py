@@ -159,7 +159,9 @@ class Row:
         Estimated drift, ps/s²; ``None`` when dormant or disabled, 0.0 for
         a 1- or 2-state series.
     innovation_scale : float or None
-        The innovation scale, ps; ``None`` when dormant or disabled.
+        The innovation scale, ps; ``None`` when disabled, and when dormant
+        unless the series' reject fraction made it dormant, when it is the
+        scale the series had reached, kept for its cold start.
     step_offset : int
         Sum of the phase steps accepted in this segment, ps.
     epochs_in_segment : int
@@ -189,9 +191,10 @@ class Row:
         X, P and O; D never with A, U never with D or on a 1-state series,
         and O alone.
 
-    Every float is finite. A dormant row (D) or a disabled one (O) holds
-    none of ``x_fs``, ``y``, ``d`` and ``innovation_scale``, and every other
-    row all four; a P or O row holds no innovation; a 2-state row has no
+    Every float is finite. A dormant row (D) holds none of ``x_fs``, ``y``
+    and ``d``, and an ``innovation_scale`` only when its reject fraction made
+    the series dormant; a disabled row (O) holds none of the four; every
+    other row holds all four; a P or O row holds no innovation; a 2-state row has no
     drift other than 0.0, and a 1-state row no rate or drift other than 0.0.
     """
 
@@ -233,7 +236,10 @@ class Row:
 
 
 _STATE_FIELDS: Final[tuple[str, ...]] = ("x_fs", "y", "d", "innovation_scale")
-"""The fields a dormant or disabled row leaves empty and every other row fills."""
+"""The fields every row that is neither dormant nor disabled fills."""
+
+_SCALE_FIELD: Final[str] = "innovation_scale"
+"""The one state field a dormant row may fill: the scale kept for its restart."""
 
 
 def check_row(row: Row) -> None:
@@ -389,22 +395,12 @@ def _check_state(row: Row) -> None:
     Raises
     ------
     ValueError
-        If a dormant or disabled row holds any part of a state, another row
-        lacks one, a row without a measurement or a disabled row holds an
-        innovation, or the row breaks a rule of its model (see
-        :func:`_check_model`).
+        If a dormant row holds a phase, rate or drift, a disabled row holds
+        any part of a state, another row lacks one, a row without a
+        measurement or a disabled row holds an innovation, or the row
+        breaks a rule of its model (see :func:`_check_model`).
     """
-    has_no_state = not _NO_STATE.isdisjoint(row.flags)
-    empty_fields = [
-        field_name for field_name in _STATE_FIELDS if getattr(row, field_name) is None
-    ]
-    if empty_fields != (list(_STATE_FIELDS) if has_no_state else []):
-        message = (
-            "a dormant or disabled row has no x_fs, y, d or innovation_scale and"
-            f" every other row has all four; flags {row.flags!r}, empty"
-            f" {empty_fields}"
-        )
-        raise ValueError(message)
+    _check_state_fields(row)
     if not {"P", "O"}.isdisjoint(row.flags) and row.innovation is not None:
         message = (
             "a row with no measurement (P) or of a disabled series (O) has no"
@@ -412,6 +408,36 @@ def _check_state(row: Row) -> None:
         )
         raise ValueError(message)
     _check_model(row)
+
+
+def _check_state_fields(row: Row) -> None:
+    """Refuse a phase, rate, drift or scale the row's flags do not allow.
+
+    Parameters
+    ----------
+    row : Row
+        The row, its flags already checked.
+
+    Raises
+    ------
+    ValueError
+        If a dormant row holds a phase, rate or drift, a disabled row holds
+        any of the four state fields, or another row lacks one. A dormant
+        row may hold an innovation scale or not.
+    """
+    has_no_state = not _NO_STATE.isdisjoint(row.flags)
+    empty_fields = [
+        field_name for field_name in _STATE_FIELDS if getattr(row, field_name) is None
+    ]
+    if "D" in row.flags and _SCALE_FIELD not in empty_fields:
+        empty_fields.append(_SCALE_FIELD)
+    if empty_fields != (list(_STATE_FIELDS) if has_no_state else []):
+        message = (
+            "a dormant row has no x_fs, y or d, a disabled row no x_fs, y, d or"
+            " innovation_scale, and every other row has all four; flags"
+            f" {row.flags!r}, empty {empty_fields}"
+        )
+        raise ValueError(message)
 
 
 def _check_model(row: Row) -> None:

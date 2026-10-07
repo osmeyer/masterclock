@@ -3,10 +3,11 @@
 The rules covered: every series has one owner among the workers, from its
 name alone; a run with worker processes writes byte-identical data files to
 a run without them, with one worker or several, in one batch or one epoch
-per run, a series that stops, a clock with no entry and clocks disabled
-for a time included, and logs
-the same records in the same order; the pool counts a series as existing
-once it writes a row; the command line's num_workers starts the workers.
+per run, a series that stops, a clock with no entry and clocks disabled for
+a time included, a reference whose own readings are off for a while
+included, and logs the same records in the same order; the pool counts a
+series as existing once it writes a row; the command line's num_workers
+starts the workers.
 
 A worker answers each exchange of an epoch, reading a series' file the first
 time it meets the series, and logs with its records kept, each with its
@@ -105,10 +106,36 @@ UNCONFIGURED_PAIR: Final = ("mc1", "xx9")
 """A pair measured every epoch whose clock has no entry in the configuration."""
 
 
+REFERENCE_FAULT: Final = (range(6, 8), "mc3", 2_000_000)
+"""At these epochs every reading this reference makes of another clock is off by
+this many hundredths of a ps, so its links fail with both other references."""
+
+MC3_PAIR_RATES: Final[dict[tuple[str, str], int]] = {
+    **PAIR_RATES,
+    ("mc1", "mc3"): 0,
+    ("mc3", "mc1"): 0,
+    ("mc2", "mc3"): 0,
+    ("mc3", "mc2"): 0,
+    ("mc3", "mc3"): 0,
+    ("mc3", "hm1"): 35,
+}
+"""The measured pairs' rates with a third reference, mc3, ps per 100 s; its links
+are steady, so a 1-state link pair tracks them."""
+
+MC3_CLOCK_CONFIG_YAML: Final = CLOCK_CONFIG_YAML + "  mc3: [{type: mc, location: 1}]\n"
+"""The clock configuration with a third reference."""
+
+
 def write_deployment(
-    deployment_directory: Path, clock_config_yaml: str = CLOCK_CONFIG_YAML
+    deployment_directory: Path,
+    clock_config_yaml: str = CLOCK_CONFIG_YAML,
+    pair_rates: dict[tuple[str, str], int] = PAIR_RATES,
 ) -> AppConfig:
-    """Write the invented deployment's inputs in a new directory; give its config."""
+    """Write the invented deployment's inputs in a new directory; give its config.
+
+    With mc3 among ``pair_rates``, its readings of the other clocks are off
+    as REFERENCE_FAULT says.
+    """
     for directory_name in ("das", "steering", "processed"):
         (deployment_directory / directory_name).mkdir(parents=True)
     (deployment_directory / "clock_config.yaml").write_text(
@@ -117,7 +144,7 @@ def write_deployment(
     das_lines_by_day: dict[int, list[str]] = {}
     for epoch_index in range(EPOCH_COUNT):
         epoch_start = FIRST_EPOCH + epoch_index * T
-        measured_rates = [*PAIR_RATES.items(), (UNCONFIGURED_PAIR, 0)]
+        measured_rates = [*pair_rates.items(), (UNCONFIGURED_PAIR, 0)]
         for pair_index, (pair, rate) in enumerate(measured_rates):
             if (epoch_index, pair) == MISSING_READING or (
                 epoch_index >= STOPPED_READINGS[0] and pair == STOPPED_READINGS[1]
@@ -127,6 +154,9 @@ def write_deployment(
             phase = 1_000 * pair_index + rate * (epoch_index * 600 + seconds_into_epoch)
             if (epoch_index >= PHASE_JUMP[0]) and pair == PHASE_JUMP[1]:
                 phase += PHASE_JUMP[2]
+            fault_epochs, faulty, fault_shift = REFERENCE_FAULT
+            if epoch_index in fault_epochs and pair[0] == faulty != pair[1]:
+                phase += fault_shift
             das_measurement = DASMeasurement(
                 measurement_mjd=round(
                     datetime_to_mjd(
@@ -183,10 +213,12 @@ def clock_config_of(config: AppConfig) -> ClockConfig:
 
 
 def run_without_workers(
-    deployment_directory: Path, clock_config_yaml: str = CLOCK_CONFIG_YAML
+    deployment_directory: Path,
+    clock_config_yaml: str = CLOCK_CONFIG_YAML,
+    pair_rates: dict[tuple[str, str], int] = PAIR_RATES,
 ) -> AppConfig:
     """Run the invented deployment in one batch, without workers; give its config."""
-    config = write_deployment(deployment_directory, clock_config_yaml)
+    config = write_deployment(deployment_directory, clock_config_yaml, pair_rates)
     run.run(config, clock_config_of(config), None, ShutdownHandler())
     return config
 
@@ -196,9 +228,10 @@ def run_with_workers(
     num_workers: int,
     steps: int | None = None,
     clock_config_yaml: str = CLOCK_CONFIG_YAML,
+    pair_rates: dict[tuple[str, str], int] = PAIR_RATES,
 ) -> AppConfig:
     """Run the invented deployment with worker processes; give its config."""
-    config = write_deployment(deployment_directory, clock_config_yaml)
+    config = write_deployment(deployment_directory, clock_config_yaml, pair_rates)
     with workers.WorkerPool(
         num_workers, config.processed.processed_path, config.das.rf
     ) as worker_pool:
@@ -332,6 +365,42 @@ def test_workers_write_the_files_of_disabled_clocks_a_run_without_them_writes(
         ) as worker_pool:
             run.run(config, clock_config_of(config), 1, ShutdownHandler(), worker_pool)
     assert archived_files(config) == without_files
+
+
+def test_workers_hold_a_faulty_reference_s_pairs_as_a_run_without_them_does(
+    tmp_path: Path,
+) -> None:
+    """Give the same files with workers when mc3's own readings are off (U30).
+
+    At the two epochs of the fault every pair mc3 measures of another clock
+    is held, X, and none of them counts a reject there.
+    """
+    without_files = archived_files(
+        run_without_workers(tmp_path / "without", MC3_CLOCK_CONFIG_YAML, MC3_PAIR_RATES)
+    )
+    fault_epochs, _, _ = REFERENCE_FAULT
+    fault_starts = {FIRST_EPOCH + epoch_index * T for epoch_index in fault_epochs}
+    for clock in ("mc1", "mc2", "hm1"):
+        file_bytes = without_files[str(series_file(Path(), "a", ("mc3", clock)))]
+        fault_rows = [
+            parse_meas_row(row_line).row
+            for row_line in file_bytes.decode().splitlines()
+            if not row_line.startswith("#")
+            and parse_meas_row(row_line).row.interpolated_datetime in fault_starts
+        ]
+        assert [("X" in row.flags, row.consecutive_rejects) for row in fault_rows] == [
+            (True, 0),
+            (True, 0),
+        ]
+    with_files = archived_files(
+        run_with_workers(
+            tmp_path / "with",
+            3,
+            clock_config_yaml=MC3_CLOCK_CONFIG_YAML,
+            pair_rates=MC3_PAIR_RATES,
+        )
+    )
+    assert with_files == without_files
 
 
 def test_workers_log_what_a_run_without_them_logs(
@@ -492,7 +561,9 @@ def test_a_worker_answers_each_exchange_of_an_epoch(tmp_path: Path) -> None:
     task = task._replace(epoch_start=FIRST_EPOCH + EPOCH_COUNT * T, readings=())
     signal.signal(signal.SIGINT, signal.default_int_handler)
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
-    answers = serve_queued(config, [task, ({}, frozenset()), {}, None], logging.DEBUG)
+    answers = serve_queued(
+        config, [task, ({}, frozenset(), frozenset()), {}, None], logging.DEBUG
+    )
     assert signal.getsignal(signal.SIGINT) is signal.SIG_IGN
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN
     assert [answer[0] for answer in answers] == ["ok", "ok", "ok"]
@@ -525,7 +596,9 @@ def test_a_worker_logs_nothing_when_warning_is_not_logged(tmp_path: Path) -> Non
     """Keep no records, and work out none, at a level above WARNING."""
     config = write_deployment(tmp_path)
     task = first_task(config, FIRST_EPOCH)
-    answers = serve_queued(config, [task, ({}, frozenset()), {}, None], logging.ERROR)
+    answers = serve_queued(
+        config, [task, ({}, frozenset(), frozenset()), {}, None], logging.ERROR
+    )
     series_done = [answer[1] for answer in answers[1:]]
     assert all(isinstance(done, workers.SeriesDone) for done in series_done)
     assert [done.log_records for done in series_done] == [[], []]  # type: ignore[attr-defined]
@@ -600,7 +673,7 @@ def test_a_shard_left_to_the_logging_set_up_keeps_no_records(
     task = task._replace(epoch_start=FIRST_EPOCH + EPOCH_COUNT * T, readings=())
     shard.start_pairs(task)
     with caplog.at_level(logging.DEBUG):
-        pairs_done = shard.finish_pairs({}, frozenset())
+        pairs_done = shard.finish_pairs({}, frozenset(), frozenset())
     assert pairs_done.log_records == []
     assert len(caplog.records) >= len(task.pairs)
 
@@ -612,7 +685,7 @@ def test_a_shard_reads_a_series_file_only_the_first_time(tmp_path: Path) -> None
     task = first_task(config, FIRST_EPOCH + EPOCH_COUNT * T - T)
     next_epoch = FIRST_EPOCH + EPOCH_COUNT * T
     shard.start_pairs(task._replace(epoch_start=next_epoch, readings=()))
-    shard.finish_pairs({}, frozenset())
+    shard.finish_pairs({}, frozenset(), frozenset())
     shard.work_triples({})
     data_files = sorted(config.processed.processed_path.rglob("das_a.*.dat"))
     for data_file in data_files:
@@ -628,7 +701,7 @@ def test_a_shard_refuses_to_go_on_with_an_epoch_it_did_not_begin(
     """Raise and log WorkerError when asked to finish an epoch never begun."""
     shard = workers.SeriesShard(tmp_path, "a")
     with pytest.raises(WorkerError, match="did not begin"):
-        shard.finish_pairs({}, frozenset())
+        shard.finish_pairs({}, frozenset(), frozenset())
     with pytest.raises(WorkerError, match="did not begin"):
         shard.work_triples({})
     assert [log_record.levelname for log_record in caplog.records] == ["ERROR"] * 2

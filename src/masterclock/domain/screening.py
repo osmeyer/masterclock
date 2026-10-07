@@ -9,7 +9,10 @@ measurement less the prediction, so constant hardware delays drop out.
   excluded.
 * Reciprocity: the two directions of a link carry opposite phases, so their
   innovations cancel. When they do not, the direction that a closure
-  estimate from the other references shows bad is excluded, or both.
+  estimate from the other references shows bad is excluded, or both. A
+  reference whose links fail with every other reference tested, two at
+  least, has a fault in its own measurements: every pair it measures is
+  held at the epoch, whatever its innovation.
 * Closure: the two-way innovations around a triangle of references sum to
   zero. A link in every failing triangle and in no passing one is excluded,
   both ways.
@@ -21,6 +24,7 @@ events, for the program to log.
 """
 
 import math
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import combinations
@@ -37,11 +41,20 @@ from masterclock.domain.series import PairKey
 K_SHARED: Final[float] = 3.0
 """How many combined scales a pair may lie from its self pair's shift and share it."""
 
+MIN_FAULT_LINKS: Final[int] = 2
+"""The fewest links of a reference tested for reciprocity, all failing, that make
+a fault in its own measurements."""
+
 _log: Final[MasterClockLogger] = get_logger(__name__)
 """Logger for this module."""
 
 type _TwoWay = tuple[float, float]
 """A link's two-way innovation and its scale."""
+
+type _Finding = Literal[
+    "self_missing", "self_fail", "reciprocity_fail", "reference_fault", "closure_fail"
+]
+"""What a screening test found."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,17 +63,21 @@ class ScreeningEvent:
 
     Parameters
     ----------
-    finding : {'self_missing', 'self_fail', 'reciprocity_fail', 'closure_fail'}
-        What was found: a self pair with a prediction but no measurement, a
+    finding : str
+        What was found, in that order of the names 'self_missing',
+        'self_fail', 'reciprocity_fail', 'reference_fault' and
+        'closure_fail': a self pair with a prediction but no measurement, a
         self-measurement outside the gate, a link whose directions do not
-        cancel, or a link excluded by closure.
+        cancel, a reference whose links failed reciprocity with every other
+        reference tested, or a link excluded by closure.
     references : tuple of str
-        The reference of a self test, or the two of a link.
+        The reference of a self test or a fault, or the two of a link.
     excluded : tuple of (str, str)
-        The pairs the finding excluded, sorted; empty when none.
+        The pairs the finding excluded, sorted; for a reference fault, the
+        pairs it held; empty when none.
     """
 
-    finding: Literal["self_missing", "self_fail", "reciprocity_fail", "closure_fail"]
+    finding: _Finding
     references: tuple[str, ...]
     excluded: tuple[PairKey, ...]
 
@@ -72,13 +89,19 @@ class Screening:
     Parameters
     ----------
     excluded : frozenset of (str, str)
-        The pairs excluded at the epoch (design 9.5).
+        The pairs excluded at the epoch (design 9.5), the held ones among
+        them.
     events : tuple of ScreeningEvent
         What the tests found, in the order they ran.
+    held : frozenset of (str, str), optional
+        The pairs measured by a reference with a fault in its own
+        measurements, held at the epoch whatever their innovation (design
+        10.2); none when not given.
     """
 
     excluded: frozenset[PairKey]
     events: tuple[ScreeningEvent, ...]
+    held: frozenset[PairKey] = frozenset()
 
 
 class _EpochInnovations:
@@ -99,6 +122,7 @@ class _EpochInnovations:
         self.innovations = innovations
         self.scales = scales
         self.excluded: set[PairKey] = set()
+        self.held: set[PairKey] = set()
         self.events: list[ScreeningEvent] = []
 
     def usable(self, pair: PairKey) -> bool:
@@ -152,7 +176,9 @@ class _EpochInnovations:
 
     def exclude(
         self,
-        finding: Literal["self_fail", "reciprocity_fail", "closure_fail"],
+        finding: Literal[
+            "self_fail", "reciprocity_fail", "reference_fault", "closure_fail"
+        ],
         references: tuple[str, ...],
         excluded_pairs: set[PairKey],
     ) -> None:
@@ -199,8 +225,9 @@ def screen_references(
     Returns
     -------
     Screening
-        The pairs excluded and the events, from the self-measurement,
-        reciprocity and closure tests in that order.
+        The pairs excluded and held, and the events, from the
+        self-measurement, reciprocity, reference-fault and closure tests in
+        that order.
 
     Raises
     ------
@@ -223,12 +250,21 @@ def screen_references(
     sorted_refs = tuple(sorted(refs))
     for r in sorted_refs:
         _self_test(epoch_innovations, r)
+    tested_links: Counter[str] = Counter()
+    failed_links: Counter[str] = Counter()
     for r, s in combinations(sorted_refs, 2):
-        _reciprocity(epoch_innovations, sorted_refs, r, s)
+        link_failed = _reciprocity(epoch_innovations, sorted_refs, r, s)
+        if link_failed is not None:
+            tested_links.update((r, s))
+            failed_links.update((r, s) if link_failed else ())
+    for r in sorted_refs:
+        if MIN_FAULT_LINKS <= tested_links[r] == failed_links[r]:
+            _hold_reference(epoch_innovations, r)
     _closure(epoch_innovations, sorted_refs)
     return Screening(
         excluded=frozenset(epoch_innovations.excluded),
         events=tuple(epoch_innovations.events),
+        held=frozenset(epoch_innovations.held),
     )
 
 
@@ -271,7 +307,7 @@ def _self_test(epoch_innovations: _EpochInnovations, r: str) -> None:
 
 def _reciprocity(
     epoch_innovations: _EpochInnovations, refs: tuple[str, ...], r: str, s: str
-) -> None:
+) -> bool | None:
     """Exclude the bad direction of a link whose directions do not cancel (design 10.2).
 
     Parameters
@@ -282,21 +318,45 @@ def _reciprocity(
         Every reference of the epoch, sorted.
     r, s : str
         The link's references, r before s.
+
+    Returns
+    -------
+    bool or None
+        Whether the link failed; ``None`` when it could not be tested, a
+        direction not usable.
     """
     forward, back = (r, s), (s, r)
     if not (epoch_innovations.usable(forward) and epoch_innovations.usable(back)):
-        return
+        return None
     rho = epoch_innovations.nu(forward) + epoch_innovations.nu(back)
     if abs(rho) <= K_OUT * math.hypot(
         epoch_innovations.scales[forward], epoch_innovations.scales[back]
     ):
-        return
+        return False
     closure_estimates = _closure_estimates(epoch_innovations, refs, r, s)
     epoch_innovations.exclude(
         "reciprocity_fail",
         (r, s),
         _bad_directions(epoch_innovations, r, s, closure_estimates),
     )
+    return True
+
+
+def _hold_reference(epoch_innovations: _EpochInnovations, r: str) -> None:
+    """Hold every pair a reference measures, for a fault of its own (design 10.2).
+
+    Parameters
+    ----------
+    epoch_innovations : _EpochInnovations
+        The epoch's values and exclusions.
+    r : str
+        The reference whose links failed with every other reference tested.
+    """
+    held_pairs = {
+        pair for pair in epoch_innovations.innovations if pair[0] == r and pair[1] != r
+    }
+    epoch_innovations.held |= held_pairs
+    epoch_innovations.exclude("reference_fault", (r,), held_pairs)
 
 
 def _closure_estimates(

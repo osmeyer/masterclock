@@ -8,7 +8,10 @@ missing one with an event; reciprocity fails when a link's two directions'
 innovations do not cancel within five combined scales, and then excludes
 the one direction a median closure estimate from the other references
 shows bad, or both directions when it shows both, neither or there is no
-estimate; closure fails for a triangle whose two-way innovations do not sum
+estimate; a reference whose links fail reciprocity with every other
+reference tested, two at least, has every pair it measures held, and
+excluded, with an event, its self pair and the pairs others measure of it
+not held; closure fails for a triangle whose two-way innovations do not sum
 to zero within five combined scales, and a link is excluded, both ways,
 when it is in every failing triangle and no passing one; pairs without a
 measurement and a prediction are neither tested nor excluded, nor are pairs
@@ -63,6 +66,62 @@ def run_screening(
     return screening.screen_references(
         innovations, scales or unit_scales(innovations), frozenset(refs)
     )
+
+
+# ------------------------------------------------------------- reference fault
+
+
+def faulty_reference_innovations(
+    refs: tuple[str, ...], faulty: str, good_links: tuple[str, ...] = ()
+) -> dict[PairKey, mpq]:
+    """Shift the pairs ``faulty`` measures by 100 ps, its links to ``good_links`` aside.
+
+    The self pair and the pairs the other references measure are left alone,
+    and the faulty reference and mc1 each measure a clock, ox1.
+    """
+    innovations = link_innovations(refs)
+    innovations[(faulty, faulty)] = mpq(0)
+    innovations[(faulty, "ox1")] = mpq(100)
+    innovations[("mc1", "ox1")] = mpq(0)
+    for other in refs:
+        if other not in {faulty, *good_links}:
+            innovations[(faulty, other)] = mpq(100)
+    return innovations
+
+
+def test_a_reference_failing_with_every_other_has_its_pairs_held() -> None:
+    """Hold every pair mc3 measures when all its links fail, with an event (U30)."""
+    refs = ("mc1", "mc2", "mc3", "mc4")
+    screened = run_screening(faulty_reference_innovations(refs, "mc3"), refs)
+    held = {("mc3", "mc1"), ("mc3", "mc2"), ("mc3", "mc4"), ("mc3", "ox1")}
+    assert screened.held == held
+    assert held <= screened.excluded
+    assert (
+        screening.ScreeningEvent("reference_fault", ("mc3",), tuple(sorted(held)))
+        in screened.events
+    )
+    assert [event.finding for event in screened.events].count("reference_fault") == 1
+
+
+def test_one_link_that_passes_leaves_a_reference_unheld() -> None:
+    """Hold nothing when one of the reference's links passes reciprocity (U30)."""
+    refs = ("mc1", "mc2", "mc3", "mc4")
+    innovations = faulty_reference_innovations(refs, "mc3", good_links=("mc4",))
+    screened = run_screening(innovations, refs)
+    assert screened.held == frozenset()
+    assert "reference_fault" not in [event.finding for event in screened.events]
+
+
+def test_two_failing_links_are_enough_and_one_is_not() -> None:
+    """Hold with two links tested, both failing; never with one link alone (U30)."""
+    three_refs = ("mc1", "mc2", "mc3")
+    screened = run_screening(
+        faulty_reference_innovations(three_refs, "mc3"), three_refs
+    )
+    assert screened.held == {("mc3", "mc1"), ("mc3", "mc2"), ("mc3", "ox1")}
+    two_refs = ("mc1", "mc3")
+    screened = run_screening(faulty_reference_innovations(two_refs, "mc3"), two_refs)
+    assert screened.held == frozenset()
 
 
 # ----------------------------------------------------------- self-measurement

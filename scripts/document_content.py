@@ -124,6 +124,7 @@ CONSTANTS: Final[tuple[tuple[str, str, str], ...]] = (
     ("domain.filter", "K_STEP", "number"),
     ("domain.filter", "SETTLE_FACTOR", "number"),
     ("domain.screening", "K_SHARED", "number"),
+    ("domain.screening", "MIN_FAULT_LINKS", "number"),
     ("das_processor.read_cd5m5m", "FIRST_DAY", "number"),
     ("das_processor.read_cd5m5m", "LAST_DAY", "number"),
     ("das_processor.read_cd5m5m", "RMS_MAX", "number"),

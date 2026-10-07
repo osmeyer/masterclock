@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-07 20:20:36 UTC
+**Date:** 2026-10-07 22:46:52 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -543,6 +543,7 @@ Every row carries exactly one of A, R, X, P and O:
 - **A**: the reading was accepted and updated the estimate.
 - **R**: the reading was too far from the prediction, or too noisy, and was rejected; with D, the series had no estimate to judge it by, and the reading was kept to start one from.
 - **X**: the reading was set aside because another check found a fault in a reference, or a slip of a whole period it could not put right.
+  When the reference that made the reading had a fault in its own measurements, the reading is set aside however far it lies from the prediction, and never counts as a reject.
 - **P**: there was no reading this epoch; the row holds the prediction.
 - **O**: the pair is disabled in the clock configuration.
   The row holds the reading as the DAS gave it, no `cycle_count`, the last `z` the pair had, and no estimate, and carries no other flag.
@@ -610,6 +611,7 @@ Every line about a series' row, or about an epoch's readings, names the epoch it
 | `… configuration change at …: M … to …, M_sigma … to …` | A clock's time constants changed at this epoch, as its entry says | Nothing |
 | `… slip corrected at …: … cycles` | A reading came out a whole number of periods wrong, and was put right | Nothing, unless it repeats |
 | `slip of clock … undecided at …: excluded …` | A slip was found and could not be placed, so the clock's readings were set aside for the epoch | Nothing, unless it repeats |
+| `reciprocity of … failed with every other reference at …: held the … pairs it measures` | That reference's own readings disagree with every other reference, so every reading it made this epoch was set aside without counting against the clocks | Look at the reference's measuring hardware if it repeats |
 | `self-measurement of … missing at …` | A reference was not measured against itself this epoch | Look at the DAS if it repeats |
 | `run of channel … starts at epoch …`, `run of channel … ends at epoch …: …; … epochs wrote rows` | Where a run started, and where and why it stopped: the end of the data, a stop asked for, or its `--steps` | Nothing |
 | `epoch …: … pairs, … triples, … accepted, … held` | One epoch done: rows written, accepted and held | Nothing |

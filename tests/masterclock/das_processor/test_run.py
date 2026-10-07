@@ -19,7 +19,8 @@ series, and a block of its own epoch only.
 The pairs of an epoch are predicted, decycled against the prediction or the
 anchor with the steering inside the epoch taken off, screened, checked for
 slips, corrected before filtering, and filtered with what screening and the
-slip check excluded; a new pair starts acquiring, and the pairs of a
+slip check excluded, a pair screening held for a fault of its reference
+held whatever its innovation; a new pair starts acquiring, and the pairs of a
 reference missing from the block are predicted. The triples are built from
 the pairs' accepted measurements of the same epoch, a link direction not
 measured taken from the links' predictions and an rms of 0 giving a sigma
@@ -1609,6 +1610,62 @@ def test_a_reciprocity_and_a_closure_failure_are_logged(
         f"reciprocity of mc1-mc2 failed at {E}: excluded das_a.mc1.mc2, das_a.mc2.mc1"
         in warning_messages
     )
+
+
+MC3_LAST_ROWS: Final[dict[SeriesKey, Row]] = {
+    **REFERENCE_LAST_ROWS,
+    ("mc3", "mc3"): last_row(x_fs=3_000_000),
+    ("mc1", "mc3"): last_row(x_fs=6_000_000),
+    ("mc3", "mc1"): last_row(x_fs=-6_000_000),
+    ("mc2", "mc3"): last_row(x_fs=7_000_000),
+    ("mc3", "mc2"): last_row(x_fs=-7_000_000),
+    ("mc3", "ox23"): last_row(
+        x_fs=1_000_000_000,
+        filter_states=3,
+        time_constant=100.0,
+        scale_time_constant=50.0,
+        innovation_scale=3.0,
+    ),
+}
+"""The last rows with a third reference, mc3, linked both ways to the others
+and measuring ox23."""
+
+
+def test_a_reference_fault_holds_its_pairs_and_is_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Hold every pair mc3 measures when its links fail with both others (10.2, U30).
+
+    mc3's own readings are 1000 ps off, its self pair and the readings the
+    others make of it as predicted; its reading of ox23, far outside the
+    gate, is held as X, not counted.
+    """
+    shift = 1000
+    measurements = [
+        *REFERENCE_MEASUREMENTS,
+        das_measurement_of("mc3", "mc3", 3000, 50),
+        das_measurement_of("mc1", "mc3", 6000, 60),
+        das_measurement_of("mc3", "mc1", PHASE_PERIOD - 6000 + shift, 70),
+        das_measurement_of("mc2", "mc3", 7000, 80),
+        das_measurement_of("mc3", "mc2", PHASE_PERIOD - 7000 + shift, 90),
+        das_measurement_of("mc3", "ox23", (1_000_000 + shift) % PHASE_PERIOD, 100),
+    ]
+    epoch = epoch_of(measurements, MC3_LAST_ROWS, tmp_path)
+    pair_step = run.process_pairs(epoch, MC3_LAST_ROWS)
+    held_row = pair_step.step_results[("mc3", "ox23")].row
+    assert (held_row.flags, held_row.consecutive_rejects) == ("X", 0)
+    assert pair_step.screening.held == {
+        ("mc3", "mc1"),
+        ("mc3", "mc2"),
+        ("mc3", "ox23"),
+    }
+    warning_messages = messages_at(
+        logged_events(caplog, epoch, MC3_LAST_ROWS), "WARNING"
+    )
+    assert (
+        f"reciprocity of mc3 failed with every other reference at {E}:"
+        " held the 3 pairs it measures"
+    ) in warning_messages
 
 
 def test_slips_corrected_and_undecided_are_logged(

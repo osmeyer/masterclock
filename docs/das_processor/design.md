@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-07 20:20:36 UTC
+**Date:** 2026-10-07 22:46:52 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -1891,7 +1891,7 @@ M_σ sets how precise σ_ν is: an average with weight 1/M_σ has a relative err
 | Accepted (A) | 0 | (1 − w_f) f | emptied | 0 |
 | Counted reject (R) | + 1 | (1 − w_f) f + w_f | push (epoch, ν); keep the newest three, oldest first | + 1 |
 | Counted reject over the pair's RMS limit (R) | + 1 | (1 − w_f) f + w_f | emptied | + 1 |
-| Excluded, not counted (X) | unchanged | unchanged | unchanged | + 1 |
+| Excluded inside the gate, or held, not counted (X) | unchanged | unchanged | unchanged | + 1 |
 | Held past the gap limit, so dormant (D with R, X or P) | + 1 on R, else unchanged | 0 | emptied | + 1 |
 | No measurement (P) | unchanged | unchanged | unchanged | + 1 |
 | Dormant, measurement buffered (R with D) | 0 | 0 | push (epoch, z); keep the newest three, oldest first | unchanged |
@@ -1950,6 +1950,11 @@ Screening (§10) and the slip check (§11) can exclude a pair measurement at one
   It is not counted and does not enter the buffer, so screening can prevent an acceptance but never makes evidence of a step.
 - Outside the gate: the row is a counted reject (R), and classification runs as usual.
   Three consistent gate failures are a step even while screening excludes the pair.
+
+Screening can also hold a pair measurement, when the reference that made it has a fault in its own measurements (§10.2).
+A held measurement gives flag X and the predicted state whatever its innovation, inside the gate or outside it: it is not counted, does not enter the buffer and leaves the reject fraction as it was, so a reference's fault never makes its pairs reject, step or go dormant.
+A series held past its gap limit goes dormant, as for any held row.
+A series with no prediction acquires from a held measurement as from any other (§13.3).
 
 ### 9.6 Decision flow
 
@@ -2104,9 +2109,10 @@ A pair takes part in a test when it has a measurement and a valid prediction at 
 | --- | --- | --- | --- |
 | Self (§10.1) | (r, r) | A fault in r's measurement system | The pairs (r, b) that share the self-measurement's shift |
 | Reciprocity (§10.2) | (r, s) and (s, r) | An error in one direction of a link | The bad direction, or both |
+| Reference fault (§10.2) | Every link of r | A fault in r's own measurements | Every pair (r, b), b ≠ r, held |
 | Closure (§10.3) | Two-way links around a triangle | An error in a link's two-way value | Both directions of the bad link |
 
-Excluded pairs are treated as §9.5 says.
+Excluded and held pairs are treated as §9.5 says.
 
 ### 10.1 Self-measurement
 
@@ -2152,6 +2158,11 @@ Each third reference t with usable links s–t and t–r gives one estimate, and
 
 Exactly one bad direction excludes that direction.
 Both bad, neither bad, or no estimate excludes both directions.
+
+A reference r whose links fail this test with every other reference it was tested against, at least <!-- figure: MIN_FAULT_LINKS -->2<!-- end figure --> of them, has a fault in its own measurements: a real change of r's clock moves both directions of every link alike and cancels here, so it cannot fail them all.
+Every pair (r, b) that r measures, b ≠ r, is then held at the epoch and excluded from the later tests and the slip check.
+Its self pair and the pairs the other references measure of r are not held.
+A link is tested only when both its directions are usable, so a link with a direction missing, or excluded by an earlier test, does not count.
 
 ### 10.3 Closure
 
@@ -2209,16 +2220,28 @@ def screen_references(innovations, scales, refs):
         excluded |= shared
         events.append(ScreeningEvent("self_fail", (r,), tuple(sorted(shared))))
 
+    tested, failed = Counter(), Counter()
     for r, s in combinations(sorted_refs, 2):  # 10.2
         if not (usable((r, s)) and usable((s, r))):
             continue
+        tested.update((r, s))
         limit = K_OUT * math.hypot(scales[(r, s)], scales[(s, r)])
         if abs(nu((r, s)) + nu((s, r))) > limit:
             # One direction, or both.
+            failed.update((r, s))
             bad = bad_directions(r, s, closure_estimates(r, s))
             excluded |= bad
             events.append(
                 ScreeningEvent("reciprocity_fail", (r, s), tuple(sorted(bad)))
+            )
+    held = set()
+    for r in sorted_refs:  # 10.2, a fault in r's own measurements
+        if MIN_FAULT_LINKS <= tested[r] == failed[r]:
+            r_pairs = {pair for pair in innovations if pair[0] == r != pair[1]}
+            held |= r_pairs
+            excluded |= r_pairs
+            events.append(
+                ScreeningEvent("reference_fault", (r,), tuple(sorted(r_pairs)))
             )
 
     failing, passing = triangles(sorted_refs)  # 10.3
@@ -2228,7 +2251,9 @@ def screen_references(innovations, scales, refs):
             excluded |= {(a, b), (b, a)}
             events.append(ScreeningEvent("closure_fail", (a, b), ((a, b), (b, a))))
     # Logged by das_processor (§16.2).
-    return Screening(excluded=frozenset(excluded), events=tuple(events))
+    return Screening(
+        excluded=frozenset(excluded), events=tuple(events), held=frozenset(held)
+    )
 ```
 
 ## 11. Cross-reference cycle-slip check
@@ -2948,7 +2973,7 @@ Besides the standard levels there is TRACE, below DEBUG.
 | Level | Events |
 | --- | --- |
 | ERROR | Every error, where it is raised; each damaged data file, once, with where and why (§6.7) |
-| WARNING | Refused DAS lines; a DAS directory with no data files; a clock with no entry in the clock configuration and not ignored, once when found (§15.2); counted rejects; missing or failed self-measurements, reciprocity and closure failures; undecided slips; a roll-back, once for all its files (§6.7) |
+| WARNING | Refused DAS lines; a DAS directory with no data files; a clock with no entry in the clock configuration and not ignored, once when found (§15.2); counted rejects; missing or failed self-measurements, reciprocity and closure failures, a reference whose reciprocity failed with every other reference; undecided slips; a roll-back, once for all its files (§6.7) |
 | INFO | Where a run starts, and where and why it ends; each epoch processed, with its counts of rows written, accepted and held; corrected slips; phase steps, frequency steps, cold starts, dormancy with why, a series that stops writing rows, configuration changes; a clock disabled or enabled again, once at the epoch it happens (§13.6); a redo, once for all its files (§6.5) |
 | DEBUG | Each series' flags at each epoch; a DAS directory entry passed over; the run lock taken and freed |
 | TRACE | Each series' prediction, innovation and update |
@@ -3009,8 +3034,9 @@ A test that carries one of these identifiers in its docstring is a test of that 
 | U27 | Exact phase | Prediction, referring back, update and double difference with phases beyond 2⁵³, and sums ending in exactly ½ | Every stored phase equals the same sum done exactly and rounded half to even |
 | U28 | Series that stop | A clock's measurements stop for longer than G_max, then come back; a data gap no series writes; run in one go and one epoch per run, with and without workers | P rows up to G_max, then no row, and one INFO line when it stops; on its return, rows again, dormant; an epoch that writes no row is not counted as a step; data files byte-identical every way |
 | U29 | Disabled clocks | A clock disabled for three epochs, then enabled again; a disabled reference; run in one go and one epoch per run, with and without workers | O rows holding the reading and the carried z; the triples, screening and the other pairs as if the clock was missing; dormant once enabled; one INFO line at each change; data files byte-identical every way |
+| U30 | Reference fault | A reference whose own readings of the others are off, links tested with two and with three others; one link passing; one link alone; run with and without workers | Every pair it measures held, X and not counted, its self pair and the others' pairs of it not held; nothing held with a link passing or one link alone; one WARNING line; data files byte-identical with workers |
 
-Each invariant of §1.3 is held by these tests: I1 by U21 and U26, I2 by U13, U28 and U29, I3 and I8 by U21, I4 and I5 by U22, U28, U29 and the property tests, I6 by the epoch-loop tests, and I7 by U2 and U27.
+Each invariant of §1.3 is held by these tests: I1 by U21 and U26, I2 by U13, U28 and U29, I3 and I8 by U21, I4 and I5 by U22, U28, U29, U30 and the property tests, I6 by the epoch-loop tests, and I7 by U2 and U27.
 
 ### 17.2 Synthetic data
 
@@ -3122,6 +3148,7 @@ The constants this document names, with their values and meanings as the code gi
 | `K_STEP` | domain.filter | 3 | How many innovation scales each of three rejects may lie from a step's fit. |
 | `SETTLE_FACTOR` | domain.filter | 5 | A segment is unsettled while it has run fewer than this many times M rows. |
 | `K_SHARED` | domain.screening | 3 | How many combined scales a pair may lie from its self pair's shift and share it. |
+| `MIN_FAULT_LINKS` | domain.screening | 2 | The fewest links of a reference tested for reciprocity, all failing, that make a fault in its own measurements. |
 | `FIRST_DAY` | das_processor.read_cd5m5m | 50000 | The earliest MJD day a data file can cover. |
 | `LAST_DAY` | das_processor.read_cd5m5m | 99999 | The latest MJD day a data file can cover. |
 | `RMS_MAX` | das_processor.read_cd5m5m | 9999 | The largest RMS a line may give, ps: the most its column holds. |

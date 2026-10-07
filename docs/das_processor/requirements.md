@@ -1,6 +1,6 @@
 # das_processor requirements
 
-**Date:** 2026-10-07 20:20:36 UTC
+**Date:** 2026-10-07 22:46:52 UTC
 
 This document lists what `das_processor` must do, as numbered requirements a test or a reader can check.
 The [design](design.md) says how it does each one, and the [user manual](user_manual.md) says how to use it.
@@ -137,7 +137,7 @@ flowchart LR
 | PR-15 | A dormant series restarts from its current measurement once it has three measurements from consecutive epochs, each of a pair's within its RMS limit, whose second difference is within 5√6 times its initial innovation scale; it starts with its initial innovation scale, or, when its reject fraction made it dormant, the innovation scale it had reached. | §13.3, §8.6 |
 | PR-16 | A change to a clock's time constants starts a new segment of each of its series at the change's epoch, carrying the estimate across. | §8.7 |
 | PR-17 | A row of a 2- or 3-state series that is neither dormant nor disabled is marked unsettled while its segment has run fewer than <!-- figure: SETTLE_FACTOR -->5<!-- end figure --> times M rows. | §8.8 |
-| PR-18 | Before any pair is filtered, it screens the references: a reference whose self pair falls outside the gate has the pairs sharing that shift excluded; a link whose two directions do not cancel has its bad direction, or both, excluded; and a link in every failing triangle of references and no passing one is excluded both ways. | §10 |
+| PR-18 | Before any pair is filtered, it screens the references: a reference whose self pair falls outside the gate has the pairs sharing that shift excluded; a link whose two directions do not cancel has its bad direction, or both, excluded; a reference whose links fail that test with every other reference tested, two at least, has every pair it measures held at the epoch, never counted as a reject; and a link in every failing triangle of references and no passing one is excluded both ways. | §10 |
 | PR-19 | When a clock measured against two or more references shows a whole number of periods between its pairs, it corrects the pair that slipped and marks its row, or, when it cannot tell which, excludes those pairs for the epoch. | §11 |
 | PR-20 | A triple's value is the accepted measurement of (s, c) plus half the difference of the accepted measurements of (r, s) and (s, r); with one link direction missing, the predicted round trip of the link stands in for it. A triple is built only from accepted pair measurements, never from the pairs' estimates. | §12 |
 | PR-21 | A local triple's value is its pair's measurement exactly; any other value stops the run before the epoch is written. | §12.4 |

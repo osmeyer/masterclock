@@ -846,6 +846,7 @@ def finish_pairs(
     pair_start: PairStart,
     corrections: Mapping[PairKey, int],
     excluded: frozenset[PairKey],
+    held: frozenset[PairKey] = frozenset(),
 ) -> tuple[dict[PairKey, PairMeasurement], dict[PairKey, StepResult]]:
     """Correct and filter some pairs: their part of an epoch after screening.
 
@@ -864,6 +865,9 @@ def finish_pairs(
         The slip check's correction of each pair it corrected, cycles.
     excluded : frozenset of (str, str)
         The pairs screening or the slip check excluded.
+    held : frozenset of (str, str), optional
+        The pairs screening held for a fault of the reference that measured
+        them; none when not given.
 
     Returns
     -------
@@ -898,6 +902,7 @@ def finish_pairs(
             prediction,
             None if measurement is None else measurement.filter_input(),
             excluded=pair in excluded,
+            held=pair in held,
         )
     return measurements, step_results
 
@@ -954,6 +959,7 @@ def process_pairs(
         pair_start,
         slips.corrections,
         screening.excluded | slips.excluded,
+        screening.held,
     )
     return PairStep(
         step_results=step_results,
@@ -1933,6 +1939,14 @@ def log_screening(
                 ref_names,
                 epoch_start,
                 excluded_names,
+            )
+        elif screening_event.finding == "reference_fault":
+            _log.warning(
+                "reciprocity of %s failed with every other reference at %s:"
+                " held the %d pairs it measures",
+                ref_names,
+                epoch_start,
+                len(screening_event.excluded),
             )
         else:
             _log.warning(

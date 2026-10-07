@@ -322,7 +322,10 @@ class SeriesShard:
         )
 
     def finish_pairs(
-        self, corrections: Mapping[PairKey, int], excluded: frozenset[PairKey]
+        self,
+        corrections: Mapping[PairKey, int],
+        excluded: frozenset[PairKey],
+        held: frozenset[PairKey],
     ) -> SeriesDone:
         """Correct and filter the share's pairs, and make their lines.
 
@@ -332,6 +335,8 @@ class SeriesShard:
             The slip check's corrections of the share's pairs, cycles.
         excluded : frozenset of (str, str)
             The share's pairs screening or the slip check excluded.
+        held : frozenset of (str, str)
+            The share's pairs screening held for a fault of their reference.
 
         Returns
         -------
@@ -355,6 +360,7 @@ class SeriesShard:
             pair_start,
             corrections,
             excluded,
+            held,
         )
         components = {
             pair: run.component_of(
@@ -552,8 +558,8 @@ def answer_tasks(connection: Connection, shard: SeriesShard) -> None:
     """
     while (task := connection.recv()) is not None:
         connection.send(("ok", shard.start_pairs(task)))
-        corrections, excluded = connection.recv()
-        connection.send(("ok", shard.finish_pairs(corrections, excluded)))
+        corrections, excluded, held = connection.recv()
+        connection.send(("ok", shard.finish_pairs(corrections, excluded, held)))
         connection.send(("ok", shard.work_triples(connection.recv())))
 
 
@@ -732,7 +738,7 @@ class WorkerPool:
         if logging_on:
             run.log_screening(epoch_start, screening, slips, self._channel)
         pairs_done = self._finish_pairs(
-            slips.corrections, screening.excluded | slips.excluded
+            slips.corrections, screening.excluded | slips.excluded, screening.held
         )
         components: dict[PairKey, Component] = {}
         for done in pairs_done:
@@ -777,7 +783,10 @@ class WorkerPool:
                 triple_keys.add((series_key[0], series_key[1], series_key[-1]))
 
     def _finish_pairs(
-        self, corrections: Mapping[PairKey, int], excluded: frozenset[PairKey]
+        self,
+        corrections: Mapping[PairKey, int],
+        excluded: frozenset[PairKey],
+        held: frozenset[PairKey],
     ) -> list[SeriesDone]:
         """Send each worker its pairs' corrections and exclusions; give what they did.
 
@@ -787,6 +796,8 @@ class WorkerPool:
             The slip check's corrections, cycles.
         excluded : frozenset of (str, str)
             The pairs screening or the slip check excluded.
+        held : frozenset of (str, str)
+            The pairs screening held for a fault of their reference.
 
         Returns
         -------
@@ -811,6 +822,11 @@ class WorkerPool:
                     frozenset(
                         pair
                         for pair in excluded
+                        if owner_of(pair, self._num_workers) == worker
+                    ),
+                    frozenset(
+                        pair
+                        for pair in held
                         if owner_of(pair, self._num_workers) == worker
                     ),
                 ),

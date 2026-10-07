@@ -1344,6 +1344,7 @@ def filter_step(
     measurement: FilterInput | None,
     *,
     excluded: bool = False,
+    held: bool = False,
     pair_cold_started: bool = False,
 ) -> StepResult:
     """Give a series' row at an epoch: the whole of the decision flow (design 9.6).
@@ -1364,6 +1365,9 @@ def filter_step(
         The series' measurement at E, or ``None`` when there is none.
     excluded : bool, optional
         Whether screening or the slip check excluded the measurement.
+    held : bool, optional
+        Whether screening held the measurement, for a fault of the reference
+        that made it: held as X whatever its innovation (design 9.5).
     pair_cold_started : bool, optional
         For a triple, whether a pair it uses cold-started at E, whether or
         not the triple has a measurement there (design 12.6).
@@ -1421,8 +1425,10 @@ def filter_step(
             step=None,
             dormant_reason=_PAIR_RESTARTED if tracked else None,
         )
-    row, step_kind, dormant_reason = _gate(
-        draft, prediction, measurement, series_params, excluded=excluded
+    row, step_kind, dormant_reason = (
+        _held_reading(draft, prediction, measurement, series_params)
+        if held
+        else _gate(draft, prediction, measurement, series_params, excluded=excluded)
     )
     return StepResult(
         row=row, cold_started=False, step=step_kind, dormant_reason=dormant_reason
@@ -1553,6 +1559,35 @@ def _gate(
         row = acquire(draft, measurement.z, series_params, in_limit=in_limit)
         return row, None, dormant_reason
     return _held(draft, prediction, "R", series_params)
+
+
+def _held_reading(
+    draft: RowDraft,
+    prediction: State,
+    measurement: FilterInput,
+    series_params: SeriesParams,
+) -> tuple[Row, None, str | None]:
+    """Hold a measurement screening held for a fault of its reference (design 9.5).
+
+    Parameters
+    ----------
+    draft : RowDraft
+        The row as built so far.
+    prediction : State
+        The series' prediction at the epoch.
+    measurement : FilterInput
+        The measurement.
+    series_params : SeriesParams
+        The settings in force.
+
+    Returns
+    -------
+    tuple of (Row, None, str or None)
+        The row held as X with the measurement's innovation, whatever its
+        size, not counted; dormant past the gap limit, and then why.
+    """
+    draft.innovation = float(measurement.z - prediction.x)
+    return _held(draft, prediction, "X", series_params)
 
 
 def _held(

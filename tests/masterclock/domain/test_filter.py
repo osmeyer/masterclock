@@ -32,17 +32,20 @@ passes its measurements through.
 
 Steps: the gate passes an innovation of at most five innovation scales,
 compared as exact fractions, and an rms up to the pair's limit, and refuses
-a scale that is not finite; a counted reject enters the buffer, which keeps
-three; three rejects that agree within three innovation scales are a phase
-step, accepted in the same segment with the mean innovation, rounded half
-to even, added to the step offset; three that lie on a line within three
-scales, fitted against the rejects' own epochs, are a frequency step,
-accepted in a new warm segment with the prediction moved onto the line;
-classifying needs three rejects, and a step a series with an innovation
-scale; a 1-state series takes only phase steps. A pair's reading over its
-rms limit is never accepted: it is a counted reject that empties the step
-buffer, so a step needs three rejects in the buffer, each within the limit,
-and a dormant series never buffers it, so it never starts acquisition.
+a scale that is not finite; an excluded measurement inside the gate is held
+as X and outside it is a counted reject, while a held one is X whatever its
+innovation, its counters, fraction, scale and buffer kept; a counted reject
+enters the buffer, which keeps three; three rejects that agree within three
+innovation scales are a phase step, accepted in the same segment with the
+mean innovation, rounded half to even, added to the step offset; three that
+lie on a line within three scales, fitted against the rejects' own epochs,
+are a frequency step, accepted in a new warm segment with the prediction
+moved onto the line; classifying needs three rejects, and a step a series
+with an innovation scale; a 1-state series takes only phase steps. A pair's
+reading over its rms limit is never accepted: it is a counted reject that
+empties the step buffer, so a step needs three rejects in the buffer, each
+within the limit, and a dormant series never buffers it, so it never starts
+acquisition.
 
 A disabled series is not tracked: with a reading it writes a row of flag O
 alone, with no state, innovation, counters or buffer, and its settings'
@@ -1542,6 +1545,7 @@ def filter_step_after(
     series_params: SeriesParams | None = None,
     *,
     excluded: bool = False,
+    held: bool = False,
 ) -> estimator.StepResult:
     """Run the filter step at the epoch after ``previous_row``."""
     epoch_start = (
@@ -1557,6 +1561,7 @@ def filter_step_after(
         prediction,
         filter_input,
         excluded=excluded,
+        held=held,
     )
 
 
@@ -1636,6 +1641,17 @@ def test_an_excluded_measurement_outside_the_gate_is_a_counted_reject() -> None:
     )
     assert (step_result.row.flags, step_result.row.consecutive_rejects) == ("R", 1)
     assert len(step_result.row.rejects) == 1
+
+
+def test_a_held_measurement_is_held_whatever_its_innovation() -> None:
+    """Give X, not counted, for a held measurement, in the gate or not (9.5, U30)."""
+    previous_row = last_row(reject_fraction=0.25)
+    for z in (WORKED_Z, WORKED_Z + 100, WORKED_Z - 100_000):
+        row = filter_step_after(previous_row, pair_input(z), held=True).row
+        assert (row.flags, row.consecutive_rejects, row.rejects) == ("X", 0, ())
+        assert row.innovation == float(z - mpq(1_234_567) - exact(0.0123) * T)
+        assert row.reject_fraction == previous_row.reject_fraction
+        assert row.innovation_scale == previous_row.innovation_scale
 
 
 def test_a_measurement_outside_the_gate_is_a_counted_reject() -> None:

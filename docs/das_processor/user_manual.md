@@ -262,6 +262,20 @@ To disable a stretch, give the clock two more entries, with the two MJDs as list
     - {effective_mjd: 60941.805555, disabled: false}
 ```
 
+A clock can also run properly and still be rejected at epoch after epoch for a while, when its frequency runs away or its readings turn noisy.
+`scripts/reject_stretches.py` lists such stretches from the log of a run, joined with the clock's stretches already disabled in the clock configuration.
+[Design §15.5](design.md#155-finding-stretches-when-a-clock-is-rejected-again-and-again) describes the method.
+
+```sh
+uv run --frozen python scripts/reject_stretches.py /srv/masterclock/das_processor_a.log --rf a --clock-config /srv/masterclock/etc/clock_config.yaml
+```
+
+`--min-hours` sets the shortest stretch listed and the shortest time that keeps two apart, 12 hours unless given; `--min-share` the smallest share of a stretch's epochs that must hold a rejection, 0.3 unless given; `--shared-clocks` how many clocks rejected at one epoch make it a reference's fault, 4 unless given.
+It prints a line naming each field, then a line for each stretch: the clock, the MJD from which to disable it, the MJD at which to enable it again, the hours between, the rejections, the epochs with a rejection, and how many of the clock's disabled stretches it takes in.
+Put the stretch in the clock configuration in place of those disabled stretches.
+A `-` in place of the enable MJD means the stretch takes in a disabled stretch that is never enabled again.
+After that it prints a second header line and a line for each stretch when many clocks were rejected at once, with the reference most of the rejections went through: a fault of that reference, not of the clocks, which is not disabled this way.
+
 ## 5. Running
 
 ### 5.1 The command line
@@ -638,3 +652,4 @@ A data file that holds no whole row, or whose first row is damaged, stops only i
 | Stop a run cleanly | send SIGINT, SIGTERM or SIGHUP |
 | Choose clock settings | `uv run --frozen python scripts/characterize.py RUN --rf a` on a characterization run |
 | Find stretches to disable | `uv run --frozen python scripts/no_signal.py RUN --rf a` on a run's files |
+| Find stretches of repeated rejections to disable | `uv run --frozen python scripts/reject_stretches.py LOG --rf a --clock-config FILE` on a run's log |

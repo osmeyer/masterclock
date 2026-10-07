@@ -35,6 +35,7 @@ Outside das_processor:
 - the timescale algorithm;
 - the offline characterization that chooses each clock's time constants, which §15.3 describes;
 - the offline search for stretches when a clock is not running properly, to be disabled, which §15.4 describes.
+- the offline search of a run's log for stretches when a clock is rejected again and again, to be disabled, which §15.5 describes.
 
 ### 1.3 Invariants
 
@@ -2856,6 +2857,29 @@ For every other clock, in these steps, in order:
 
 The script prints a line naming each field, then one line per stretch: the clock, the MJD from which to disable it, the MJD at which to enable it again, the hours between, the kind and the references.
 Each MJD is the epoch start rounded down to six decimals, so the first epoch at or after it is the epoch meant.
+
+### 15.5 Finding stretches when a clock is rejected again and again
+
+A clock can run properly by the test of §15.4 and still be rejected at epoch after epoch: its frequency runs away for a few days, faster than its estimator can follow, or its readings turn noisy for a while.
+Its series then start afresh and go dormant over and over (§9.4), and the rows they write in that time are of no use to the timescale.
+Such a stretch is disabled as in §15.4.
+
+`scripts/reject_stretches.py` finds these stretches in the log of a run (§16.2), for a person to look over before any goes into the configuration.
+It reads every line about a rejected reading of the channel asked for; the clock is the last name of the series, the references the others, and a reference's own rejections are left out.
+Then, in these steps, in order:
+
+1. Shared epochs. When at least 4 clocks are rejected at one epoch, the fault is a reference's, not theirs, so the epoch's rejections are left out of every clock's stretches.
+   Such epochs are joined as in step 2 and listed on their own, each stretch with the most clocks rejected at one of its epochs and the reference most of its rejections go through, each reference counted once for each rejection.
+2. Bursts. A clock's rejected epochs that lie less than the shortest stretch apart are joined.
+   A stretch is kept when it lasts at least the shortest stretch and at least 3 in 10 of its epochs hold a rejection: rejections more scattered than that are a clock running properly, now and then rejected.
+   The shortest stretch is 12 hours; the command line can change it, the share and the number of clocks of step 1.
+3. Joining. Each burst is joined with each of the clock's disabled stretches in the clock configuration that lies less than the shortest stretch from it, so a fault already disabled in pieces, by §15.4 or by hand, comes out as one stretch.
+   A disabled stretch with no burst near it is not listed.
+
+The script prints a line naming each field, then one line per stretch: the clock, the MJD from which to disable it, the MJD at which to enable it again, the hours between, the rejections and the epochs with a rejection in its bursts, and the disabled stretches of the configuration it takes in, which it replaces.
+A stretch that takes in a disabled stretch never enabled again has no end.
+Then it prints a second line naming each field, and one line per stretch of shared epochs: the MJD of its first epoch, the MJD of the epoch after its last, the hours between, the most clocks rejected at one of its epochs, the reference, the rejections through it and all the stretch's rejections.
+Each MJD is written as in §15.4.
 
 ## 16. Error handling and logging
 

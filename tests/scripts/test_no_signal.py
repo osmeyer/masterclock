@@ -10,19 +10,22 @@ judged an epoch to agree, and a run ends only at an epoch judged like a
 clock; runs fewer than the shortest stretch apart are joined, before and
 after their ends are found again, so no two stretches overlap; each end is
 found again to the epoch from the changes alone, against the clock's own
-changes beside it, the earliest start and latest end of any reference
-kept, the run's own ends when no window beside it can judge; a stretch
-shorter than the shortest is left out, and one reaching the last epoch
-judged has no enable; a stretch whose references disagree by more than
-DISAGREEING_PS has no signal, one whose references agree is quartz, and one
-they cannot be compared in has no kind, the references' changes compared
-relative to the first and wrapped, so one lurch read either side of the
-half period is one; a clock far off frequency or
-jumping is not reported; the clocks looked at are those measured against a
-reference, neither references nor named with a prefix to skip; an MJD is
-written rounded down to six decimals, so its first epoch is the epoch
-meant; and the script prints one line per stretch, the same report from
-several processes as from one.
+changes beside it, the earliest start and latest end of any reference kept,
+the run's own ends when no window beside it can judge; a stretch shorter
+than the shortest is left out, and one reaching the last epoch judged has
+no enable; a stretch whose references disagree by more than DISAGREEING_PS
+has no signal, one whose references agree and whose clock typically moves
+beyond FAR_OFF_FREQUENCY_PS an epoch is far off, another whose references
+agree is quartz, and one they cannot be compared in and that is not far off
+has no kind, the references' changes compared relative to the first and
+wrapped, so one lurch read either side of the half period is one; a clock
+moving beyond FAR_OFF_FREQUENCY_PS an epoch either way is unlike a running
+clock however steadily it moves, one moving a little less is not, nor is
+one that jumps now and then; the clocks looked at are those measured
+against a reference, neither references nor named with a prefix to skip; an
+MJD is written rounded down to six decimals, so its first epoch is the
+epoch meant; and the script prints one line per stretch, the same report
+from several processes as from one.
 
 The readings are invented, from a seeded generator.
 """
@@ -36,6 +39,7 @@ from typing import Final
 import pytest
 
 import no_signal
+from characterize import FAR_OFF_FREQUENCY_PS
 from masterclock.das_processor.files import MEAS_COLUMNS, MEAS_HEADER_LINES, SEPARATOR
 
 PERIOD: Final = 200_000
@@ -49,6 +53,10 @@ FIRST: Final = 8_775_360
 
 REFERENCES: Final = ("mc1", "mc2", "mc3")
 """The invented deployment's references."""
+
+FAR_OFF_RATE: Final = 30_000
+"""How far an invented clock far off frequency moves in an epoch, ps: beyond
+FAR_OFF_FREQUENCY_PS."""
 
 
 def seeded(seed: int) -> random.Random:
@@ -67,15 +75,17 @@ def clock_readings(
 
     The clock runs ``rate_ps`` an epoch fast with a few ps of noise, except
     in ``bad``: there each reference reads the whole period at random for
-    ``no_signal``, or all of them read one phase lurching by tens of
-    nanoseconds an epoch, each with a little noise of its own, for
-    ``quartz``.
+    ``no_signal``; or all of them read one phase, each with a little noise
+    of its own, lurching by tens of nanoseconds an epoch for ``quartz``, or
+    moving FAR_OFF_RATE an epoch for ``far_off``.
     """
     generator = seeded(seed)
     true_phase = 0
     readings: dict[str, no_signal.Phases] = {reference: {} for reference in REFERENCES}
     for epoch in epochs:
-        if epoch in bad:
+        if epoch in bad and kind == no_signal.FAR_OFF:
+            true_phase += FAR_OFF_RATE + round(generator.gauss(0.0, 3.0))
+        elif epoch in bad:
             true_phase += round(generator.gauss(0.0, 40_000.0))
         else:
             true_phase += rate_ps + round(generator.gauss(0.0, 3.0))
@@ -187,13 +197,26 @@ def test_a_window_with_too_few_changes_judges_nothing() -> None:
     assert set(no_signal.judge(enough)) == set(enough)
 
 
-def test_a_clock_far_off_frequency_or_jumping_is_not_bad() -> None:
-    """Judge only the spread of the changes, never their size."""
-    readings = clock_readings(DAY_EPOCHS, range(0), "", seed=3, rate_ps=60_000)
-    changes = changes_of(readings)["mc1"]
+def test_a_clock_that_jumps_now_and_then_is_not_bad() -> None:
+    """Judge a clock that runs properly between rare jumps as running properly."""
+    changes = changes_of(clock_readings(DAY_EPOCHS, range(0), "", seed=3))["mc1"]
     for epoch in range(BAD.start, BAD.stop, 40):
         changes[epoch] += 90_000
     assert not any(no_signal.judge(changes).values())
+
+
+def test_a_clock_moving_far_every_epoch_is_bad() -> None:
+    """Judge a clock moving more than FAR_OFF_FREQUENCY_PS an epoch bad, however steady.
+
+    One moving a little less than that is running properly.
+    """
+    limit = round(FAR_OFF_FREQUENCY_PS)
+    for rate_ps, bad in ((limit + 1000, True), (limit - 1000, False)):
+        readings = clock_readings(DAY_EPOCHS, range(0), "", seed=3, rate_ps=rate_ps)
+        verdicts = no_signal.judge(changes_of(readings)["mc1"])
+        assert set(verdicts.values()) == {bad}
+    readings = clock_readings(DAY_EPOCHS, range(0), "", seed=3, rate_ps=-limit - 1000)
+    assert all(no_signal.judge(changes_of(readings)["mc1"]).values())
 
 
 def test_every_reference_that_judged_must_agree() -> None:
@@ -308,9 +331,15 @@ def test_a_stretch_that_never_ends_has_no_enable() -> None:
 # ------------------------------------------------------------ the kind
 
 
-@pytest.mark.parametrize("kind", [no_signal.NO_SIGNAL, no_signal.QUARTZ])
+@pytest.mark.parametrize(
+    "kind", [no_signal.NO_SIGNAL, no_signal.QUARTZ, no_signal.FAR_OFF]
+)
 def test_the_references_tell_no_signal_from_quartz(kind: str) -> None:
-    """Call a stretch no signal when its references disagree, quartz when they agree."""
+    """Call a stretch no signal when its references disagree, quartz when they agree.
+
+    When they agree and the clock moves more than FAR_OFF_FREQUENCY_PS an
+    epoch, far off.
+    """
     readings = clock_readings(DAY_EPOCHS, BAD, kind, seed=10)
     (found,) = no_signal.stretches("hm1", changes_of(readings), MIN_EPOCHS)
     assert found.kind == kind
@@ -323,6 +352,15 @@ def test_too_few_references_give_no_kind() -> None:
     del readings["mc3"]
     (found,) = no_signal.stretches("hm1", changes_of(readings), MIN_EPOCHS)
     assert found.kind is None
+
+
+def test_a_far_off_stretch_needs_no_three_references() -> None:
+    """Call a stretch far off from two references, which cannot be compared."""
+    readings = clock_readings(DAY_EPOCHS, BAD, no_signal.FAR_OFF, seed=11)
+    del readings["mc3"]
+    (found,) = no_signal.stretches("hm1", changes_of(readings), MIN_EPOCHS)
+    assert found.kind == no_signal.FAR_OFF
+    assert no_signal.typical_change([{}], no_signal.Span(1, 2, False)) == 0.0
 
 
 def test_the_reference_spread_is_wrapped() -> None:

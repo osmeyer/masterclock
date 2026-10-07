@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-07 22:46:52 UTC
+**Date:** 2026-10-07 23:06:54 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -239,7 +239,7 @@ It prints a line naming each field, then a line for each clock with a local trip
 
 ### 4.4 Finding stretches to disable
 
-A clock can stop running properly for a while: its channel goes dead, or the clock falls back on its quartz crystal and its phase lurches from one epoch to the next.
+A clock can stop running properly for a while: its channel goes dead, the clock falls back on its quartz crystal and its phase lurches from one epoch to the next, or it runs so far off frequency that its phase moves more than 25 ns every epoch.
 das_processor cannot follow it then, and the log fills with rejects and undecided slips.
 `scripts/no_signal.py` lists such stretches from the measurement files of a run, such as a characterization run, for you to look over and disable.
 [Design §15.4](design.md#154-finding-stretches-when-a-clock-is-not-running-properly) describes the method.
@@ -250,7 +250,7 @@ uv run --frozen python scripts/no_signal.py /srv/masterclock/characterization/a 
 
 `--skip` takes name prefixes of clocks to leave alone; the references are always left alone.
 `--min-hours` sets the shortest stretch listed, and the shortest good spell that keeps two stretches apart, 12 hours unless given; `--jobs` sets how many clocks are worked at once.
-It prints a line naming each field, then a line for each stretch: the clock, the MJD from which to disable it, the MJD at which to enable it again, the hours between, whether it held `no_signal` or a `quartz` signal, and the references that agreed.
+It prints a line naming each field, then a line for each stretch: the clock, the MJD from which to disable it, the MJD at which to enable it again, the hours between, whether it held `no_signal`, a `quartz` signal or a clock `far_off` frequency, and the references that agreed.
 A `-` in place of the enable MJD means the clock never ran properly again before the data end.
 
 To disable a stretch, give the clock two more entries, with the two MJDs as listed:

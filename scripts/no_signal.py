@@ -4,7 +4,9 @@ A DAS channel whose clock is off or disconnected still gives readings, but
 their phase is spread over the whole period; a clock reduced to its quartz
 crystal still gives a signal, but its phase lurches by tens of nanoseconds
 from one epoch to the next. Either way the one-epoch changes are tens of
-nanoseconds apart, where a running clock's are far closer. This script
+nanoseconds apart, where a running clock's are far closer. A clock whose
+phase moves tens of nanoseconds every epoch, however steadily, is not a
+properly running atomic clock either. This script
 reads the measurement files of a das_processor run and, for every clock
 that is not a reference, judges each epoch against every reference that
 measures the clock, from the raw measured phase. A stretch is reported only
@@ -18,10 +20,9 @@ ready to be looked over and put into the clock configuration. Run it as::
 
 Each stretch is marked by what the references show inside it: readings
 that disagree as much as independent ones would mean no signal; readings
-that agree mean a signal that lurches. A clock that runs far off
-frequency, or whose phase jumps, still runs properly between its jumps and
-is not reported: only the spread of the changes is judged, never their
-size.
+that agree and move far every epoch, a clock far off frequency; readings
+that agree otherwise, a signal that lurches. A clock whose phase jumps now
+and then runs properly between its jumps and is not reported.
 """
 
 import argparse
@@ -35,6 +36,7 @@ from typing import Final, NamedTuple
 
 from characterize import (
     EPOCHS_PER_DAY,
+    FAR_OFF_FREQUENCY_PS,
     MAD_TO_SIGMA,
     MEAS_SLICES,
     NO_SIGNAL_PS,
@@ -75,6 +77,9 @@ NO_SIGNAL: Final[str] = "no_signal"
 
 QUARTZ: Final[str] = "quartz"
 """The kind of a stretch whose references see one signal that lurches."""
+
+FAR_OFF: Final[str] = "far_off"
+"""The kind of a stretch whose references see one signal moving far every epoch."""
 
 type Phases = dict[int, int]
 """Raw measured phases, ps, by epoch."""
@@ -196,7 +201,8 @@ def judge(changes: Changes) -> Verdicts:
     Verdicts
         For every epoch with a change whose window holds at least
         :data:`MIN_WINDOW_CHANGES` changes, whether they typically depart
-        from their median by more than :data:`NO_SIGNAL_PS`.
+        from their median by more than :data:`NO_SIGNAL_PS`, or their
+        median is beyond :data:`FAR_OFF_FREQUENCY_PS` either way.
 
     Examples
     --------
@@ -205,6 +211,8 @@ def judge(changes: Changes) -> Verdicts:
     >>> verdicts = judge({**steady, **random_phase})
     >>> verdicts[10], verdicts[70]
     (False, True)
+    >>> judge({epoch: 30_000 for epoch in range(1, 40)})[10]
+    True
     """
     epochs = sorted(changes)
     verdicts = {}
@@ -215,8 +223,10 @@ def judge(changes: Changes) -> Verdicts:
         while high < len(epochs) and epochs[high] <= epoch + HALF_WINDOW:
             high += 1
         if high - low >= MIN_WINDOW_CHANGES:
-            window = [changes[e] for e in epochs[low:high]]
-            verdicts[epoch] = spread(window)[1] > NO_SIGNAL_PS
+            median_change, departure = spread([changes[e] for e in epochs[low:high]])
+            verdicts[epoch] = (
+                departure > NO_SIGNAL_PS or abs(median_change) > FAR_OFF_FREQUENCY_PS
+            )
     return verdicts
 
 
@@ -463,6 +473,64 @@ def reference_spread(per_reference: Sequence[Changes], span: Span) -> float | No
     return statistics.median(epoch_spreads) if epoch_spreads else None
 
 
+def typical_change(per_reference: Sequence[Changes], span: Span) -> float:
+    """Give how far a clock typically moves in one epoch in a span.
+
+    Parameters
+    ----------
+    per_reference : sequence of Changes
+        Each reference's changes of the clock.
+    span : Span
+        The span.
+
+    Returns
+    -------
+    float
+        The median, over the references with a change in the span, of the
+        size of their median change in it, ps; 0 when none has one.
+
+    Examples
+    --------
+    >>> typical_change([{1: 30, 2: 40}, {1: -50, 2: -60}, {5: 1}], Span(1, 3, False))
+    45.0
+    """
+    sizes = [
+        abs(statistics.median(in_span))
+        for changes in per_reference
+        if (
+            in_span := [changes[e] for e in range(span.start, span.end) if e in changes]
+        )
+    ]
+    return statistics.median(sizes) if sizes else 0.0
+
+
+def kind_of(per_reference: Sequence[Changes], span: Span) -> str | None:
+    """Tell what the references show in a stretch.
+
+    Parameters
+    ----------
+    per_reference : sequence of Changes
+        Each reference's changes of the clock.
+    span : Span
+        The stretch.
+
+    Returns
+    -------
+    str or None
+        :data:`NO_SIGNAL` when the references disagree by more than
+        :data:`DISAGREEING_PS`; else :data:`FAR_OFF` when the clock
+        typically moves more than :data:`FAR_OFF_FREQUENCY_PS` an epoch;
+        else :data:`QUARTZ`, or ``None`` when the references cannot be
+        compared.
+    """
+    typical = reference_spread(per_reference, span)
+    if typical is not None and typical > DISAGREEING_PS:
+        return NO_SIGNAL
+    if typical_change(per_reference, span) > FAR_OFF_FREQUENCY_PS:
+        return FAR_OFF
+    return None if typical is None else QUARTZ
+
+
 class BadStretch(NamedTuple):
     """One stretch when a clock is not running properly.
 
@@ -477,9 +545,7 @@ class BadStretch(NamedTuple):
         The epoch of the first proper reading again: the clock is to be
         enabled at it; ``None`` when that never comes.
     kind : str or None
-        :data:`NO_SIGNAL` when the references disagree by more than
-        :data:`DISAGREEING_PS`, :data:`QUARTZ` when they agree better;
-        ``None`` when they cannot be compared.
+        What the references show in it (see :func:`kind_of`).
     references : tuple of str
         The references whose readings judged the clock.
     """
@@ -531,20 +597,12 @@ def stretches(
     for span in joined(refined, min_epochs):
         if span.end - span.start < min_epochs:
             continue
-        typical = reference_spread(every_changes, span)
-        kind = (
-            None
-            if typical is None
-            else NO_SIGNAL
-            if typical > DISAGREEING_PS
-            else QUARTZ
-        )
         found.append(
             BadStretch(
                 clock,
                 span.start,
                 None if span.open_ended else span.end,
-                kind,
+                kind_of(every_changes, span),
                 tuple(per_reference),
             )
         )

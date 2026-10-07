@@ -2,9 +2,15 @@
 # each pair's RMS limit. Every name and number here is invented; a real file
 # carries the values the offline characterization chose for its clocks.
 
-# Counted rejects that make a series dormant (N_break); at most every
-# clock's gap_limit.
+# Counted rejects in a row that make a series dormant (N_break); at most
+# every clock's gap_limit.
 rejects_before_restart: 36
+
+# Reject fraction: each reading's outcome is averaged with the newest
+# weighing 1 over reject_fraction_epochs; a series whose fraction passes
+# reject_fraction_limit goes dormant, however the rejects are spaced.
+reject_fraction_epochs: 25.0
+reject_fraction_limit: 0.5
 
 # RMS limit of the pairs' gate, ps: the pair's own, else its reference's,
 # else the default. A pair is written reference.clock.

@@ -31,12 +31,16 @@ and three in a row are looked at for a step (:func:`classify`): agreeing,
 they are a phase step; on a line, a frequency step (:func:`accept_step`). A
 pair's reading over its rms limit is never accepted, not by a step and not
 by acquisition: it is a counted reject that empties the buffer, so it is
-never one of the three a step or a cold start is found in.
+never one of the three a step or a cold start is found in. Each counted
+reject raises the series' reject fraction and each accepted reading lowers
+it; a series goes dormant when its rejects in a row reach N_break or its
+reject fraction passes its limit, so rejects spaced by single accepts send
+it back to acquisition as a run of rejects does.
 
 :func:`filter_step` puts it all together for one series at one epoch: it
 takes the series' measurement as plain values (:class:`FilterInput`) and
-gives its row, whether it cold-started and which kind of step it accepted
-(:class:`StepResult`).
+gives its row, whether it cold-started, which kind of step it accepted and
+why it went dormant, when it did (:class:`StepResult`).
 """
 
 import functools
@@ -272,6 +276,7 @@ class RowDraft:
     epochs_in_segment: int
     epochs_since_accept: int
     consecutive_rejects: int
+    reject_fraction: float
     rejects: tuple[Reject, ...]
     filter_states: FilterStates
     time_constant: float | None
@@ -315,7 +320,7 @@ def carry(
     >>> from datetime import UTC, datetime
     >>> settings = SeriesParams(
     ...     filter_states=1, M=None, M_sigma=50.0, sigma0=5.0, gmax=432, n_break=36,
-    ...     rms_max=80,
+    ...     reject_fraction_weight=0.04, reject_fraction_limit=0.5, rms_max=80,
     ... )
     >>> draft = carry(datetime(2025, 9, 23, 6, 0, tzinfo=UTC), None, settings)
     >>> draft.x_fs, draft.flags
@@ -334,6 +339,7 @@ def carry(
             epochs_in_segment=0,
             epochs_since_accept=0,
             consecutive_rejects=0,
+            reject_fraction=0.0,
             rejects=(),
             filter_states=series_params.filter_states,
             time_constant=series_params.M,
@@ -351,6 +357,7 @@ def carry(
         epochs_in_segment=last_row.epochs_in_segment + 1,
         epochs_since_accept=last_row.epochs_since_accept,
         consecutive_rejects=last_row.consecutive_rejects,
+        reject_fraction=last_row.reject_fraction,
         rejects=last_row.rejects,
         filter_states=last_row.filter_states,
         time_constant=last_row.time_constant,
@@ -442,6 +449,7 @@ def finish(draft: RowDraft, outcome: Outcome) -> Row:
         epochs_in_segment=draft.epochs_in_segment,
         epochs_since_accept=draft.epochs_since_accept,
         consecutive_rejects=draft.consecutive_rejects,
+        reject_fraction=draft.reject_fraction,
         rejects=draft.rejects,
         filter_states=draft.filter_states,
         time_constant=draft.time_constant,
@@ -473,8 +481,9 @@ def dormant(draft: RowDraft, outcome: Held, *, keep_buffer: bool = False) -> Row
     Returns
     -------
     Row
-        The row with no phase, rate, drift or innovation scale, flag D
-        beside ``outcome``, and the step offset as it was.
+        The row with no phase, rate, drift or innovation scale, a reject
+        fraction of 0, flag D beside ``outcome``, and the step offset as it
+        was.
 
     Raises
     ------
@@ -482,6 +491,7 @@ def dormant(draft: RowDraft, outcome: Held, *, keep_buffer: bool = False) -> Row
         If the finished row breaks a rule of :class:`Row`.
     """
     draft.x_fs = draft.y = draft.d = draft.innovation_scale = None
+    draft.reject_fraction = 0.0
     if not keep_buffer:
         draft.rejects = ()
     draft.flags += "D"
@@ -546,6 +556,7 @@ def disabled_step(
         epochs_in_segment=0,
         epochs_since_accept=0,
         consecutive_rejects=0,
+        reject_fraction=0.0,
         rejects=(),
         filter_states=series_params.filter_states,
         time_constant=series_params.M,
@@ -553,7 +564,7 @@ def disabled_step(
         flags="",
     )
     row = finish(draft, "O") if measured else dormant(draft, "P")
-    return StepResult(row=row, cold_started=False, step=None)
+    return StepResult(row=row, cold_started=False, step=None, dormant_reason=None)
 
 
 def hold(
@@ -603,6 +614,7 @@ def accept(
     prediction: State,
     innovation: mpq,
     scale_floor: float,
+    reject_weight: float,
     *,
     nu: float | None = None,
 ) -> Row:
@@ -619,6 +631,8 @@ def accept(
     scale_floor : float
         The lowest the innovation scale may go, ps: the measurement's own
         rms for a pair, sigma_dd for a triple.
+    reject_weight : float
+        The weight of the newest reading in the reject fraction.
     nu : float or None, optional
         ``float(innovation)``, when the caller has it already; worked out
         here when ``None``, once for the row.
@@ -629,8 +643,10 @@ def accept(
         The updated state, x in whole femtoseconds; the innovation; the
         innovation scale moved by the innovation, as
         sqrt(max((1 - w) scale**2 + w innovation**2, floor**2)) with
-        w = 1/M_sigma; the consecutive rejects and the epochs since an
-        accept set to 0, and the buffer emptied.
+        w = 1/M_sigma; the reject fraction lowered to (1 - reject_weight)
+        times itself, and to 0 once below :data:`REJECT_FRACTION_FLOOR`;
+        the consecutive rejects and the epochs since an accept set to 0,
+        and the buffer emptied.
 
     Raises
     ------
@@ -659,6 +675,9 @@ def accept(
         updated_state.d,
     )
     draft.innovation_scale = new_scale
+    draft.reject_fraction *= 1.0 - reject_weight
+    if draft.reject_fraction < REJECT_FRACTION_FLOOR:
+        draft.reject_fraction = 0.0
     draft.consecutive_rejects = draft.epochs_since_accept = 0
     draft.rejects = ()
     return finish(draft, "A")
@@ -681,8 +700,8 @@ def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     -------
     Row
         A new segment at phase ``z`` with no rate or drift, innovation
-        scale ``sigma0``, step offset, counters and buffer at 0, flags A
-        and N, and U for a 2- or 3-state series.
+        scale ``sigma0``, step offset, counters, reject fraction and buffer
+        at 0, flags A and N, and U for a 2- or 3-state series.
 
     Raises
     ------
@@ -693,6 +712,7 @@ def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     start_segment(draft, series_params, keep_offset=False)
     draft.x_fs, draft.y, draft.d = to_fs(z), 0.0, 0.0
     draft.innovation_scale = series_params.sigma0
+    draft.reject_fraction = 0.0
     draft.consecutive_rejects = draft.epochs_since_accept = 0
     draft.rejects = ()
     return finish(draft, "A")
@@ -713,6 +733,14 @@ less than this many scales from the fit.
 
 _STEP_REJECTS: Final[int] = 3
 """How many consecutive counted rejects a step is looked for in."""
+
+REJECT_FRACTION_FLOOR: Final[float] = 1e-9
+"""A reject fraction below this is 0.
+
+The fraction only ever decays toward 0 between rejects, and far below any
+limit it says nothing; set to 0 it also never shrinks past what its file
+column can hold.
+"""
 
 type StepKind = Literal["phase", "frequency"]
 """The kinds of step three rejects can show."""
@@ -851,11 +879,12 @@ def rms_ok(rms: int, rms_max: int | None) -> bool:
     return rms_max is None or rms <= rms_max
 
 
-def count_reject(draft: RowDraft, innovation: mpq) -> None:
+def count_reject(draft: RowDraft, innovation: mpq, reject_weight: float) -> None:
     """Count a rejected measurement and put it in the reject buffer (design 9.3).
 
-    The draft gets one more consecutive reject, and (epoch, innovation)
-    added to its buffer, which keeps the newest
+    The draft gets one more consecutive reject, its reject fraction raised
+    to (1 - reject_weight) times itself plus reject_weight, and (epoch,
+    innovation) added to its buffer, which keeps the newest
     :data:`~masterclock.domain.series.MAX_REJECTS`.
 
     Parameters
@@ -864,13 +893,20 @@ def count_reject(draft: RowDraft, innovation: mpq) -> None:
         The row as built so far; changed in place.
     innovation : mpq
         The rejected measurement less the predicted phase.
+    reject_weight : float
+        The weight of the newest reading in the reject fraction.
     """
     reject_entry = (draft.interpolated_datetime, float(innovation))
     draft.consecutive_rejects += 1
+    draft.reject_fraction = (
+        1.0 - reject_weight
+    ) * draft.reject_fraction + reject_weight
     draft.rejects = (*draft.rejects, reject_entry)[-MAX_REJECTS:]
 
 
-def phase_step(draft: RowDraft, prediction: State, z: int, scale_floor: float) -> Row:
+def phase_step(
+    draft: RowDraft, prediction: State, z: int, scale_floor: float, reject_weight: float
+) -> Row:
     """Accept a measurement after a phase step the rejects agree on (design 9.4).
 
     Parameters
@@ -883,6 +919,8 @@ def phase_step(draft: RowDraft, prediction: State, z: int, scale_floor: float) -
         The current measurement, ps.
     scale_floor : float
         The lowest the innovation scale may go, ps (see :func:`accept`).
+    reject_weight : float
+        The weight of the newest reading in the reject fraction.
 
     Returns
     -------
@@ -906,7 +944,13 @@ def phase_step(draft: RowDraft, prediction: State, z: int, scale_floor: float) -
         x=prediction.x + step_ps, y=prediction.y, d=prediction.d
     )
     draft.step_offset += step_ps
-    return accept(draft, corrected_prediction, z - corrected_prediction.x, scale_floor)
+    return accept(
+        draft,
+        corrected_prediction,
+        z - corrected_prediction.x,
+        scale_floor,
+        reject_weight,
+    )
 
 
 def frequency_step(
@@ -957,7 +1001,13 @@ def frequency_step(
         x=prediction.x + exact(a) + exact(s) * t3, y=prediction.y + s, d=prediction.d
     )
     start_segment(draft, series_params, keep_offset=True)
-    return accept(draft, corrected_prediction, z - corrected_prediction.x, scale_floor)
+    return accept(
+        draft,
+        corrected_prediction,
+        z - corrected_prediction.x,
+        scale_floor,
+        series_params.reject_fraction_weight,
+    )
 
 
 def accept_step(
@@ -1007,7 +1057,10 @@ def accept_step(
         raise FilterError(message)
     classified = classify(draft.rejects, draft.innovation_scale)
     if classified.step_kind == "phase":
-        return phase_step(draft, prediction, z, scale_floor), "phase"
+        row = phase_step(
+            draft, prediction, z, scale_floor, series_params.reject_fraction_weight
+        )
+        return row, "phase"
     if (
         classified.step_kind == "frequency"
         and draft.filter_states > 1
@@ -1091,6 +1144,7 @@ def acquire(
         If the finished row breaks a rule of :class:`Row`.
     """
     draft.consecutive_rejects = 0
+    draft.reject_fraction = 0.0
     if not in_limit:
         return dormant(draft, "R")
     buffer_entry = (draft.interpolated_datetime, float(z))
@@ -1124,7 +1178,7 @@ def anchor_of(last_row: Row | None) -> int | None:
     ...     interpolated_datetime=datetime(2025, 9, 23, 6, 0, tzinfo=UTC),
     ...     innovation=None, x_fs=None, y=None, d=None, innovation_scale=None,
     ...     step_offset=0, epochs_in_segment=0, epochs_since_accept=1,
-    ...     consecutive_rejects=0,
+    ...     consecutive_rejects=0, reject_fraction=0.0,
     ...     rejects=((datetime(2025, 9, 23, 6, 0, tzinfo=UTC), 1234577.0),),
     ...     filter_states=1, time_constant=None, scale_time_constant=50.0,
     ...     flags="RD",
@@ -1224,11 +1278,24 @@ class StepResult:
     step : {'phase', 'frequency'} or None
         The kind of step the row accepted (design 9.4); ``None`` for every
         other row.
+    dormant_reason : str or None
+        Why a series that was tracked went dormant at this row, in words
+        for the log (design 13.3): its rejects in a row, its reject
+        fraction over the limit, the gap limit passed, or a pair it uses
+        started again; ``None`` for a row that is not that.
     """
 
     row: Row
     cold_started: bool
     step: StepKind | None
+    dormant_reason: str | None
+
+
+_PAIR_RESTARTED: Final[str] = "a pair it uses started again"
+"""Why a triple went dormant when a pair whose value it uses cold-started."""
+
+_GAP_LIMIT_PASSED: Final[str] = "gap limit passed"
+"""Why a series went dormant when its held rows outran its gap limit."""
 
 
 def params_changed(series_params: SeriesParams, last_row: Row) -> bool:
@@ -1287,8 +1354,9 @@ def filter_step(
     Returns
     -------
     StepResult
-        The row, whether it cold-started, and the kind of step it accepted,
-        if any. First, a tracked series whose
+        The row, whether it cold-started, the kind of step it accepted, if
+        any, and why it went dormant, when it was tracked and did. First, a
+        tracked series whose
         time constants changed starts a warm segment (see
         :func:`start_segment`); the row then also carries the outcome.
         With no measurement, the row holds the prediction (see :func:`hold`),
@@ -1317,13 +1385,8 @@ def filter_step(
     ):
         start_segment(draft, series_params, keep_offset=True)
     if measurement is None:
-        if pair_cold_started:
-            return StepResult(row=dormant(draft, "P"), cold_started=False, step=None)
-        return StepResult(
-            row=hold(draft, prediction, "P", series_params),
-            cold_started=False,
-            step=None,
-        )
+        return _unmeasured(draft, prediction, series_params, pair_cold_started)
+    tracked = prediction is not None
     if measurement.pair_cold_started:
         draft.rejects = ()
         prediction = None
@@ -1334,11 +1397,63 @@ def filter_step(
             series_params,
             in_limit=_within_rms_limit(measurement, series_params),
         )
-        return StepResult(row=row, cold_started="D" not in row.flags, step=None)
-    row, step_kind = _gate(
+        return StepResult(
+            row=row,
+            cold_started="D" not in row.flags,
+            step=None,
+            dormant_reason=_PAIR_RESTARTED if tracked else None,
+        )
+    row, step_kind, dormant_reason = _gate(
         draft, prediction, measurement, series_params, excluded=excluded
     )
-    return StepResult(row=row, cold_started=False, step=step_kind)
+    return StepResult(
+        row=row, cold_started=False, step=step_kind, dormant_reason=dormant_reason
+    )
+
+
+def _unmeasured(
+    draft: RowDraft,
+    prediction: State | None,
+    series_params: SeriesParams,
+    pair_cold_started: bool,
+) -> StepResult:
+    """Give a series' row at an epoch with no measurement (design 9.6).
+
+    Parameters
+    ----------
+    draft : RowDraft
+        The row as built so far.
+    prediction : State or None
+        The series' prediction at the epoch, or ``None`` when it has none.
+    series_params : SeriesParams
+        The settings in force.
+    pair_cold_started : bool
+        For a triple, whether a pair it uses cold-started at the epoch.
+
+    Returns
+    -------
+    StepResult
+        For a triple one of whose pairs cold-started, a dormant row with an
+        empty buffer, which is not written; otherwise the prediction held
+        (see :func:`hold`). Never a cold start or a step. A series that had
+        a prediction and went dormant says why: a pair it uses started
+        again, or its gap limit passed.
+    """
+    tracked = prediction is not None
+    if pair_cold_started:
+        return StepResult(
+            row=dormant(draft, "P"),
+            cold_started=False,
+            step=None,
+            dormant_reason=_PAIR_RESTARTED if tracked else None,
+        )
+    row = hold(draft, prediction, "P", series_params)
+    return StepResult(
+        row=row,
+        cold_started=False,
+        step=None,
+        dormant_reason=_GAP_LIMIT_PASSED if tracked and "D" in row.flags else None,
+    )
 
 
 def _gate(
@@ -1348,7 +1463,7 @@ def _gate(
     series_params: SeriesParams,
     *,
     excluded: bool,
-) -> tuple[Row, StepKind | None]:
+) -> tuple[Row, StepKind | None, str | None]:
     """Accept, hold or reject a measurement against its prediction (design 9.6).
 
     Parameters
@@ -1366,15 +1481,17 @@ def _gate(
 
     Returns
     -------
-    tuple of (Row, {'phase', 'frequency'} or None)
-        The row, and the kind of step it accepted, if any. Accepted when
-        the measurement passes the gate and is not excluded. Held as X when
-        it is excluded inside the gate, not counted. Otherwise a counted
-        reject, which empties the buffer when a pair's reading is over its
-        rms limit: accepted after a step when the rejects show one (see
-        :func:`accept_step`); else, once the rejects reach ``n_break``, a
-        dormant row whose measurement starts the acquisition buffer, unless
-        it is over the rms limit; else held as R.
+    tuple of (Row, {'phase', 'frequency'} or None, str or None)
+        The row, the kind of step it accepted, if any, and why the series
+        went dormant, if it did. Accepted when the measurement passes the
+        gate and is not excluded. Held as X when it is excluded inside the
+        gate, not counted. Otherwise a counted reject, which empties the
+        buffer when a pair's reading is over its rms limit: accepted after
+        a step when the rejects show one (see :func:`accept_step`); else,
+        once the rejects in a row reach ``n_break`` or the reject fraction
+        passes its limit, a dormant row whose measurement starts the
+        acquisition buffer, unless it is over the rms limit; else held as
+        R. A held row past the gap limit is dormant too.
 
     Raises
     ------
@@ -1393,22 +1510,84 @@ def _gate(
     in_gate = within_gate(innovation, draft.innovation_scale)
     in_limit = _within_rms_limit(measurement, series_params)
     if in_gate and in_limit and not excluded:
-        row = accept(draft, prediction, innovation, measurement.scale_floor, nu=nu)
-        return row, None
+        row = accept(
+            draft,
+            prediction,
+            innovation,
+            measurement.scale_floor,
+            series_params.reject_fraction_weight,
+            nu=nu,
+        )
+        return row, None, None
     if in_gate and excluded:
-        return hold(draft, prediction, "X", series_params), None
-    count_reject(draft, innovation)
+        return _held(draft, prediction, "X", series_params)
+    count_reject(draft, innovation, series_params.reject_fraction_weight)
     if not in_limit:
         draft.rejects = ()
     accepted_step = accept_step(
         draft, prediction, measurement.z, measurement.scale_floor, series_params
     )
     if accepted_step is not None:
-        return accepted_step
-    if draft.consecutive_rejects >= series_params.n_break:
+        return *accepted_step, None
+    dormant_reason = _dormant_reason(draft, series_params)
+    if dormant_reason is not None:
         draft.rejects = ()
-        return acquire(draft, measurement.z, series_params, in_limit=in_limit), None
-    return hold(draft, prediction, "R", series_params), None
+        row = acquire(draft, measurement.z, series_params, in_limit=in_limit)
+        return row, None, dormant_reason
+    return _held(draft, prediction, "R", series_params)
+
+
+def _held(
+    draft: RowDraft, prediction: State, outcome: Held, series_params: SeriesParams
+) -> tuple[Row, None, str | None]:
+    """Hold a draft, saying so when the gap limit made the row dormant.
+
+    Parameters
+    ----------
+    draft : RowDraft
+        The row as built so far.
+    prediction : State
+        The series' prediction at the epoch.
+    outcome : {'R', 'X', 'P'}
+        Why the state is not updated.
+    series_params : SeriesParams
+        The settings in force.
+
+    Returns
+    -------
+    tuple of (Row, None, str or None)
+        The held row (see :func:`hold`), no step, and the gap limit as the
+        reason when the row came back dormant.
+    """
+    row = hold(draft, prediction, outcome, series_params)
+    return row, None, _GAP_LIMIT_PASSED if "D" in row.flags else None
+
+
+def _dormant_reason(draft: RowDraft, series_params: SeriesParams) -> str | None:
+    """Say why a counted reject makes the series dormant, or that it does not.
+
+    Parameters
+    ----------
+    draft : RowDraft
+        The row as built so far, the current reject counted.
+    series_params : SeriesParams
+        The settings in force.
+
+    Returns
+    -------
+    str or None
+        The rejects in a row when they reach ``n_break``; else the reject
+        fraction and its limit when the fraction is above the limit; else
+        ``None``.
+    """
+    if draft.consecutive_rejects >= series_params.n_break:
+        return f"{draft.consecutive_rejects} rejects in a row"
+    if draft.reject_fraction > series_params.reject_fraction_limit:
+        return (
+            f"reject fraction {draft.reject_fraction:.2f} over the limit"
+            f" {series_params.reject_fraction_limit:.2f}"
+        )
+    return None
 
 
 def _within_rms_limit(measurement: FilterInput, series_params: SeriesParams) -> bool:

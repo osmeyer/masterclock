@@ -597,6 +597,8 @@ GAP_EPOCHS: Final = range(100, 105)
 
 CHARACTERIZATION_CONFIG: Final = (
     "rejects_before_restart: 36\n"
+    "reject_fraction_epochs: 25.0\n"
+    "reject_fraction_limit: 0.5\n"
     "rms_limit:\n"
     "  default: 9999\n"
     "types:\n"

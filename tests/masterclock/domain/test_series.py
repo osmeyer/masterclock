@@ -9,8 +9,9 @@ disabled row has no state and every other row a whole one, with no rate or
 drift where its model has none; a row without a measurement (P), or of a
 disabled series (O), has no innovation; at most three
 rejects are held, oldest first; a time constant is held exactly when the
-model has more than one state; every float is finite and no counter below
-0; a row gives its state unless it is dormant; and every type is frozen.
+model has more than one state; every float is finite, no counter below 0
+and the reject fraction from 0 to 1; a row gives its state unless it is
+dormant; and every type is frozen.
 
 A row is built unchecked, and check_row says why it refuses one, logging
 nothing.
@@ -46,6 +47,7 @@ def make_row(**field_changes: object) -> series.Row:
         "epochs_in_segment": 812,
         "epochs_since_accept": 0,
         "consecutive_rejects": 0,
+        "reject_fraction": 0.0,
         "rejects": (),
         "filter_states": 3,
         "time_constant": 100.0,
@@ -102,6 +104,8 @@ def make_series_params(**field_changes: object) -> series.SeriesParams:
         "sigma0": 5.0,
         "gmax": 432,
         "n_break": 36,
+        "reject_fraction_weight": 0.04,
+        "reject_fraction_limit": 0.5,
         "rms_max": 80,
     }
     settings_fields.update(field_changes)
@@ -118,6 +122,8 @@ def test_settings_hold_what_they_are_given() -> None:
             sigma0=5.0,
             gmax=432,
             n_break=36,
+            reject_fraction_weight=0.04,
+            reject_fraction_limit=0.5,
             rms_max=None,
         )
     )
@@ -296,6 +302,7 @@ def test_a_time_constant_is_held_exactly_when_the_model_has_more_states(
         "y",
         "d",
         "innovation_scale",
+        "reject_fraction",
         "time_constant",
         "scale_time_constant",
     ],
@@ -304,6 +311,15 @@ def test_every_float_of_a_row_is_finite(float_field: str) -> None:
     """Refuse a float that no estimator value can be."""
     with pytest.raises(ValueError, match=rf"{float_field} .* not finite"):
         checked_row(**{float_field: float("nan")})
+
+
+@pytest.mark.parametrize("reject_fraction", [-0.1, 1.1])
+def test_the_reject_fraction_is_between_zero_and_one(reject_fraction: float) -> None:
+    """Refuse a reject fraction below 0 or above 1; both ends are taken."""
+    with pytest.raises(ValueError, match=r"reject_fraction .* 0 to 1"):
+        checked_row(reject_fraction=reject_fraction)
+    assert checked_row(reject_fraction=0.0).reject_fraction == 0.0
+    assert checked_row(reject_fraction=1.0).reject_fraction == 1.0
 
 
 def test_every_reject_value_is_finite() -> None:

@@ -122,6 +122,11 @@ _STATE_COLUMNS: Final[tuple[Column, ...]] = (
         " that buffer a measurement",
     ),
     Column("consecutive_rejects", 9, "consecutive counted rejects"),
+    Column(
+        "reject_fraction",
+        23,
+        "fraction of recent readings rejected, the newest weighing most",
+    ),
     Column("reject1_mjd", 13, "reject buffer, oldest: epoch start, MJD"),
     Column(
         "reject1_innovation",
@@ -502,6 +507,7 @@ def _state_texts(row: Row) -> list[str | None]:
         str(row.epochs_in_segment),
         str(row.epochs_since_accept),
         str(row.consecutive_rejects),
+        _float_text(row.reject_fraction),
     ]
     for reject_index in range(3):
         if reject_index < len(row.rejects):
@@ -723,6 +729,7 @@ class RowFields(BaseModel):
     epochs_in_segment: int
     epochs_since_accept: int
     consecutive_rejects: int
+    reject_fraction: float
     rejects: tuple[tuple[AwareDatetime, float], ...]
     filter_states: FilterStates
     time_constant: float | None
@@ -1027,12 +1034,13 @@ def _row(
         epochs_in_segment,
         epochs_since_accept,
         consecutive_rejects,
-    ) = state_texts[:8]
+        reject_fraction,
+    ) = state_texts[:9]
     rejects: list[Reject] = []
     for reject_index in range(3):
         reject_mjd_text, reject_innovation_text = (
-            state_texts[8 + 2 * reject_index],
             state_texts[9 + 2 * reject_index],
+            state_texts[10 + 2 * reject_index],
         )
         if reject_mjd_text is not None or reject_innovation_text is not None:
             rejects.append(
@@ -1041,7 +1049,7 @@ def _row(
                     _float_value(_given(reject_innovation_text)),
                 )
             )
-    filter_states, time_constant, scale_time_constant, flags = state_texts[14:]
+    filter_states, time_constant, scale_time_constant, flags = state_texts[15:]
     return RowFields.model_validate(
         {
             "interpolated_datetime": epoch_start,
@@ -1054,6 +1062,7 @@ def _row(
             "epochs_in_segment": int(_given(epochs_in_segment)),
             "epochs_since_accept": int(_given(epochs_since_accept)),
             "consecutive_rejects": int(_given(consecutive_rejects)),
+            "reject_fraction": _float_value(_given(reject_fraction)),
             "rejects": tuple(rejects),
             "filter_states": int(_given(filter_states)),
             "time_constant": _optional_float(time_constant),

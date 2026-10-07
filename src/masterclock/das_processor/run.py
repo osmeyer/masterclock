@@ -1999,14 +1999,20 @@ def _log_changes(series_label: str, step_result: StepResult, last_row: Row) -> N
     series_label : str
         The series' name.
     step_result : StepResult
-        Its row at the epoch, and the step it accepted, if any.
+        Its row at the epoch, the step it accepted, if any, and why it went
+        dormant, if it did.
     last_row : Row
         Its last row, which held a state.
     """
     row = step_result.row
     epoch_start = row.interpolated_datetime
     if "D" in row.flags:
-        _log.info("%s dormant at %s", series_label, epoch_start)
+        _log.info(
+            "%s dormant at %s: %s",
+            series_label,
+            epoch_start,
+            step_result.dormant_reason,
+        )
         return
     if (last_row.time_constant, last_row.scale_time_constant) != (
         row.time_constant,

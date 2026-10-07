@@ -8,8 +8,9 @@ from a given MJD. A clock's entries may also give its location, the number
 of the building it is in, which a type never gives: a clock that moves gets
 an entry with the new building from the MJD of the move. An entry may also
 disable a clock from its date, or enable it again: while a clock is
-disabled, no series tracks it. The file also gives
-how many counted rejects make a series dormant, the RMS limit of the pairs'
+disabled, no series tracks it. The file also gives how many counted rejects
+in a row make a series dormant, the averaging length and the limit of the
+reject fraction that makes one dormant too, the RMS limit of the pairs'
 gate, and the clocks to ignore: measured, but of no use.
 
 The file is read once, at the start of a run, with a safe YAML loader that
@@ -456,8 +457,14 @@ class ClockConfig(BaseModel):
     Parameters
     ----------
     rejects_before_restart : int
-        N_break: the counted rejects that make a series dormant, at least 3
-        and at most every clock's gap limit.
+        N_break: the counted rejects in a row that make a series dormant,
+        at least 3 and at most every clock's gap limit.
+    reject_fraction_epochs : float
+        The averaging length of the reject fraction, readings, at least 1:
+        the newest reading weighs 1 over this (design 9.4).
+    reject_fraction_limit : float
+        The reject fraction above which a series goes dormant, between 0
+        and 1, neither included.
     rms_limit : RmsLimits
         The RMS limits of the pairs' gate; held as ``rms_limits``, so the name
         is free for :meth:`rms_limit`.
@@ -479,12 +486,15 @@ class ClockConfig(BaseModel):
         reference not of type mc; an entry changing the number of states;
         a time constant missing or
         given where the number of states says otherwise; a value out of its
-        range; or N_break above a gap limit at any date.
+        range, the reject fraction's length below 1 or its limit not between
+        0 and 1 among them; or N_break above a gap limit at any date.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     rejects_before_restart: Annotated[int, Field(ge=3)]
+    reject_fraction_epochs: _TimeConstant
+    reject_fraction_limit: Annotated[float, Field(gt=0, lt=1, allow_inf_nan=False)]
     rms_limits: RmsLimits = Field(alias="rms_limit")
     types: dict[str, TypeDefault]
     clocks: dict[str, tuple[Entry, ...]]
@@ -902,8 +912,9 @@ class ClockConfig(BaseModel):
         Returns
         -------
         SeriesParams
-            The entry's values, N_break and, for a pair, its RMS limit and
-            whether either of its clocks is disabled.
+            The entry's values, N_break, the reject fraction's weight, 1
+            over its averaging length, and limit, and, for a pair, its RMS
+            limit and whether either of its clocks is disabled.
         """
         is_pair = len(series_key) == _PAIR
         rms_max = self.rms_limit((series_key[0], series_key[1])) if is_pair else None
@@ -914,6 +925,8 @@ class ClockConfig(BaseModel):
             sigma0=clock_entry.initial_innovation_scale,
             gmax=clock_entry.gap_limit,
             n_break=self.rejects_before_restart,
+            reject_fraction_weight=1.0 / self.reject_fraction_epochs,
+            reject_fraction_limit=self.reject_fraction_limit,
             rms_max=rms_max,
             disabled=is_pair and not disabled_clocks.isdisjoint(series_key),
         )

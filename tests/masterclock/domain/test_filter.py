@@ -15,9 +15,10 @@ is kept exact or each row stores it in whole femtoseconds.
 The row lifecycle: a draft has a row's fields, in a row's order; a row
 starts from the last row moved on one epoch, or dormant for a new series or
 one that starts again; a slip-corrected measurement marks its row S; an
-accepted row holds the update, clears the counters and the buffer, and
-moves the innovation scale by the innovation before the update, never below
-its floor, and a draft with no innovation scale is refused; a held row (P, X
+accepted row holds the update, clears the counters and the buffer, lowers
+the reject fraction by its weight, and moves the innovation scale by the
+innovation before the update, never below its floor, and a draft with no
+innovation scale is refused; a held row (P, X
 or R) stores the prediction and keeps the scale, the counters and the
 buffer, one more epoch since an accept; a held row past the gap limit, or
 with no prediction, is dormant, with no state, and is not written when it
@@ -50,8 +51,10 @@ model and time constants; with none it writes no row; it never cold-starts.
 Acquisition: a series with no valid state buffers its measurements and
 cold-starts from the third of three from consecutive epochs whose second
 difference is within 5 sqrt(6) sigma0; a missing epoch empties the buffer;
-counted rejects reaching N_break make a series dormant; and the last
-buffered measurement is what a dormant pair is decycled against.
+counted rejects reaching N_break make a series dormant, as does the reject
+fraction, raised by each counted reject, passing its limit, and a dormant
+row carries a fraction of 0; and the last buffered measurement is what a
+dormant pair is decycled against.
 
 The filter step: a configuration change starts a warm segment before the
 measurement is handled, and shares the row with its outcome, though not for
@@ -60,8 +63,8 @@ pair's, with an rms, or a triple's, with sigma_dd and no rms test, and that
 value is the floor of the innovation scale; a prediction for a series with
 no scale is refused; then every path of the decision flow gives its row, a
 component cold start makes a triple dormant, with or without a measurement
-at the epoch, and the result says whether the row cold-started and which
-kind of step, if any, it accepted.
+at the epoch, and the result says whether the row cold-started, which kind
+of step, if any, it accepted, and why a tracked series went dormant.
 
 The classification and acquisition limits hold exactly at their values, the
 slope is fitted as the design writes it, gains exist for M = 1, the drift is
@@ -126,6 +129,7 @@ def last_row(**field_changes: object) -> Row:
         "epochs_in_segment": 811,
         "epochs_since_accept": 0,
         "consecutive_rejects": 0,
+        "reject_fraction": 0.0,
         "rejects": (),
         "filter_states": 3,
         "time_constant": 100.0,
@@ -476,6 +480,8 @@ def make_series_params(**field_changes: object) -> SeriesParams:
         "sigma0": 5.0,
         "gmax": 432,
         "n_break": 36,
+        "reject_fraction_weight": 0.04,
+        "reject_fraction_limit": 0.5,
         "rms_max": 80,
     }
     settings_fields.update(field_changes)
@@ -539,6 +545,7 @@ def test_a_new_series_starts_dormant() -> None:
         epochs_in_segment=0,
         epochs_since_accept=0,
         consecutive_rejects=0,
+        reject_fraction=0.0,
         rejects=(),
         filter_states=2,
         time_constant=30.0,
@@ -595,7 +602,7 @@ def test_a_slip_correction_marks_the_row() -> None:
     assert draft.flags == "S"
     prediction = estimator.predict(last_row(), NO_STEERING_INPUT)
     assert prediction is not None
-    row = estimator.accept(draft, prediction, 1_234_577 - prediction.x, 3)
+    row = estimator.accept(draft, prediction, 1_234_577 - prediction.x, 3, 0.04)
     assert row.flags == "AS"
 
 
@@ -609,6 +616,7 @@ def test_the_worked_epoch_gives_the_rows_of_the_measurement_file() -> None:
         prediction,
         1_234_577 - prediction.x,
         3,
+        0.04,
     )
     assert accepted_row == last_row(
         interpolated_datetime=NEXT_EPOCH_START,
@@ -650,7 +658,7 @@ def test_an_accept_clears_the_counters_and_the_buffer() -> None:
     )
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
-    row = estimator.accept(moved_on(previous_row), prediction, mpq(1), 3)
+    row = estimator.accept(moved_on(previous_row), prediction, mpq(1), 3, 0.04)
     assert (row.consecutive_rejects, row.rejects, row.epochs_since_accept) == (0, (), 0)
     assert row.flags == "A"
 
@@ -672,7 +680,7 @@ def test_an_accept_moves_the_innovation_scale_but_not_below_its_floor(
     previous_row = last_row(innovation_scale=innovation_scale)
     prediction = State(x=mpq(1_234_574), y=0.0123)
     row = estimator.accept(
-        moved_on(previous_row), prediction, mpq(innovation), scale_floor
+        moved_on(previous_row), prediction, mpq(innovation), scale_floor, 0.04
     )
     assert row.innovation_scale == expected_scale
 
@@ -681,7 +689,7 @@ def test_an_accept_takes_the_innovation_before_the_update() -> None:
     """Write the innovation given, and move the scale by it, not the residual."""
     previous_row = last_row(innovation_scale=4.0)
     prediction = State(x=mpq(1_000), y=0.0)
-    row = estimator.accept(moved_on(previous_row), prediction, mpq(21, 2), 1)
+    row = estimator.accept(moved_on(previous_row), prediction, mpq(21, 2), 1, 0.04)
     assert row.innovation == 10.5
     assert row.innovation_scale == math.sqrt(0.98 * 16 + 0.02 * 10.5**2)
 
@@ -692,8 +700,8 @@ def test_an_innovation_given_as_a_float_gives_the_same_row() -> None:
     assert prediction is not None
     innovation = 1_234_577 - prediction.x
     assert estimator.accept(
-        moved_on(last_row()), prediction, innovation, 3, nu=float(innovation)
-    ) == estimator.accept(moved_on(last_row()), prediction, innovation, 3)
+        moved_on(last_row()), prediction, innovation, 3, 0.04, nu=float(innovation)
+    ) == estimator.accept(moved_on(last_row()), prediction, innovation, 3, 0.04)
     assert estimator.update(
         prediction, innovation, 3, 100.0, nu=float(innovation)
     ) == estimator.update(prediction, innovation, 3, 100.0)
@@ -703,7 +711,7 @@ def test_an_accept_needs_a_series_with_an_innovation_scale() -> None:
     """Raise FilterError for an accept on a draft that has no scale."""
     draft = moved_on(last_row(), innovation_scale=None)
     with pytest.raises(FilterError, match="no innovation scale"):
-        estimator.accept(draft, State(x=mpq(0), y=0.0), mpq(0), 3)
+        estimator.accept(draft, State(x=mpq(0), y=0.0), mpq(0), 3, 0.04)
 
 
 @pytest.mark.parametrize("outcome", ["P", "X", "R"])
@@ -781,7 +789,11 @@ def test_a_gap_of_the_gap_limit_is_still_predicted(gmax: int) -> None:
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
     row = estimator.accept(
-        moved_on(previous_row), prediction, round_even(prediction.x) - prediction.x, 3
+        moved_on(previous_row),
+        prediction,
+        round_even(prediction.x) - prediction.x,
+        3,
+        0.04,
     )
     assert (row.flags, row.epochs_since_accept) == ("A", 0)
 
@@ -845,10 +857,10 @@ def test_a_dormant_row_keeps_its_offset(
     previous_row = last_row(
         step_offset=-37, rejects=((EPOCH_START, 12.0),), consecutive_rejects=1
     )
-    row = estimator.dormant(moved_on(previous_row), outcome)
+    row = estimator.dormant(moved_on(previous_row, reject_fraction=0.3), outcome)
     assert row.flags == f"{outcome}D"
     assert (row.x_fs, row.y, row.d, row.innovation_scale) == (None,) * 4
-    assert (row.step_offset, row.rejects) == (-37, ())
+    assert (row.step_offset, row.rejects, row.reject_fraction) == (-37, (), 0.0)
 
 
 def test_a_dormant_row_can_keep_its_acquisition_buffer() -> None:
@@ -893,6 +905,7 @@ def test_a_cold_start_begins_a_segment_from_the_measurement(
         epochs_in_segment=0,
         epochs_since_accept=0,
         consecutive_rejects=0,
+        reject_fraction=0.0,
         rejects=(),
         filter_states=filter_states,
         time_constant=M,
@@ -926,7 +939,7 @@ def test_a_frequency_step_starts_a_warm_segment_and_accepts() -> None:
     assert prediction is not None
     draft = moved_on(previous_row)
     estimator.start_segment(draft, make_series_params(), keep_offset=True)
-    row = estimator.accept(draft, prediction, mpq(2), 3)
+    row = estimator.accept(draft, prediction, mpq(2), 3, 0.04)
     assert (row.flags, row.step_offset) == ("ANU", 25)
     assert row.x_fs == to_fs(estimator.update(prediction, mpq(2), 3, 100.0).x)
 
@@ -937,7 +950,7 @@ def test_a_phase_step_keeps_the_segment() -> None:
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
     row = estimator.accept(
-        moved_on(previous_row, step_offset=525), prediction, mpq(2), 3
+        moved_on(previous_row, step_offset=525), prediction, mpq(2), 3, 0.04
     )
     assert (row.flags, row.step_offset) == ("A", 525)
 
@@ -964,7 +977,7 @@ def test_a_row_is_unsettled_until_five_time_constants(
     prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
     assert prediction is not None
     draft = moved_on(previous_row, epochs_in_segment=epochs_in_segment)
-    assert estimator.accept(draft, prediction, mpq(0), 3).flags == flags
+    assert estimator.accept(draft, prediction, mpq(0), 3, 0.04).flags == flags
 
 
 def test_a_dormant_row_is_never_unsettled() -> None:
@@ -983,7 +996,7 @@ def test_flags_are_written_in_their_order() -> None:
     )
     estimator.start_segment(draft, make_series_params(), keep_offset=True)
     assert draft.flags == "SN"
-    assert estimator.accept(draft, prediction, mpq(0), 3).flags == "ASNU"
+    assert estimator.accept(draft, prediction, mpq(0), 3, 0.04).flags == "ASNU"
 
 
 def test_finish_refuses_a_row_that_breaks_a_rule() -> None:
@@ -1010,7 +1023,7 @@ def test_a_one_state_series_passes_its_measurements_through() -> None:
             row = estimator.hold(draft, prediction, "P", series_params)
             assert row.x_fs == previous_row.x_fs
         else:
-            row = estimator.accept(draft, prediction, z - prediction.x, 3)
+            row = estimator.accept(draft, prediction, z - prediction.x, 3, 0.04)
             assert row.x_fs == z * 1000
         assert (row.y, row.d) == (0.0, 0.0)
         assert "U" not in row.flags
@@ -1143,9 +1156,10 @@ def test_a_counted_reject_enters_the_buffer() -> None:
         epochs_since_accept=3,
         flags="R",
     )
-    draft = moved_on(previous_row)
-    estimator.count_reject(draft, mpq(81, 2))
+    draft = moved_on(previous_row, reject_fraction=0.5)
+    estimator.count_reject(draft, mpq(81, 2), 0.04)
     assert draft.consecutive_rejects == 4
+    assert draft.reject_fraction == 0.96 * 0.5 + 0.04
     assert draft.rejects == (
         *reject_buffer(10.0, 20.0, 31.0)[1:],
         (EPOCH_START + EPOCH_LENGTH, 40.5),
@@ -1235,7 +1249,9 @@ def test_a_phase_step_rounds_the_mean_half_to_even() -> None:
     draft = moved_on(
         previous_row, rejects=reject_buffer(100.5, 100.5, 100.5), consecutive_rejects=3
     )
-    row = estimator.phase_step(draft, prediction, round_even(prediction.x) + 100, 3)
+    row = estimator.phase_step(
+        draft, prediction, round_even(prediction.x) + 100, 3, 0.04
+    )
     assert row.step_offset == 100
     assert row.innovation == float(round_even(prediction.x) - prediction.x)
 
@@ -1995,7 +2011,7 @@ def test_a_phase_step_keeps_the_drift() -> None:
         previous_row, rejects=reject_buffer(100.0, 100.0, 100.0), consecutive_rejects=3
     )
     z = round_even(prediction.x) + 100
-    row = estimator.phase_step(draft, prediction, z, 3)
+    row = estimator.phase_step(draft, prediction, z, 3, 0.04)
     corrected_prediction = State(x=prediction.x + 100, y=prediction.y, d=prediction.d)
     expected_state = estimator.update(
         corrected_prediction, z - corrected_prediction.x, 3, 100.0
@@ -2064,7 +2080,7 @@ def test_every_filter_error_is_logged_as_raised(
     no_scale_draft = moved_on(last_row(), innovation_scale=None)
     prediction = State(x=mpq(0), y=0.0)
     failing_calls: list[Callable[[], object]] = [
-        lambda: estimator.accept(no_scale_draft, prediction, mpq(0), 3),
+        lambda: estimator.accept(no_scale_draft, prediction, mpq(0), 3, 0.04),
         lambda: estimator.accept_step(
             dataclasses.replace(
                 no_scale_draft,
@@ -2129,6 +2145,7 @@ def test_a_disabled_series_with_a_reading_writes_an_o_row() -> None:
             epochs_in_segment=0,
             epochs_since_accept=0,
             consecutive_rejects=0,
+            reject_fraction=0.0,
             rejects=(),
             filter_states=3,
             time_constant=100.0,
@@ -2137,6 +2154,7 @@ def test_a_disabled_series_with_a_reading_writes_an_o_row() -> None:
         ),
         cold_started=False,
         step=None,
+        dormant_reason=None,
     )
     assert estimator.writes_row(step_result.row)
 
@@ -2186,3 +2204,155 @@ def test_a_row_has_no_segment_number() -> None:
     assert "segment" not in {
         draft_field.name for draft_field in dataclasses.fields(estimator.RowDraft)
     }
+
+
+# ------------------------------------------------------------ reject fraction
+
+
+def test_an_accept_lowers_the_reject_fraction_by_its_weight() -> None:
+    """Multiply the fraction by 1 - w on an accept, giving 0 below the floor (9.3)."""
+    previous_row = last_row(reject_fraction=0.5)
+    prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
+    assert prediction is not None
+    row = estimator.accept(moved_on(previous_row), prediction, mpq(1), 3, 0.04)
+    assert row.reject_fraction == 0.96 * 0.5
+    tiny_row = estimator.accept(
+        moved_on(last_row(reject_fraction=1e-9)), prediction, mpq(1), 3, 0.04
+    )
+    assert tiny_row.reject_fraction == 0.0
+    kept_row = estimator.accept(
+        moved_on(last_row(reject_fraction=1.1e-9)), prediction, mpq(1), 3, 0.04
+    )
+    assert kept_row.reject_fraction == 0.96 * 1.1e-9
+
+
+def test_a_counted_reject_raises_the_reject_fraction_toward_one() -> None:
+    """Give (1 - w) f + w on a counted reject, through the filter step (9.3)."""
+    previous_row = last_row(reject_fraction=0.3)
+    row = filter_step_after(previous_row, pair_input(WORKED_Z + 100)).row
+    assert (row.flags, row.reject_fraction) == ("R", 0.96 * 0.3 + 0.04)
+
+
+@pytest.mark.parametrize("outcome", ["P", "X"])
+def test_a_predicted_or_excluded_row_keeps_the_reject_fraction(outcome: str) -> None:
+    """Leave the fraction as it was when there is no reading, or it is excluded."""
+    previous_row = last_row(reject_fraction=0.5)
+    step_result = filter_step_after(
+        previous_row,
+        None if outcome == "P" else pair_input(WORKED_Z),
+        excluded=outcome == "X",
+    )
+    assert (step_result.row.flags, step_result.row.reject_fraction) == (outcome, 0.5)
+
+
+def test_a_step_row_counts_its_reject_and_then_its_accept() -> None:
+    """Raise the fraction for the reject the step was found on, then lower it."""
+    previous_row = last_row(
+        flags="R",
+        consecutive_rejects=2,
+        rejects=buffer_ending_at_start(150.0, 150.0),
+        innovation=150.0,
+        epochs_since_accept=2,
+        reject_fraction=0.5,
+    )
+    prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
+    assert prediction is not None
+    step_result = filter_step_after(
+        previous_row, pair_input(round_even(prediction.x) + 150)
+    )
+    assert step_result.step == "phase"
+    assert step_result.row.reject_fraction == 0.96 * (0.96 * 0.5 + 0.04)
+
+
+def test_a_cold_start_and_a_dormant_row_carry_a_reject_fraction_of_zero() -> None:
+    """Start the fraction at 0, and carry 0 while dormant (8.6, 13.3)."""
+    previous_row = dormant_row(1_000.0, 51_000.0)
+    cold_row = estimator.acquire(moved_on(previous_row), 101_000, make_series_params())
+    assert (cold_row.flags, cold_row.reject_fraction) == ("ANU", 0.0)
+    dormant_result = filter_step_after(
+        last_row(reject_fraction=0.7),
+        pair_input(WORKED_Z - 500),
+        make_series_params(reject_fraction_limit=0.6),
+    )
+    assert (dormant_result.row.flags, dormant_result.row.reject_fraction) == ("RD", 0.0)
+
+
+def test_a_reject_fraction_over_its_limit_makes_the_series_dormant() -> None:
+    """Go dormant on the reject that takes the fraction over the limit (9.4)."""
+    series_params = make_series_params(reject_fraction_weight=0.2, n_break=36)
+    previous_row = last_row(reject_fraction=0.4)
+    step_result = filter_step_after(
+        previous_row, pair_input(WORKED_Z + 100), series_params
+    )
+    assert (step_result.row.flags, step_result.row.consecutive_rejects) == ("RD", 0)
+    assert step_result.row.rejects == ((NEXT_EPOCH_START, float(WORKED_Z + 100)),)
+    assert step_result.dormant_reason == "reject fraction 0.52 over the limit 0.50"
+    at_limit = filter_step_after(
+        last_row(reject_fraction=0.375), pair_input(WORKED_Z + 100), series_params
+    )
+    assert (at_limit.row.flags, at_limit.row.reject_fraction) == ("R", 0.5)
+    assert at_limit.dormant_reason is None
+
+
+def test_four_rejects_in_five_make_the_series_dormant() -> None:
+    """Catch a series rejected four readings in five, which N_break never sees.
+
+    The four rejects are -80, +40, -40 and +80 ns off, as a reading wrapped
+    at 200 ns comes out against a prediction three fifths of a period per
+    epoch wrong, so no three of them agree or lie on a line.
+    """
+    series_params = make_series_params(reject_fraction_weight=0.04, n_break=36)
+    previous_row = last_row(y=0.0)
+    prediction = estimator.predict(previous_row, NO_STEERING_INPUT)
+    assert prediction is not None
+    offsets_ps = (-80_000, 40_000, -40_000, 80_000, 0)
+    flags: list[str] = []
+    while "D" not in previous_row.flags and len(flags) < 40:
+        z = int(prediction.x) + offsets_ps[len(flags) % 5]
+        previous_row = run_epoch(previous_row, z, series_params)
+        flags.append(previous_row.flags)
+    assert flags[-1] == "RD"
+    assert 15 <= len(flags) <= 25
+    assert not any("D" in row_flags for row_flags in flags[:-1])
+
+
+def test_a_tracked_series_says_why_it_went_dormant() -> None:
+    """Name N_break, the gap limit, or a pair's restart as the reason (13.3)."""
+    rejecting_row = last_row(
+        flags="R",
+        consecutive_rejects=4,
+        rejects=buffer_ending_at_start(100.0, -100.0, 300.0),
+        innovation=300.0,
+        epochs_since_accept=4,
+    )
+    at_n_break = filter_step_after(
+        rejecting_row, pair_input(WORKED_Z - 500), make_series_params(n_break=5)
+    )
+    assert at_n_break.dormant_reason == "5 rejects in a row"
+    past_gap = filter_step_after(
+        last_row(epochs_since_accept=3), None, make_series_params(gmax=3, n_break=3)
+    )
+    assert (past_gap.row.flags, past_gap.dormant_reason) == ("PD", "gap limit passed")
+    past_gap_rejected = filter_step_after(
+        last_row(epochs_since_accept=3),
+        pair_input(WORKED_Z + 100),
+        make_series_params(gmax=3, n_break=3),
+    )
+    assert past_gap_rejected.dormant_reason == "gap limit passed"
+    restarted = filter_step_after(
+        last_row(),
+        triple_input(WORKED_Z, pair_cold_started=True),
+        make_series_params(rms_max=None),
+    )
+    assert restarted.dormant_reason == "a pair it uses started again"
+    restarted_without_a_value = estimator.filter_step(
+        NEXT_EPOCH_START,
+        make_series_params(rms_max=None),
+        last_row(),
+        estimator.predict(last_row(), NO_STEERING_INPUT),
+        None,
+        pair_cold_started=True,
+    )
+    assert restarted_without_a_value.dormant_reason == "a pair it uses started again"
+    assert filter_step_after(last_row(), pair_input(WORKED_Z)).dormant_reason is None
+    assert filter_step_after(None, pair_input(WORKED_Z)).dormant_reason is None

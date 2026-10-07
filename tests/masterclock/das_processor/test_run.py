@@ -126,6 +126,8 @@ NO_SERIES: Final = ExistingSeries(pairs=frozenset(), triples=frozenset())
 
 CLOCK_CONFIG_YAML: Final = (
     "rejects_before_restart: 6\n"
+    "reject_fraction_epochs: 25.0\n"
+    "reject_fraction_limit: 0.5\n"
     "rms_limit: {default: 50, pairs: {mc2.ox23: 80}}\n"
     "types:\n"
     "  maser: {filter_states: 3, time_constant: 100.0, scale_time_constant: 50.0,"
@@ -414,6 +416,7 @@ def last_row(**changed_fields: object) -> Row:
         "epochs_in_segment": 900,
         "epochs_since_accept": 0,
         "consecutive_rejects": 0,
+        "reject_fraction": 0.0,
         "rejects": (),
         "filter_states": 1,
         "time_constant": None,
@@ -831,6 +834,8 @@ def test_a_link_restart_without_the_clock_pair_makes_the_triple_dormant() -> Non
                 sigma0=5.0,
                 gmax=432,
                 n_break=36,
+                reject_fraction_weight=0.04,
+                reject_fraction_limit=0.5,
                 rms_max=None,
             )
         },
@@ -1477,7 +1482,23 @@ def test_a_cold_start_and_dormancy_are_logged_at_info(
     info_messages = messages_at(
         logged_events(caplog, epoch, rejecting_last_rows), "INFO"
     )
-    assert f"das_a.mc1.mc1 dormant at {E}" in info_messages
+    assert f"das_a.mc1.mc1 dormant at {E}: gap limit passed" in info_messages
+    nearly_over_last_rows = {
+        **REFERENCE_LAST_ROWS,
+        ("mc1", "mc1"): last_row(x_fs=1_000_000, reject_fraction=0.49),
+    }
+    epoch = epoch_of(
+        [das_measurement_of("mc1", "mc1", 1500, 10), *REFERENCE_MEASUREMENTS[1:]],
+        nearly_over_last_rows,
+        tmp_path / "third",
+    )
+    info_messages = messages_at(
+        logged_events(caplog, epoch, nearly_over_last_rows), "INFO"
+    )
+    assert (
+        f"das_a.mc1.mc1 dormant at {E}: reject fraction 0.51 over the limit 0.50"
+        in info_messages
+    )
 
 
 def test_a_configuration_change_is_logged_at_info(
@@ -2547,7 +2568,9 @@ def test_a_series_that_stops_is_logged_once_at_info(
         f"das_a.mc1.mc1 stops at {E}: no row until it is measured again"
         in info_messages
     )
-    assert f"das_a.mc1.mc1 dormant at {E}" not in info_messages
+    assert not any(
+        message.startswith(f"das_a.mc1.mc1 dormant at {E}") for message in info_messages
+    )
     assert not any(
         message.startswith("das_a.mc1.mc1:")
         for message in messages_at(log_entries, "DEBUG")

@@ -1,7 +1,7 @@
 """Tests for src/masterclock/das_processor/files.py.
 
 The rules covered: the column table gives the measurement file a width of
-466 and 30 header lines and the double-difference file 444 and 28, and each
+491 and 31 header lines and the double-difference file 469 and 29, and each
 kind its header's size; every header line is only its text and starts with
 '#', in the design's order with the warning second, the columns numbered
 from 1, and every file of a kind gets the same header; rows are
@@ -151,6 +151,7 @@ def worked_row(**changed_fields: object) -> Row:
         "epochs_in_segment": 812,
         "epochs_since_accept": 0,
         "consecutive_rejects": 0,
+        "reject_fraction": 0.0,
         "rejects": (),
         "filter_states": 3,
         "time_constant": 100.0,
@@ -168,15 +169,17 @@ MEAS_EXAMPLE: Final = (
     "  60941.251588,  34579,    3,            6,          1234577,"
     "          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12,"
     " +3.0000000000000000e+00,                0,       812,         0,"
-    "         0,             -,                       -,             -,"
-    "                       -,             -,                       -, 3,"
+    "         0, +0.0000000000000000e+00,             -,                       -,"
+    "             -,                       -,             -,                       -,"
+    " 3,"
     " +1.0000000000000000e+02, +5.0000000000000000e+01,        A",
     "2025-09-23 06:10:00+00:00,  60941.256944,                                -,"
     "             -,      -,    -,            -,                -,"
     "          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12,"
     " +3.0000000000000000e+00,                0,       813,         1,"
-    "         0,             -,                       -,             -,"
-    "                       -,             -,                       -, 3,"
+    "         0, +0.0000000000000000e+00,             -,                       -,"
+    "             -,                       -,             -,                       -,"
+    " 3,"
     " +1.0000000000000000e+02, +5.0000000000000000e+01,        P",
 )
 """The two example rows of design 5.4."""
@@ -185,15 +188,15 @@ DDIFF_EXAMPLE: Final = (
     "2025-09-23 06:00:00+00:00,  60941.250000,          6666667,"
     " -2.9999999981373549e-01, +3.3166247903553998e+00, 111,          6666667.291,"
     " +2.0499852230130653e-02, -8.2093687746445554e-13, +3.4650829715892466e+00,"
-    "                0,      3107,         0,         0,             -,"
-    "                       -,             -,                       -,"
+    "                0,      3107,         0,         0, +0.0000000000000000e+00,"
+    "             -,                       -,             -,                       -,"
     "             -,                       -, 3, +1.0000000000000000e+02,"
     " +5.0000000000000000e+01,        A",
     "2025-09-23 06:00:00+00:00,  60941.250000,          1234577,"
     " +2.6200000000000001e+00, +3.0000000000000000e+00, 111,          1234574.457,"
     " +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,"
-    "                0,       812,         0,         0,             -,"
-    "                       -,             -,                       -,"
+    "                0,       812,         0,         0, +0.0000000000000000e+00,"
+    "             -,                       -,             -,                       -,"
     "             -,                       -, 3, +1.0000000000000000e+02,"
     " +5.0000000000000000e+01,        A",
 )
@@ -204,9 +207,9 @@ DDIFF_EXAMPLE: Final = (
 
 
 def test_the_column_table_gives_the_widths_and_header_lengths() -> None:
-    """Work out W = 466 and 444, and 30 and 28 header lines, from the table."""
-    assert (files.MEAS_WIDTH, files.MEAS_HEADER_LINES) == (466, 30)
-    assert (files.DDIFF_WIDTH, files.DDIFF_HEADER_LINES) == (444, 28)
+    """Work out W = 491 and 469, and 31 and 29 header lines, from the table."""
+    assert (files.MEAS_WIDTH, files.MEAS_HEADER_LINES) == (491, 31)
+    assert (files.DDIFF_WIDTH, files.DDIFF_HEADER_LINES) == (469, 29)
     assert {
         file_kind: len(files.header(file_kind)) for file_kind in ("meas", "ddiff")
     } == files.HEADER_SIZES
@@ -253,8 +256,8 @@ def test_the_measurement_header_is_the_design_s() -> None:
         "# Columns: right-justified, fixed width, separated by ', '.",
     ]
     assert header_lines[4] == "#   1  interpolated_datetime   epoch start E, UTC"
-    assert header_lines[29] == (
-        "#  26  flags                   A accepted, R rejected, X excluded,"
+    assert header_lines[30] == (
+        "#  27  flags                   A accepted, R rejected, X excluded,"
         " P predicted, O disabled, D dormant, S slip corrected, N new segment,"
         " U unsettled"
     )
@@ -398,7 +401,7 @@ def test_a_dormant_row_writes_its_state_as_empty_fields() -> None:
         "-".rjust(23),
         "-".rjust(23),
     ]
-    assert row_fields[16:18] == [" 60941.243056", "+1.2345700000000000e+06"]
+    assert row_fields[17:19] == [" 60941.243056", "+1.2345700000000000e+06"]
     assert files.parse_meas_row(row_line).row == dormant_row
 
 
@@ -478,6 +481,8 @@ def test_a_cycle_count_too_wide_is_refused() -> None:
         (",       812,", ",       81x,"),
         ("  34579,", " 234579,"),
         (",                0,       812,", ",                -,       812,"),
+        ("+0.0000000000000000e+00,", "+1.5000000000000000e+00,"),
+        ("+0.0000000000000000e+00,", "                      -,"),
     ],
 )
 def test_a_line_not_exactly_as_written_is_refused(
@@ -686,6 +691,9 @@ def valid_rows(draw: st.DrawFn, *, has_measurement: bool, for_pair: bool) -> Row
         epochs_in_segment=draw(st.integers(0, 10**8)),
         epochs_since_accept=draw(st.integers(0, 10**8)),
         consecutive_rejects=draw(st.integers(0, 10**8)),
+        reject_fraction=0.0
+        if is_dormant
+        else draw(st.one_of(st.just(0.0), st.floats(1e-9, 1.0))),
         rejects=rejects,
         filter_states=filter_states,
         time_constant=draw(st.floats(1, 1e6)) if filter_states > 1 else None,
@@ -707,6 +715,7 @@ def disabled_row(epoch_start: datetime, filter_states: Literal[1, 2, 3]) -> Row:
         epochs_in_segment=0,
         epochs_since_accept=0,
         consecutive_rejects=0,
+        reject_fraction=0.0,
         rejects=(),
         filter_states=filter_states,
         time_constant=100.0 if filter_states > 1 else None,
@@ -2283,7 +2292,7 @@ def with_field_replaced(row_line: str, field_index: int, field_text: str) -> str
 @pytest.mark.parametrize(
     ("file_kind", "line_change", "parse_reason"),
     [
-        ("meas", lambda row_line: row_line.rsplit(", ", 1)[0], "25 fields, not 26"),
+        ("meas", lambda row_line: row_line.rsplit(", ", 1)[0], "26 fields, not 27"),
         (
             "meas",
             lambda row_line: with_field_replaced(row_line, 9, "nan"),
@@ -2315,7 +2324,7 @@ def with_field_replaced(row_line: str, field_index: int, field_text: str) -> str
         ),
         (
             "meas",
-            lambda row_line: with_field_replaced(row_line, 16, "60941.243056"),
+            lambda row_line: with_field_replaced(row_line, 17, "60941.243056"),
             "never empty",
         ),
     ],
@@ -2544,6 +2553,8 @@ def test_row_fields_read_back_give_the_row() -> None:
     ("row_field", "wrong_value"),
     [
         ("epochs_in_segment", -1),
+        ("reject_fraction", 1.5),
+        ("reject_fraction", -0.1),
         ("epochs_since_accept", -1),
         ("consecutive_rejects", -1),
         ("filter_states", 4),

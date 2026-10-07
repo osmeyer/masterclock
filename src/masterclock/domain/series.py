@@ -106,7 +106,14 @@ class SeriesParams:
     gmax : int
         Gap limit: how many held rows a prediction may run.
     n_break : int
-        Counted rejects that make the series dormant, from 3 to ``gmax``.
+        Counted rejects in a row that make the series dormant, from 3 to
+        ``gmax``.
+    reject_fraction_weight : float
+        The weight w of the newest reading in the reject fraction, from 0
+        to 1: one over the averaging length.
+    reject_fraction_limit : float
+        The reject fraction above which the series goes dormant, between 0
+        and 1.
     rms_max : int or None
         RMS limit of the gate, ps, above zero, for a pair; ``None`` for a
         triple, whose gate has no RMS test.
@@ -121,6 +128,8 @@ class SeriesParams:
     sigma0: float
     gmax: int
     n_break: int
+    reject_fraction_weight: float
+    reject_fraction_limit: float
     rms_max: int | None
     disabled: bool = False
 
@@ -160,6 +169,11 @@ class Row:
         that buffer a measurement, at least 0; 0 on an accepted row.
     consecutive_rejects : int
         Consecutive counted rejects, at least 0.
+    reject_fraction : float
+        The fraction of recent readings rejected, from 0 to 1, the newest
+        weighing most: raised by each counted reject and lowered by each
+        accepted reading, by the series' reject fraction weight; 0 while
+        dormant or disabled, and at a cold start.
     rejects : tuple of (datetime, float)
         The reject buffer, oldest first, at most :data:`MAX_REJECTS`
         entries, each value finite.
@@ -191,6 +205,7 @@ class Row:
     epochs_in_segment: int
     epochs_since_accept: int
     consecutive_rejects: int
+    reject_fraction: float
     rejects: tuple[Reject, ...]
     filter_states: FilterStates
     time_constant: float | None
@@ -237,11 +252,12 @@ def check_row(row: Row) -> None:
     ------
     ValueError
         Naming the first rule the row breaks: a float that is not finite, a
-        counter below 0, a reject buffer too long or out of order, flags
-        that are unknown, repeated, out of order or not one outcome, D with
-        A or U, O with any other flag, a state that does not fit the flags
-        or the model, an innovation on a P or O row, or a time constant
-        given for a 1-state series or missing for another.
+        counter below 0, a reject fraction outside 0 to 1, a reject buffer
+        too long or out of order, flags that are unknown, repeated, out of
+        order or not one outcome, D with A or U, O with any other flag, a
+        state that does not fit the flags or the model, an innovation on a
+        P or O row, or a time constant given for a 1-state series or missing
+        for another.
 
     Examples
     --------
@@ -250,8 +266,9 @@ def check_row(row: Row) -> None:
     ...     interpolated_datetime=datetime(2025, 9, 23, 6, 0, tzinfo=UTC),
     ...     innovation=None, x_fs=None, y=None, d=None, innovation_scale=None,
     ...     step_offset=0, epochs_in_segment=0, epochs_since_accept=0,
-    ...     consecutive_rejects=0, rejects=(), filter_states=1,
-    ...     time_constant=None, scale_time_constant=50.0, flags="PD",
+    ...     consecutive_rejects=0, reject_fraction=0.0, rejects=(),
+    ...     filter_states=1, time_constant=None, scale_time_constant=50.0,
+    ...     flags="PD",
     ... )
     >>> check_row(row)
     """
@@ -262,7 +279,7 @@ def check_row(row: Row) -> None:
 
 
 def _check_numbers(row: Row) -> None:
-    """Refuse a float that is not finite, or a counter below 0.
+    """Refuse a float that is not finite, a counter below 0, or a fraction out of range.
 
     Parameters
     ----------
@@ -272,13 +289,15 @@ def _check_numbers(row: Row) -> None:
     Raises
     ------
     ValueError
-        If a float field is nan or infinite, or a counter is negative.
+        If a float field is nan or infinite, a counter is negative, or the
+        reject fraction is below 0 or above 1.
     """
     for field_name, number in (
         ("innovation", row.innovation),
         ("y", row.y),
         ("d", row.d),
         ("innovation_scale", row.innovation_scale),
+        ("reject_fraction", row.reject_fraction),
         ("time_constant", row.time_constant),
         ("scale_time_constant", row.scale_time_constant),
     ):
@@ -293,6 +312,9 @@ def _check_numbers(row: Row) -> None:
         if count < 0:
             message = f"{field_name} {count} is below 0"
             raise ValueError(message)
+    if not 0.0 <= row.reject_fraction <= 1.0:
+        message = f"reject_fraction {row.reject_fraction} is not from 0 to 1"
+        raise ValueError(message)
 
 
 def _check_rejects(reject_buffer: tuple[Reject, ...]) -> None:

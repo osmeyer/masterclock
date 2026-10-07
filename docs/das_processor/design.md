@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-06 22:45:55 UTC
+**Date:** 2026-10-07 01:21:13 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -83,7 +83,7 @@ A triple (r, s, c) is a measurement of x_r − x_c.
 | Time within an epoch: δ, t | s | |
 | Rate: y | ps/s | Fractional frequency × 10¹² |
 | Drift: d | ps/s² | |
-| Counts: epochs_in_segment, epochs_since_accept, consecutive_rejects, M, M_σ, G_max, N_break | epochs | One epoch is T = <!-- figure: EPOCH_SECONDS -->600<!-- end figure --> s |
+| Counts: epochs_in_segment, epochs_since_accept, consecutive_rejects, M, M_σ, G_max, N_break, N_f | epochs | One epoch is T = <!-- figure: EPOCH_SECONDS -->600<!-- end figure --> s |
 | Instants | UTC datetime | The MJD is written beside it for people to read |
 
 ### 2.3 Symbols
@@ -109,6 +109,8 @@ A triple (r, s, c) is a measurement of x_r − x_c.
 | M_σ | Averaging constant of the innovation scale, epochs |
 | ν | Innovation, z_E − x⁻ |
 | σ_ν | Innovation scale |
+| f | Reject fraction: the fraction of recent readings rejected, the newest weighing most (§9.3) |
+| w_f, f_max | The weight of the newest reading in f, 1/N_f, and the limit above which the series goes dormant (§9.4) |
 | σ_dd | Measurement σ of a double difference |
 | Δ_step | Accepted phase step |
 | ρ, r̄, C, D | Screening and slip statistics (§10, §11) |
@@ -513,8 +515,8 @@ Every file of a kind has the same header, of H bytes, and every row has the same
 
 | File | Row width W (characters, newline not counted) | Header lines | Header size H (bytes) |
 | --- | --- | --- | --- |
-| Measurement file | 466 | 30 | 2189 |
-| Double-difference file | 444 | 28 | 2086 |
+| Measurement file | 491 | 31 | 2283 |
+| Double-difference file | 469 | 29 | 2180 |
 
 <!-- end generated -->
 
@@ -608,16 +610,17 @@ One row per epoch holds the pair's measurement, decycled and referred to E (§7)
 | 14 | `epochs_in_segment` | 9 | rows since the segment started |
 | 15 | `epochs_since_accept` | 9 | rows since the last accepted measurement, not counting dormant rows that buffer a measurement |
 | 16 | `consecutive_rejects` | 9 | consecutive counted rejects |
-| 17 | `reject1_mjd` | 13 | reject buffer, oldest: epoch start, MJD |
-| 18 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps |
-| 19 | `reject2_mjd` | 13 | reject buffer, middle: epoch start, MJD |
-| 20 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps; while dormant, a measurement z, ps |
-| 21 | `reject3_mjd` | 13 | reject buffer, newest: epoch start, MJD |
-| 22 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps; while dormant, a measurement z, ps |
-| 23 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
-| 24 | `time_constant` | 23 | estimator time constant, epochs |
-| 25 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
-| 26 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled |
+| 17 | `reject_fraction` | 23 | fraction of recent readings rejected, the newest weighing most |
+| 18 | `reject1_mjd` | 13 | reject buffer, oldest: epoch start, MJD |
+| 19 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps |
+| 20 | `reject2_mjd` | 13 | reject buffer, middle: epoch start, MJD |
+| 21 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps; while dormant, a measurement z, ps |
+| 22 | `reject3_mjd` | 13 | reject buffer, newest: epoch start, MJD |
+| 23 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps; while dormant, a measurement z, ps |
+| 24 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
+| 25 | `time_constant` | 23 | estimator time constant, epochs |
+| 26 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
+| 27 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled |
 
 <!-- end generated -->
 
@@ -685,16 +688,17 @@ The header of a measurement file:
 #  14  epochs_in_segment       rows since the segment started
 #  15  epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
 #  16  consecutive_rejects     consecutive counted rejects
-#  17  reject1_mjd             reject buffer, oldest: epoch start, MJD
-#  18  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
-#  19  reject2_mjd             reject buffer, middle: epoch start, MJD
-#  20  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
-#  21  reject3_mjd             reject buffer, newest: epoch start, MJD
-#  22  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
-#  23  filter_states           estimator states: 1, 2 or 3
-#  24  time_constant           estimator time constant, epochs
-#  25  scale_time_constant     innovation-scale averaging constant, epochs
-#  26  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
+#  17  reject_fraction         fraction of recent readings rejected, the newest weighing most
+#  18  reject1_mjd             reject buffer, oldest: epoch start, MJD
+#  19  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
+#  20  reject2_mjd             reject buffer, middle: epoch start, MJD
+#  21  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
+#  22  reject3_mjd             reject buffer, newest: epoch start, MJD
+#  23  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
+#  24  filter_states           estimator states: 1, 2 or 3
+#  25  time_constant           estimator time constant, epochs
+#  26  scale_time_constant     innovation-scale averaging constant, epochs
+#  27  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->
@@ -724,16 +728,17 @@ One row per epoch holds the triple's double difference (§12) and its estimator 
 | 12 | `epochs_in_segment` | 9 | rows since the segment started |
 | 13 | `epochs_since_accept` | 9 | rows since the last accepted measurement, not counting dormant rows that buffer a measurement |
 | 14 | `consecutive_rejects` | 9 | consecutive counted rejects |
-| 15 | `reject1_mjd` | 13 | reject buffer, oldest: epoch start, MJD |
-| 16 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps |
-| 17 | `reject2_mjd` | 13 | reject buffer, middle: epoch start, MJD |
-| 18 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps; while dormant, a measurement z, ps |
-| 19 | `reject3_mjd` | 13 | reject buffer, newest: epoch start, MJD |
-| 20 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps; while dormant, a measurement z, ps |
-| 21 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
-| 22 | `time_constant` | 23 | estimator time constant, epochs |
-| 23 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
-| 24 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled |
+| 15 | `reject_fraction` | 23 | fraction of recent readings rejected, the newest weighing most |
+| 16 | `reject1_mjd` | 13 | reject buffer, oldest: epoch start, MJD |
+| 17 | `reject1_innovation` | 23 | reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps |
+| 18 | `reject2_mjd` | 13 | reject buffer, middle: epoch start, MJD |
+| 19 | `reject2_innovation` | 23 | reject buffer, middle: innovation, ps; while dormant, a measurement z, ps |
+| 20 | `reject3_mjd` | 13 | reject buffer, newest: epoch start, MJD |
+| 21 | `reject3_innovation` | 23 | reject buffer, newest: innovation, ps; while dormant, a measurement z, ps |
+| 22 | `filter_states` | 1 | estimator states: 1, 2 or 3 |
+| 23 | `time_constant` | 23 | estimator time constant, epochs |
+| 24 | `scale_time_constant` | 23 | innovation-scale averaging constant, epochs |
+| 25 | `flags` | 8 | A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled |
 
 <!-- end generated -->
 
@@ -763,16 +768,17 @@ The header of a double-difference file:
 #  12  epochs_in_segment       rows since the segment started
 #  13  epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
 #  14  consecutive_rejects     consecutive counted rejects
-#  15  reject1_mjd             reject buffer, oldest: epoch start, MJD
-#  16  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
-#  17  reject2_mjd             reject buffer, middle: epoch start, MJD
-#  18  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
-#  19  reject3_mjd             reject buffer, newest: epoch start, MJD
-#  20  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
-#  21  filter_states           estimator states: 1, 2 or 3
-#  22  time_constant           estimator time constant, epochs
-#  23  scale_time_constant     innovation-scale averaging constant, epochs
-#  24  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
+#  15  reject_fraction         fraction of recent readings rejected, the newest weighing most
+#  16  reject1_mjd             reject buffer, oldest: epoch start, MJD
+#  17  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
+#  18  reject2_mjd             reject buffer, middle: epoch start, MJD
+#  19  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
+#  20  reject3_mjd             reject buffer, newest: epoch start, MJD
+#  21  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
+#  22  filter_states           estimator states: 1, 2 or 3
+#  23  time_constant           estimator time constant, epochs
+#  24  scale_time_constant     innovation-scale averaging constant, epochs
+#  25  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->
@@ -1744,7 +1750,7 @@ It happens when a dormant series acquires (§13.3).
 
 - State: X = [z_E, 0, 0]ᵀ for 3 states, [z_E, 0]ᵀ for 2 and [z_E] for 1.
 - Innovation scale: σ_ν = σ₀.
-- Segment: a new one, marked N: step_offset = 0, epochs_in_segment = 0, epochs_since_accept = 0, consecutive_rejects = 0, an empty reject buffer.
+- Segment: a new one, marked N: step_offset = 0, epochs_in_segment = 0, epochs_since_accept = 0, consecutive_rejects = 0, reject_fraction = 0, an empty reject buffer.
 - Parameters: M and M_σ from the entry in force at the epoch; the model is the series' own.
 - Flags: A and N, and U for a 2- or 3-state series (§8.8).
 
@@ -1877,16 +1883,20 @@ M_σ sets how precise σ_ν is: an average with weight 1/M_σ has a relative err
 
 ### 9.3 Counters and reject buffer
 
-| Row outcome | consecutive_rejects | Reject buffer | epochs_since_accept |
-| --- | --- | --- | --- |
-| Accepted (A) | 0 | emptied | 0 |
-| Counted reject (R) | + 1 | push (epoch, ν); keep the newest three, oldest first | + 1 |
-| Counted reject over the pair's RMS limit (R) | + 1 | emptied | + 1 |
-| Excluded, not counted (X) | unchanged | unchanged | + 1 |
-| Held past the gap limit, so dormant (D with R, X or P) | + 1 on R, else unchanged | emptied | + 1 |
-| No measurement (P) | unchanged | unchanged | + 1 |
-| Dormant, measurement buffered (R with D) | 0 | push (epoch, z); keep the newest three, oldest first | unchanged |
-| Dormant, measurement over the pair's RMS limit (R with D) | 0 | emptied | unchanged |
+| Row outcome | consecutive_rejects | reject_fraction f | Reject buffer | epochs_since_accept |
+| --- | --- | --- | --- | --- |
+| Accepted (A) | 0 | (1 − w_f) f | emptied | 0 |
+| Counted reject (R) | + 1 | (1 − w_f) f + w_f | push (epoch, ν); keep the newest three, oldest first | + 1 |
+| Counted reject over the pair's RMS limit (R) | + 1 | (1 − w_f) f + w_f | emptied | + 1 |
+| Excluded, not counted (X) | unchanged | unchanged | unchanged | + 1 |
+| Held past the gap limit, so dormant (D with R, X or P) | + 1 on R, else unchanged | 0 | emptied | + 1 |
+| No measurement (P) | unchanged | unchanged | unchanged | + 1 |
+| Dormant, measurement buffered (R with D) | 0 | 0 | push (epoch, z); keep the newest three, oldest first | unchanged |
+| Dormant, measurement over the pair's RMS limit (R with D) | 0 | 0 | emptied | unchanged |
+
+The reject fraction f averages the readings' outcomes, 1 for a counted reject and 0 for an accepted reading, the newest weighing w_f = 1/N_f, from `reject_fraction_epochs` (§15.2).
+A row accepted after a step was first counted as a reject, so f rises and then falls on it.
+A cold start sets f to 0, a dormant row carries 0, and once f has decayed below a floor the code gives, far below any limit, it is 0, so it never shrinks past what its column holds.
 
 ### 9.4 Step classification
 
@@ -1926,7 +1936,8 @@ x^- \leftarrow x^- + a + s\,t_3, \qquad y^- \leftarrow y^- + s
 ```
 
 Neither: the row stays rejected.
-When consecutive_rejects reaches N_break, the series goes dormant, and starts again only once it acquires (§13.3).
+When consecutive_rejects reaches N_break, or the reject fraction f (§9.3) is above f_max, from `reject_fraction_limit` (§15.2), the series goes dormant, and starts again only once it acquires (§13.3).
+N_break catches a run of rejects; f_max catches rejects spaced by accepted readings, which set the count back to 0: a series rejected four readings in every five takes f past a limit of one half within about N_f readings, and never reaches N_break.
 
 ### 9.5 Excluded measurements
 
@@ -1965,7 +1976,7 @@ flowchart TD
     PS -- yes --> PSA[step_offset += Δ<br/>accept: A]
     PS -- no --> FS{Frequency step?}
     FS -- yes --> FSA[Warm segment<br/>accept: A N U]
-    FS -- no --> NB{consecutive_rejects ≥ N_break?}
+    FS -- no --> NB{consecutive_rejects ≥ N_break,<br/>or f > f_max?}
     NB -- yes: buffer emptied --> AQ
     NB -- no --> HR[Hold: R]
     HR -. "past the gap limit" .-> GD
@@ -1992,16 +2003,21 @@ def filter_step(
         start_segment(draft, series_params, keep_offset=True)  # §8.7
     if measurement is None:  # §13.1
         if pair_cold_started:  # §12.6: dormant, not written
-            return StepResult(dormant(draft, "P"), False, None)
-        return StepResult(hold(draft, prediction, "P", series_params), False, None)
+            return StepResult(
+                dormant(draft, "P"), False, None, "a pair it uses started again"
+            )
+        row = hold(draft, prediction, "P", series_params)
+        return StepResult(
+            row, False, None, "gap limit passed" if "D" in row.flags else None
+        )
     if measurement.pair_cold_started:  # §12.6: a pair of the triple restarted
         draft.rejects, prediction = (), None
     if prediction is None:  # new or dormant: acquisition (§13.3)
         in_limit = measurement.rms is None or measurement.rms <= series_params.rms_max
         row = acquire(draft, measurement.z, series_params, in_limit)
-        return StepResult(row, cold_started="D" not in row.flags, step=None)
-    row, step = gate(draft, prediction, measurement, series_params, excluded)
-    return StepResult(row, cold_started=False, step=step)  # the step, for the log
+        return StepResult(row, "D" not in row.flags, None, None)
+    row, step, reason = gate(draft, prediction, measurement, series_params, excluded)
+    return StepResult(row, False, step, reason)  # the step and the reason, for the log
 
 
 def gate(draft, prediction, measurement, series_params, excluded):
@@ -2011,25 +2027,30 @@ def gate(draft, prediction, measurement, series_params, excluded):
     in_gate = within_gate(innovation, draft.innovation_scale)
     # A triple has no rms test.
     in_limit = measurement.rms is None or measurement.rms <= series_params.rms_max
+    w_f = series_params.reject_fraction_weight
     if in_gate and in_limit and not excluded:
-        return accept(draft, prediction, innovation, measurement.scale_floor), None
+        row = accept(draft, prediction, innovation, measurement.scale_floor, w_f)
+        return row, None, None
     if in_gate and excluded:
-        return hold(draft, prediction, "X", series_params), None  # §9.5
-    count_reject(draft, innovation)
+        row = hold(draft, prediction, "X", series_params)  # §9.5
+        return row, None, "gap limit passed" if "D" in row.flags else None
+    count_reject(draft, innovation, w_f)  # +1, f <- (1 - w_f) f + w_f, buffer
     if not in_limit:  # never one of the three a step is found in (§9.4)
         draft.rejects = ()
     accepted_step = accept_step(  # only with three rejects in the buffer
         draft, prediction, measurement.z, measurement.scale_floor, series_params
     )
     if accepted_step is not None:
-        return accepted_step  # the row and the kind of step: "phase" or "frequency"
-    if draft.consecutive_rejects >= series_params.n_break:  # dormant until it acquires
+        return *accepted_step, None  # the row and the kind of step
+    reason = dormant_reason(draft, series_params)  # N_break reached, or f over f_max
+    if reason is not None:  # dormant until it acquires
         draft.rejects = ()
-        return acquire(draft, measurement.z, series_params, in_limit), None
-    return hold(draft, prediction, "R", series_params), None
+        return acquire(draft, measurement.z, series_params, in_limit), None, reason
+    row = hold(draft, prediction, "R", series_params)
+    return row, None, "gap limit passed" if "D" in row.flags else None
 
 
-def accept(draft, prediction, innovation, scale_floor):
+def accept(draft, prediction, innovation, scale_floor, reject_weight):
     nu = float(innovation)
     updated = update(prediction, innovation, draft.filter_states, draft.time_constant)
     w = 1.0 / draft.scale_time_constant
@@ -2037,6 +2058,7 @@ def accept(draft, prediction, innovation, scale_floor):
     draft.innovation_scale = math.sqrt(max(scale_squared, scale_floor**2))
     draft.innovation = nu  # after a step, against the corrected prediction
     draft.x_fs, draft.y, draft.d = to_fs(updated.x), updated.y, updated.d
+    draft.reject_fraction *= 1 - reject_weight  # 0 once below the floor
     draft.consecutive_rejects, draft.rejects, draft.epochs_since_accept = 0, (), 0
     return finish(draft, "A")
 
@@ -2464,10 +2486,10 @@ It becomes dormant:
 
 - when it is created;
 - when a held row's epochs_since_accept exceeds G_max (§13.2);
-- when consecutive_rejects reaches N_break (§9.4);
+- when consecutive_rejects reaches N_break, or the reject fraction passes f_max (§9.4);
 - for a triple, when a pair whose value it uses cold-starts, with or without a measurement of the triple at that epoch (§12.6).
 
-A dormant row writes x, y, d and innovation_scale as `-`.
+A dormant row writes x, y, d and innovation_scale as `-`, and a reject fraction of 0.
 A row that goes dormant from a held state, at N_break or past the gap limit, keeps the innovation it worked out; a dormant row that buffers a measurement has none.
 It carries flag D, with R when it has a measurement, or X or P as the outcome was.
 A dormant row with no measurement (D with P) is not written (`writes_row` in `domain/filter.py`): a series whose measurements stop writes predicted rows up to G_max and then none, and a dormant series writes none at an epoch without a measurement.
@@ -2503,7 +2525,7 @@ stateDiagram-v2
     Held --> Settled: accept or phase step, epochs_in_segment at least 5M
     Held --> Unsettled: accept or phase step, epochs_in_segment below 5M
     Held --> Unsettled: frequency step or configuration change (warm)
-    Held --> Dormant: N_break rejects, or the gap limit passed with a measurement
+    Held --> Dormant: N_break rejects, f over f_max, or the gap limit passed with a measurement
     Held --> Stopped: the gap limit passed with no measurement
     Settled --> Unsettled: configuration change (warm)
     Unsettled --> Unsettled: configuration change (warm)
@@ -2547,6 +2569,7 @@ def carry(epoch_start, last_row, series_params, slip=False):
             epochs_in_segment=0,
             epochs_since_accept=0,
             consecutive_rejects=0,
+            reject_fraction=0.0,
             rejects=(),
             filter_states=series_params.filter_states,
             time_constant=series_params.M,
@@ -2570,7 +2593,7 @@ def carry(epoch_start, last_row, series_params, slip=False):
 
 def acquire(draft, z, series_params, in_limit=True):
     """Buffer a dormant series' measurement; cold-start on three consistent ones."""
-    draft.consecutive_rejects = 0
+    draft.consecutive_rejects, draft.reject_fraction = 0, 0.0
     if not in_limit:  # a pair's reading over its RMS limit is never buffered
         return dormant(draft, "R")
     draft.rejects = (*draft.rejects, (draft.interpolated_datetime, float(z)))[-3:]
@@ -2584,6 +2607,7 @@ def acquire(draft, z, series_params, in_limit=True):
 
 def dormant(draft, outcome, keep_buffer=False):
     draft.x_fs = draft.y = draft.d = draft.innovation_scale = None
+    draft.reject_fraction = 0.0
     if not keep_buffer:
         draft.rejects = ()
     draft.flags += "D"
@@ -2681,6 +2705,8 @@ The clock configuration gives each clock's estimator settings and location, and 
 | Key | Holds | Used by |
 | --- | --- | --- |
 | `rejects_before_restart` | N_break | Step classification and dormancy (§9.4, §13.3) |
+| `reject_fraction_epochs` | N_f, the averaging length of the reject fraction | Dormancy (§9.3, §9.4) |
+| `reject_fraction_limit` | f_max | Dormancy (§9.4) |
 | `rms_limit` | The RMS limit of a pair, of a reference's pairs, and a default | The gate, pairs only (§9.1) |
 | `types` | A default entry for each clock type | Every clock of that type |
 | `clocks` | One or more entries for each clock | The clock's series: a pair takes the entry of its second clock, a triple the entry of its clock c (§8.1) |
@@ -2702,7 +2728,7 @@ A clock listed under `ignore` is left out the same way, with nothing logged.
 `read_clock_config` reads the file with a YAML loader that builds only plain data, validates it into frozen pydantic models, and raises `ConfigError` when:
 
 - the file cannot be read, is not UTF-8 text or YAML, holds a tag the loader does not build, or is not a mapping;
-- a key is repeated at any level, is a YAML merge key, or is not a key described here, or a key it needs is left out: `rejects_before_restart`, `rms_limit` with its `default`, `types` and `clocks`;
+- a key is repeated at any level, is a YAML merge key, or is not a key described here, or a key it needs is left out: `rejects_before_restart`, `reject_fraction_epochs`, `reject_fraction_limit`, `rms_limit` with its `default`, `types` and `clocks`;
 - a value is of the wrong kind, such as a fraction where a whole number is needed, or a number that is not finite;
 - a clock has no entry; its first entry gives a type the file does not define, or gives no type and has an `effective_mjd` or leaves a setting out; or a later entry gives a type;
 - a reference's type is not <!-- figure: REFERENCE_TYPE -->`mc`<!-- end figure -->;
@@ -2712,6 +2738,7 @@ A clock listed under `ignore` is left out the same way, with nothing logged.
 - a clock under `ignore` is named twice, or also has entries;
 - an entry gives both `disabled` and `enabled`, or either as other than `true` or `false`;
 - `rejects_before_restart` is below 3, or above the gap limit of any type or of any clock at any date;
+- `reject_fraction_epochs` is below 1, or `reject_fraction_limit` is not above 0 and below 1;
 - an RMS limit is not a whole number above zero, a reference under `references` is not named as a reference, or a pair under `pairs` is not a reference's name, a dot and a clock's name, which holds no dot or slash;
 - an `effective_mjd` is not on a day from <!-- figure: FIRST_DAY -->50000<!-- end figure --> to <!-- figure: LAST_DAY -->99999<!-- end figure -->.
 
@@ -2726,7 +2753,7 @@ The data come from a characterization run: das_processor run over the DAS files 
 - `initial_innovation_scale` at least the largest expected |rate| × 600 s / 5 of any clock.
   A 1-state prediction carries no rate, so every innovation includes rate × T, and a smaller σ₀ rejects nearly every row of a clock with a frequency offset.
 - `scale_time_constant` and `gap_limit`: general values, with `gap_limit` at least `rejects_before_restart`.
-- `rms_limit` and `rejects_before_restart`: the production values.
+- `rms_limit`, `rejects_before_restart`, `reject_fraction_epochs` and `reject_fraction_limit`: the production values.
 
 The references realize the timescale, so clock c measured against a reference r is clock c against the timescale.
 Clock c has a local triple (r, r, c) for each reference r in its building; a clock with no location has none and is not characterized.
@@ -2888,12 +2915,12 @@ Besides the standard levels there is TRACE, below DEBUG.
 | --- | --- |
 | ERROR | Every error, where it is raised; each damaged data file, once, with where and why (§6.7) |
 | WARNING | Refused DAS lines; a DAS directory with no data files; a clock with no entry in the clock configuration and not ignored, once when found (§15.2); counted rejects; missing or failed self-measurements, reciprocity and closure failures; undecided slips; a roll-back, once for all its files (§6.7) |
-| INFO | Where a run starts, and where and why it ends; each epoch processed, with its counts of rows written, accepted and held; corrected slips; phase steps, frequency steps, cold starts, dormancy, a series that stops writing rows, configuration changes; a clock disabled or enabled again, once at the epoch it happens (§13.6); a redo, once for all its files (§6.5) |
+| INFO | Where a run starts, and where and why it ends; each epoch processed, with its counts of rows written, accepted and held; corrected slips; phase steps, frequency steps, cold starts, dormancy with why, a series that stops writing rows, configuration changes; a clock disabled or enabled again, once at the epoch it happens (§13.6); a redo, once for all its files (§6.5) |
 | DEBUG | Each series' flags at each epoch; a DAS directory entry passed over; the run lock taken and freed |
 | TRACE | Each series' prediction, innovation and update |
 
 Every line about a series' row, or about an epoch's readings, names the epoch it is about, after `at`, so it can be placed in time without the epoch's own line beside it.
-Without workers, the run logs an epoch's events once its rows are in the day buffer (`log_epoch` in `das_processor/run.py`); with them, as §6.8 says, from what screening and the slip check gave and from each series' row beside its last row: dormancy or a configuration change is read from how the row differs from the last, and a cold start or a step from the filter step's result.
+Without workers, the run logs an epoch's events once its rows are in the day buffer (`log_epoch` in `das_processor/run.py`); with them, as §6.8 says, from what screening and the slip check gave and from each series' row beside its last row: a configuration change is read from how the row differs from the last, and a cold start, a step or dormancy, with its reason, from the filter step's result.
 Series are logged in key order, pairs first.
 Nothing is worked out for a level the log leaves out: when WARNING is not logged the epoch is not looked at, and a TRACE line is made only when TRACE is logged.
 
@@ -2929,7 +2956,7 @@ A test that carries one of these identifiers in its docstring is a test of that 
 | U8 | Gate | Innovations just inside and just outside 5σ_ν; rms just over the limit | A, then R; R |
 | U9 | Phase step | A step of 50σ_ν at epoch k | R at k and k + 1; A at k + 2 with step_offset += Δ within 1 ps; no N |
 | U10 | Frequency step | A rate step of 10σ_ν per epoch at epoch k | R at k and k + 1; A N U at k + 2 |
-| U11 | N_break | Large outliers that disagree with each other | Dormant when consecutive_rejects reaches N_break; a cold start only after three consistent measurements |
+| U11 | N_break and f_max | Large outliers that disagree with each other; four rejects in every five readings | Dormant when consecutive_rejects reaches N_break, or f passes f_max; a cold start only after three consistent measurements |
 | U12 | Exclusion | An excluded measurement inside the gate | X; consecutive_rejects and buffer unchanged; epochs_since_accept + 1 |
 | U13 | Gaps | No measurement for G_max epochs, then for G_max + 1 | First: an ordinary accept. Second: no row from G_max + 1 on; measured again, D rows, then a cold start after three consistent measurements |
 | U14 | Configuration change | A new entry with another M; a new entry with another model | A warm start at the entry's epoch with new gains; the model change refused when the file is read |
@@ -3010,8 +3037,8 @@ The rows of the pair's measurement file for this epoch and for the next, which h
 <!-- generated: worked-meas-rows -->
 
 ```text
-2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,  60941.251588,  34579,    3,            6,          1234577,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
-2025-09-23 06:10:00+00:00,  60941.256944,                                -,             -,      -,    -,            -,                -,          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       813,         1,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        P
+2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,  60941.251588,  34579,    3,            6,          1234577,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:10:00+00:00,  60941.256944,                                -,             -,      -,    -,            -,                -,          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       813,         1,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        P
 ```
 
 <!-- end generated -->
@@ -3036,8 +3063,8 @@ Their rows, the remote triple's first; the local triple's estimate is its pair's
 <!-- generated: worked-ddiff-rows -->
 
 ```text
-2025-09-23 06:00:00+00:00,  60941.250000,          6666667, -5.3000000000000007e+00, +3.3166247903553998e+00, 111,          6666672.143, +2.0497389398973252e-02, -1.4503218177543500e-11, +3.5449682650201537e+00,                0,      3107,         0,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
-2025-09-23 06:00:00+00:00,  60941.250000,          1234577, +2.6200000000000001e+00, +3.0000000000000000e+00, 111,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:00:00+00:00,  60941.250000,          6666667, -5.3000000000000007e+00, +3.3166247903553998e+00, 111,          6666672.143, +2.0497389398973252e-02, -1.4503218177543500e-11, +3.5449682650201537e+00,                0,      3107,         0,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:00:00+00:00,  60941.250000,          1234577, +2.6200000000000001e+00, +3.0000000000000000e+00, 111,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
 ```
 
 <!-- end generated -->

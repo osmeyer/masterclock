@@ -16,10 +16,13 @@ up to the second; a clock's location comes from its entries like any
 other setting, never from its type, a later entry moving it from its date,
 and is a positive whole number or not given at all; every clock's
 location at a mark is the last its entries in force give, none before its
-first; a mark without a timezone, and a clock the file does not name, are
-refused with ConfigError; every series is given its settings with each
-clock's entry settled once; a name that only starts like a reference's may
-have any type; and the committed example file loads.
+first; the reject fraction's averaging length and limit are read, the
+length at least 1 and the limit between 0 and 1, and every series takes
+the weight 1 over the length and the limit; a mark without a timezone,
+and a clock the file does not name, are refused with ConfigError; every
+series is given its settings with each clock's entry settled once; a name
+that only starts like a reference's may have any type; and the committed
+example file loads.
 
 Every refusal names the file, then the problem, a merge or repeated key with
 its line and column, and is logged as raised; undated entries come first
@@ -48,6 +51,8 @@ from masterclock.domain.series import SeriesKey, SeriesParams
 
 BASE_YAML: Final = (
     "rejects_before_restart: 36\n"
+    "reject_fraction_epochs: 25.0\n"
+    "reject_fraction_limit: 0.5\n"
     "rms_limit:\n"
     "  default: 50\n"
     "  references: {mc2: 40}\n"
@@ -217,6 +222,33 @@ def test_an_unknown_clock_has_no_entry(tmp_path: Path) -> None:
             "rejects_before_restart",
         ),
         (
+            "reject_fraction_epochs: 25.0",
+            "reject_fraction_epochs: 0.5",
+            "reject_fraction_epochs",
+        ),
+        (
+            "reject_fraction_epochs: 25.0",
+            "reject_fraction_epochs: .inf",
+            "reject_fraction_epochs",
+        ),
+        ("reject_fraction_epochs: 25.0\n", "", "reject_fraction_epochs"),
+        (
+            "reject_fraction_limit: 0.5",
+            "reject_fraction_limit: 0.0",
+            "reject_fraction_limit",
+        ),
+        (
+            "reject_fraction_limit: 0.5",
+            "reject_fraction_limit: 1.0",
+            "reject_fraction_limit",
+        ),
+        (
+            "reject_fraction_limit: 0.5",
+            "reject_fraction_limit: 1",
+            "reject_fraction_limit",
+        ),
+        ("reject_fraction_limit: 0.5\n", "", "reject_fraction_limit"),
+        (
             "  cs7: [{type: cesium}]",
             "  cs7: [{type: cesium, gap_limit: 30}]",
             "above the gap_limit 30 of cs7",
@@ -363,6 +395,8 @@ def test_a_pair_takes_its_second_clock_s_settings(tmp_path: Path) -> None:
         sigma0=5.0,
         gmax=432,
         n_break=36,
+        reject_fraction_weight=0.04,
+        reject_fraction_limit=0.5,
         rms_max=80,
     )
 

@@ -42,6 +42,8 @@ T: Final = timedelta(minutes=10)
 
 CLOCK_CONFIG_YAML: Final = (
     "rejects_before_restart: 6\n"
+    "reject_fraction_epochs: 25.0\n"
+    "reject_fraction_limit: 0.5\n"
     "rms_limit: {default: 50}\n"
     "types:\n"
     "  maser: {filter_states: 3, time_constant: 100.0, scale_time_constant: 50.0,"

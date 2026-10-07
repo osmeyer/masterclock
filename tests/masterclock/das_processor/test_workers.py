@@ -63,6 +63,8 @@ EPOCH_COUNT: Final = 12
 
 CLOCK_CONFIG_YAML: Final = (
     "rejects_before_restart: 4\n"
+    "reject_fraction_epochs: 25.0\n"
+    "reject_fraction_limit: 0.5\n"
     "rms_limit: {default: 50}\n"
     "types:\n"
     "  maser: {filter_states: 3, time_constant: 10.0, scale_time_constant: 5.0,"

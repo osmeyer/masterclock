@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-06 22:45:55 UTC
+**Date:** 2026-10-07 01:21:13 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -140,6 +140,16 @@ rejects_before_restart: 36
 
 `rejects_before_restart` is the number of readings rejected in a row at which das_processor gives up on a series' estimate and starts it again from fresh readings.
 It must be at least 3, and no more than the `gap_limit` of any type, or of any clock at any date.
+
+```yaml
+reject_fraction_epochs: 25.0
+reject_fraction_limit: 0.5
+```
+
+A series also keeps a reject fraction: an average of its readings' outcomes, 1 for a rejected reading and 0 for an accepted one, in which the newest reading weighs 1 over `reject_fraction_epochs`.
+When the fraction passes `reject_fraction_limit`, das_processor gives up on the estimate as it does after `rejects_before_restart` rejects in a row.
+This catches a series whose rejects are spaced by single accepted readings, which reset the count of rejects in a row.
+`reject_fraction_epochs` is at least 1, and `reject_fraction_limit` is above 0 and below 1.
 
 ```yaml
 rms_limit:
@@ -426,8 +436,8 @@ Every row has the same width; its fields are separated by `, ` and padded with s
 
 | File | Row width W (characters, newline not counted) | Header lines | Header size H (bytes) |
 | --- | --- | --- | --- |
-| Measurement file | 466 | 30 | 2189 |
-| Double-difference file | 444 | 28 | 2086 |
+| Measurement file | 491 | 31 | 2283 |
+| Double-difference file | 469 | 29 | 2180 |
 
 <!-- end generated -->
 
@@ -454,16 +464,17 @@ The header says what the file is and what every column holds:
 #  12  epochs_in_segment       rows since the segment started
 #  13  epochs_since_accept     rows since the last accepted measurement, not counting dormant rows that buffer a measurement
 #  14  consecutive_rejects     consecutive counted rejects
-#  15  reject1_mjd             reject buffer, oldest: epoch start, MJD
-#  16  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
-#  17  reject2_mjd             reject buffer, middle: epoch start, MJD
-#  18  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
-#  19  reject3_mjd             reject buffer, newest: epoch start, MJD
-#  20  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
-#  21  filter_states           estimator states: 1, 2 or 3
-#  22  time_constant           estimator time constant, epochs
-#  23  scale_time_constant     innovation-scale averaging constant, epochs
-#  24  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
+#  15  reject_fraction         fraction of recent readings rejected, the newest weighing most
+#  16  reject1_mjd             reject buffer, oldest: epoch start, MJD
+#  17  reject1_innovation      reject buffer, oldest: innovation, ps; while dormant, a measurement z, ps
+#  18  reject2_mjd             reject buffer, middle: epoch start, MJD
+#  19  reject2_innovation      reject buffer, middle: innovation, ps; while dormant, a measurement z, ps
+#  20  reject3_mjd             reject buffer, newest: epoch start, MJD
+#  21  reject3_innovation      reject buffer, newest: innovation, ps; while dormant, a measurement z, ps
+#  22  filter_states           estimator states: 1, 2 or 3
+#  23  time_constant           estimator time constant, epochs
+#  24  scale_time_constant     innovation-scale averaging constant, epochs
+#  25  flags                   A accepted, R rejected, X excluded, P predicted, O disabled, D dormant, S slip corrected, N new segment, U unsettled
 ```
 
 <!-- end generated -->
@@ -475,8 +486,8 @@ These are the rows of a measurement file for an epoch with a reading and the nex
 <!-- generated: worked-meas-rows -->
 
 ```text
-2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,  60941.251588,  34579,    3,            6,          1234577,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
-2025-09-23 06:10:00+00:00,  60941.256944,                                -,             -,      -,    -,            -,                -,          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       813,         1,         0,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        P
+2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,  60941.251588,  34579,    3,            6,          1234577,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:10:00+00:00,  60941.256944,                                -,             -,      -,    -,            -,                -,          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       813,         1,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        P
 ```
 
 <!-- end generated -->
@@ -491,6 +502,7 @@ The columns most users want:
 | `innovation` (triples) | The measurement less das_processor's prediction of it, in ps |
 | `x`, `y`, `d` | The estimated phase (ps), rate (ps/s) and drift (ps/s²) at the start of the epoch |
 | `innovation_scale` | How large an innovation is expected to be, in ps |
+| `reject_fraction` | The fraction of recent readings rejected, the newest weighing most; the series starts afresh when it passes `reject_fraction_limit` |
 | `step_offset` | The phase steps accepted in this segment, in ps; x − step_offset is the phase free of steps |
 | `flags` | What happened at this epoch (below) |
 
@@ -577,7 +589,8 @@ Every line about a series' row, or about an epoch's readings, names the epoch it
 | `clock … has no entry in the clock configuration: its measurements are ignored` | The DAS measured a clock the clock configuration does not list | Add the clock with its type and building, or list it under `ignore`; then reprocess if its past data matter |
 | `… rejected at …: innovation … ps, scale … ps, … consecutive` | A reading was far from the prediction | Nothing; three that agree are taken as a step |
 | `self-measurement of … failed at …`, `reciprocity of … failed at …`, `closure of link … failed at …` | A reference's measurements disagree with the others | Look at the reference's hardware if it repeats |
-| `… phase step at …: … ps`, `… frequency step at …`, `… cold start at …`, `… dormant at …` | The estimator followed a change in a clock, or started again | Nothing; worth a look if a clock does it often |
+| `… phase step at …: … ps`, `… frequency step at …`, `… cold start at …` | The estimator followed a change in a clock, or started again | Nothing; worth a look if a clock does it often |
+| `… dormant at …: …` | The estimator gave up on the series, and says why: rejects in a row, the reject fraction over its limit, the gap limit passed, or a pair the triple uses started again | Nothing; worth a look if a clock does it often |
 | `… stops at …: no row until it is measured again` | The series' readings stopped for longer than its gap limit, or a pair of a triple started again with no reading for the triple | Nothing, unless the clock should still be measured |
 | `… configuration change at …: M … to …, M_sigma … to …` | A clock's time constants changed at this epoch, as its entry says | Nothing |
 | `… slip corrected at …: … cycles` | A reading came out a whole number of periods wrong, and was put right | Nothing, unless it repeats |

@@ -173,6 +173,8 @@ _EXAMPLE_PARAMS: Final[SeriesParams] = SeriesParams(
     sigma0=5.0,
     gmax=432,
     n_break=36,
+    reject_fraction_weight=0.04,
+    reject_fraction_limit=0.5,
     rms_max=80,
 )
 """The invented settings of the worked example's clock, a 3-state maser."""
@@ -828,6 +830,7 @@ def _held_row(
         epochs_in_segment=epochs_in_segment,
         epochs_since_accept=0,
         consecutive_rejects=0,
+        reject_fraction=0.0,
         rejects=(),
         filter_states=_EXAMPLE_PARAMS.filter_states,
         time_constant=_EXAMPLE_PARAMS.M,

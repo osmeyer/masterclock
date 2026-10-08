@@ -4,8 +4,9 @@ The rules covered: the raw measured phase of every row with a reading is
 read from its column, rows without one passed over; a one-epoch change is
 wrapped into the half period either way; an epoch is judged unlike a
 running clock when the changes within HALF_WINDOW epochs of it typically
-depart from their median by more than NO_SIGNAL_PS, and not judged with
-fewer than MIN_WINDOW_CHANGES of them; a stretch needs every reference that
+depart from their median by more than NO_SIGNAL_PS, or by more than
+NOISY_FACTOR times the pair's quiet scatter and NOISY_FLOOR_PS both, and not
+judged with fewer than MIN_WINDOW_CHANGES of them; a stretch needs every reference that
 judged an epoch to agree, and a run ends only at an epoch judged like a
 clock; runs fewer than the shortest stretch apart are joined, before and
 after their ends are found again, so no two stretches overlap; each end is
@@ -58,6 +59,14 @@ FAR_OFF_RATE: Final = 30_000
 """How far an invented clock far off frequency moves in an epoch, ps: beyond
 FAR_OFF_FREQUENCY_PS."""
 
+NOISY: Final = "noisy"
+"""The kind of invented stretch whose clock scatters more than NOISY_FLOOR_PS
+an epoch, yet less than NO_SIGNAL_PS."""
+
+NOISY_STEP_PS: Final = 10_000.0
+"""The spread of a noisy invented clock's one-epoch steps, ps: its changes
+typically depart about 7 ns from their median."""
+
 
 def seeded(seed: int) -> random.Random:
     """Give a generator of invented noise, the same on every run."""
@@ -76,8 +85,9 @@ def clock_readings(
     The clock runs ``rate_ps`` an epoch fast with a few ps of noise, except
     in ``bad``: there each reference reads the whole period at random for
     ``no_signal``; or all of them read one phase, each with a little noise
-    of its own, lurching by tens of nanoseconds an epoch for ``quartz``, or
-    moving FAR_OFF_RATE an epoch for ``far_off``.
+    of its own, lurching by tens of nanoseconds an epoch for ``quartz``,
+    moving FAR_OFF_RATE an epoch for ``far_off``, or stepping by
+    NOISY_STEP_PS at random for ``noisy``.
     """
     generator = seeded(seed)
     true_phase = 0
@@ -85,6 +95,8 @@ def clock_readings(
     for epoch in epochs:
         if epoch in bad and kind == no_signal.FAR_OFF:
             true_phase += FAR_OFF_RATE + round(generator.gauss(0.0, 3.0))
+        elif epoch in bad and kind == NOISY:
+            true_phase += rate_ps + round(generator.gauss(0.0, NOISY_STEP_PS))
         elif epoch in bad:
             true_phase += round(generator.gauss(0.0, 40_000.0))
         else:
@@ -217,6 +229,48 @@ def test_a_clock_moving_far_every_epoch_is_bad() -> None:
         assert set(verdicts.values()) == {bad}
     readings = clock_readings(DAY_EPOCHS, range(0), "", seed=3, rate_ps=-limit - 1000)
     assert all(no_signal.judge(changes_of(readings)["mc1"]).values())
+
+
+def cycling_changes(first: int, count: int, spread_ps: int) -> no_signal.Changes:
+    """Give changes cycling 500 - spread, 500, 500 + spread, ps.
+
+    A window of them has the median 500 and typically departs ``spread_ps``
+    from it.
+    """
+    return {first + k: 500 + (k % 3 - 1) * spread_ps for k in range(count)}
+
+
+@pytest.mark.parametrize(
+    ("quiet_ps", "noisy_ps", "bad"),
+    [(600, 6_500, True), (600, 5_500, False), (100, 5_500, True), (100, 4_500, False)],
+)
+def test_a_clock_scattering_far_beyond_its_quiet_scatter_is_bad(
+    quiet_ps: int, noisy_ps: int, bad: bool
+) -> None:
+    """Judge an epoch bad beyond NOISY_FACTOR quiet scatters and NOISY_FLOOR_PS.
+
+    A pair quiet at 600 ps is bad beyond ten times that, 6 ns; one quiet at
+    100 ps beyond the floor, 5 ns; both well inside NO_SIGNAL_PS.
+    """
+    changes = {
+        **cycling_changes(FIRST, 300, quiet_ps),
+        **cycling_changes(FIRST + 300, 100, noisy_ps),
+    }
+    verdicts = no_signal.judge(changes)
+    assert verdicts[FIRST + 350] is bad
+    assert not verdicts[FIRST + 150]
+
+
+def test_the_ends_of_a_noisy_stretch_are_found() -> None:
+    """Find a stretch scattering under NO_SIGNAL_PS but far beyond the clock's own.
+
+    The clock's last noisy step ends on the reading at BAD.stop - 1, from
+    which it runs properly, so it is enabled there, as after a lurch.
+    """
+    readings = clock_readings(DAY_EPOCHS, BAD, NOISY, seed=15)
+    (found,) = no_signal.stretches("hm1", changes_of(readings), MIN_EPOCHS)
+    assert (found.disabled_from, found.enabled_at) == (BAD.start, BAD.stop - 1)
+    assert found.kind == no_signal.QUARTZ
 
 
 def test_every_reference_that_judged_must_agree() -> None:

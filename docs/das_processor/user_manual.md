@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-07 23:06:54 UTC
+**Date:** 2026-10-08 17:56:45 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -239,7 +239,7 @@ It prints a line naming each field, then a line for each clock with a local trip
 
 ### 4.4 Finding stretches to disable
 
-A clock can stop running properly for a while: its channel goes dead, the clock falls back on its quartz crystal and its phase lurches from one epoch to the next, or it runs so far off frequency that its phase moves more than 25 ns every epoch.
+A clock can stop running properly for a while: its channel goes dead, the clock falls back on its quartz crystal and its phase lurches from one epoch to the next, it runs so far off frequency that its phase moves more than 25 ns every epoch, or its phase changes scatter more than ten times as widely as they do while it runs properly, and by more than 5 ns.
 das_processor cannot follow it then, and the log fills with rejects and undecided slips.
 `scripts/no_signal.py` lists such stretches from the measurement files of a run, such as a characterization run, for you to look over and disable.
 [Design §15.4](design.md#154-finding-stretches-when-a-clock-is-not-running-properly) describes the method.

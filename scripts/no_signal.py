@@ -6,7 +6,8 @@ crystal still gives a signal, but its phase lurches by tens of nanoseconds
 from one epoch to the next. Either way the one-epoch changes are tens of
 nanoseconds apart, where a running clock's are far closer. A clock whose
 phase moves tens of nanoseconds every epoch, however steadily, is not a
-properly running atomic clock either. This script
+properly running atomic clock either, nor is one whose changes scatter many
+times more widely than they do while it runs properly. This script
 reads the measurement files of a das_processor run and, for every clock
 that is not a reference, judges each epoch against every reference that
 measures the clock, from the raw measured phase. A stretch is reported only
@@ -55,6 +56,16 @@ HALF_WINDOW: Final[int] = 12
 
 MIN_WINDOW_CHANGES: Final[int] = 9
 """The fewest changes a window needs to judge its epoch."""
+
+NOISY_FACTOR: Final[float] = 10.0
+"""How many times a pair's quiet scatter its changes must scatter for an epoch
+to be unlike the clock: its quiet scatter is the median, over every window of
+the pair, of how far the window's changes typically depart from their median."""
+
+NOISY_FLOOR_PS: Final[float] = 5_000.0
+"""The scatter of a window's changes, ps, at or below which an epoch is never
+unlike the clock for scattering more than it does while quiet: far below
+NO_SIGNAL_PS, yet beyond the measurement noise of a clock running properly."""
 
 MIN_HOURS: Final[float] = 12.0
 """The shortest stretch reported, and the shortest time between two that keeps
@@ -188,6 +199,40 @@ def spread(changes: Sequence[int]) -> tuple[float, float]:
     return median_change, statistics.median(abs(c - median_change) for c in changes)
 
 
+def _window_spreads(changes: Changes) -> dict[int, tuple[float, float]]:
+    """Give the spread of the changes within HALF_WINDOW epochs of each epoch.
+
+    Parameters
+    ----------
+    changes : Changes
+        One pair's changes.
+
+    Returns
+    -------
+    dict of int to (float, float)
+        For every epoch with a change whose window holds at least
+        :data:`MIN_WINDOW_CHANGES` changes, their :func:`spread`.
+
+    Examples
+    --------
+    >>> _window_spreads({epoch: 7 for epoch in range(9)})[4]
+    (7, 0)
+    >>> _window_spreads({epoch: 7 for epoch in range(8)})
+    {}
+    """
+    epochs = sorted(changes)
+    windows: dict[int, tuple[float, float]] = {}
+    low = high = 0
+    for epoch in epochs:
+        while epochs[low] < epoch - HALF_WINDOW:
+            low += 1
+        while high < len(epochs) and epochs[high] <= epoch + HALF_WINDOW:
+            high += 1
+        if high - low >= MIN_WINDOW_CHANGES:
+            windows[epoch] = spread([changes[e] for e in epochs[low:high]])
+    return windows
+
+
 def judge(changes: Changes) -> Verdicts:
     """Judge each epoch from the changes within HALF_WINDOW epochs of it.
 
@@ -201,8 +246,10 @@ def judge(changes: Changes) -> Verdicts:
     Verdicts
         For every epoch with a change whose window holds at least
         :data:`MIN_WINDOW_CHANGES` changes, whether they typically depart
-        from their median by more than :data:`NO_SIGNAL_PS`, or their
-        median is beyond :data:`FAR_OFF_FREQUENCY_PS` either way.
+        from their median by more than :data:`NO_SIGNAL_PS`, or by more
+        than :data:`NOISY_FACTOR` times the pair's quiet scatter and
+        :data:`NOISY_FLOOR_PS` both, or their median is beyond
+        :data:`FAR_OFF_FREQUENCY_PS` either way.
 
     Examples
     --------
@@ -214,20 +261,19 @@ def judge(changes: Changes) -> Verdicts:
     >>> judge({epoch: 30_000 for epoch in range(1, 40)})[10]
     True
     """
-    epochs = sorted(changes)
-    verdicts = {}
-    low = high = 0
-    for epoch in epochs:
-        while epochs[low] < epoch - HALF_WINDOW:
-            low += 1
-        while high < len(epochs) and epochs[high] <= epoch + HALF_WINDOW:
-            high += 1
-        if high - low >= MIN_WINDOW_CHANGES:
-            median_change, departure = spread([changes[e] for e in epochs[low:high]])
-            verdicts[epoch] = (
-                departure > NO_SIGNAL_PS or abs(median_change) > FAR_OFF_FREQUENCY_PS
-            )
-    return verdicts
+    windows = _window_spreads(changes)
+    if not windows:
+        return {}
+    quiet = statistics.median(departure for _, departure in windows.values())
+    noisy = max(NOISY_FACTOR * quiet, NOISY_FLOOR_PS)
+    return {
+        epoch: (
+            departure > NO_SIGNAL_PS
+            or departure > noisy
+            or abs(median_change) > FAR_OFF_FREQUENCY_PS
+        )
+        for epoch, (median_change, departure) in windows.items()
+    }
 
 
 def agreed(per_reference: Sequence[Verdicts]) -> Verdicts:

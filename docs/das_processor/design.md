@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-07 23:06:54 UTC
+**Date:** 2026-10-08 17:56:45 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -2856,6 +2856,8 @@ A clock that is not running properly shows it in its readings in one of three wa
 A channel whose clock is off or disconnected gives readings with no clock signal: their phase is spread over the whole period.
 A clock reduced to its quartz crystal gives a signal, but its phase lurches by tens of nanoseconds from one epoch to the next.
 A clock far off frequency moves by tens of nanoseconds every epoch; however steadily it moves, it is not a properly running atomic clock, and a move near half a period an epoch leaves the whole number of periods in each reading hard to decide (§7.3).
+A clock can also turn noisy: its phase changes scatter by a few nanoseconds from one epoch to the next, many times more widely than while it runs properly.
+The estimator adapts its innovation scale to the noise and goes on accepting the readings, so its rejections do not show how long such a stretch lasts.
 In the first two cases the estimator cannot follow it: its pairs reject, are excluded for undecided slips and start afresh again and again, and its triples give double differences that mean nothing.
 Such a stretch is disabled (§13.6) by two dated entries in the clock configuration (§15.2): one that disables the clock, and one that enables it again.
 
@@ -2866,6 +2868,8 @@ For every other clock, in these steps, in order:
 1. Changes. For each reference r measuring clock c, the raw `measured_phase` of every row of the pair (r, c) with a reading, and its change from the reading one epoch before, wrapped into the half period either way.
    The raw phase is used rather than z, so the judgement does not depend on what the estimator did.
 2. Judging. An epoch is unlike a running clock when the changes within 12 epochs either side of it typically depart from their median by more than 10 ns, or their median is beyond 25 ns either way: the tests of §15.3 step 3, on a window that slides from epoch to epoch rather than on a day.
+   It is unlike a running clock too when they typically depart by more than 10 times the pair's quiet scatter and more than 5 ns: the quiet scatter is the median, over every window of the pair, of how far the window's changes typically depart from their median, which is how widely they scatter while the clock runs properly.
+   The 5 ns keeps a pair whose quiet scatter is a few picoseconds from being judged on measurement noise.
    A window with fewer than 9 changes judges nothing.
    A clock whose phase jumps now and then is not caught: it runs properly between its jumps.
 3. Agreement. An epoch counts as bad only when every reference that judged it found it so, so a fault in one reference's measurement is never taken for the clock's.

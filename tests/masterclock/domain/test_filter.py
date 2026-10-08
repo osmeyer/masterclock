@@ -2314,6 +2314,15 @@ def test_a_reject_fraction_over_its_limit_makes_the_series_dormant() -> None:
     assert at_limit.dormant_reason is None
 
 
+def test_the_dormant_reason_tells_the_fraction_from_its_limit() -> None:
+    """Write the fraction and limit with decimals enough to differ (9.4)."""
+    series_params = make_series_params(reject_fraction_weight=0.2, n_break=36)
+    just_over = filter_step_after(
+        last_row(reject_fraction=0.3755), pair_input(WORKED_Z + 100), series_params
+    )
+    assert just_over.dormant_reason == "reject fraction 0.5004 over the limit 0.5000"
+
+
 def test_four_rejects_in_five_make_the_series_dormant() -> None:
     """Catch a series rejected four readings in five, which N_break never sees.
 

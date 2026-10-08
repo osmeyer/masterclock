@@ -1635,18 +1635,49 @@ def _dormant_reason(draft: RowDraft, series_params: SeriesParams) -> str | None:
     -------
     str or None
         The rejects in a row when they reach ``n_break``; else the reject
-        fraction and its limit when the fraction is above the limit; else
+        fraction and its limit, with decimals enough to tell them apart (see
+        :func:`_written_apart`), when the fraction is above the limit; else
         ``None``.
     """
     if draft.consecutive_rejects >= series_params.n_break:
         draft.innovation_scale = None
         return f"{draft.consecutive_rejects} rejects in a row"
     if draft.reject_fraction > series_params.reject_fraction_limit:
-        return (
-            f"reject fraction {draft.reject_fraction:.3f} over the limit"
-            f" {series_params.reject_fraction_limit:.3f}"
+        fraction_text, limit_text = _written_apart(
+            draft.reject_fraction, series_params.reject_fraction_limit
         )
+        return f"reject fraction {fraction_text} over the limit {limit_text}"
     return None
+
+
+def _written_apart(above: float, below: float) -> tuple[str, str]:
+    """Write two numbers with as many decimals as it takes to tell them apart.
+
+    Parameters
+    ----------
+    above : float
+        The larger number.
+    below : float
+        The smaller number.
+
+    Returns
+    -------
+    tuple of (str, str)
+        Both, with the same number of decimals: three, or more when three
+        write them alike. Two different floats always come apart, since
+        enough decimals write a float exactly.
+
+    Examples
+    --------
+    >>> _written_apart(0.52, 0.5)
+    ('0.520', '0.500')
+    >>> _written_apart(0.50004, 0.5)
+    ('0.50004', '0.50000')
+    """
+    decimals = 3
+    while f"{above:.{decimals}f}" == f"{below:.{decimals}f}":
+        decimals += 1
+    return f"{above:.{decimals}f}", f"{below:.{decimals}f}"
 
 
 def _within_rms_limit(measurement: FilterInput, series_params: SeriesParams) -> bool:

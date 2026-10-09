@@ -1,6 +1,6 @@
 # das_processor user manual
 
-**Date:** 2026-10-08 17:56:45 UTC
+**Date:** 2026-10-09 12:52:45 UTC
 
 This manual tells you how to set up, run and look after `das_processor`, and how to read what it writes.
 It assumes no knowledge of the project or of timekeeping; the [README](../../README.md) gives the subject in brief.
@@ -450,8 +450,8 @@ Every row has the same width; its fields are separated by `, ` and padded with s
 
 | File | Row width W (characters, newline not counted) | Header lines | Header size H (bytes) |
 | --- | --- | --- | --- |
-| Measurement file | 491 | 31 | 2283 |
-| Double-difference file | 469 | 29 | 2180 |
+| Measurement file | 491 | 31 | 2286 |
+| Double-difference file | 469 | 29 | 2179 |
 
 <!-- end generated -->
 
@@ -462,7 +462,7 @@ The header says what the file is and what every column holds:
 ```text
 # das_processor double-difference file, format 1
 # WARNING: do not modify this file. Only das_processor may write it; any other change damages the archive.
-# One row per 10-minute epoch; '-' marks an empty field.
+# One row per 10-minute epoch; an empty field is blank.
 # Columns: right-justified, fixed width, separated by ', '.
 #   1  interpolated_datetime   epoch start E, UTC
 #   2  interpolated_mjd        epoch start E, MJD
@@ -494,14 +494,14 @@ The header says what the file is and what every column holds:
 <!-- end generated -->
 
 Then one row per epoch.
-`-` marks an empty field.
+An empty field is blank: spaces only, as wide as its column.
 These are the rows of a measurement file for an epoch with a reading and the next epoch without one, as das_processor writes them for the worked example in [design Appendix A](design.md#appendix-a-worked-epoch):
 
 <!-- generated: worked-meas-rows -->
 
 ```text
-2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,  60941.251588,  34579,    3,            6,          1234577,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
-2025-09-23 06:10:00+00:00,  60941.256944,                                -,             -,      -,    -,            -,                -,          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       813,         1,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        P
+2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,  60941.251588,  34579,    3,            6,          1234577,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0, +0.0000000000000000e+00,              ,                        ,              ,                        ,              ,                        , 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:10:00+00:00,  60941.256944,                                 ,              ,       ,     ,             ,                 ,          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       813,         1,         0, +0.0000000000000000e+00,              ,                        ,              ,                        ,              ,                        , 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        P
 ```
 
 <!-- end generated -->

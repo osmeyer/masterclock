@@ -5,8 +5,8 @@ The rules covered: the column table gives the measurement file a width of
 kind its header's size; every header line is only its text and starts with
 '#', in the design's order with the warning second, the columns numbered
 from 1, and every file of a kind gets the same header; rows are
-right-justified fixed-width columns separated by ', ', with '-' for an empty
-field, floats as {:+.16e} and the estimator's phase as whole femtoseconds
+right-justified fixed-width columns separated by ', ', with a blank field for an
+empty one, floats as {:+.16e} and the estimator's phase as whole femtoseconds
 written in ps with three decimals; the design's example rows come out byte
 for byte; a value too wide for its column raises DataFileError; parsing a
 row gives back the record it was formatted from and refuses a line that is
@@ -169,16 +169,16 @@ MEAS_EXAMPLE: Final = (
     "  60941.251588,  34579,    3,            6,          1234577,"
     "          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12,"
     " +3.0000000000000000e+00,                0,       812,         0,"
-    "         0, +0.0000000000000000e+00,             -,                       -,"
-    "             -,                       -,             -,                       -,"
+    "         0, +0.0000000000000000e+00,              ,                        ,"
+    "              ,                        ,              ,                        ,"
     " 3,"
     " +1.0000000000000000e+02, +5.0000000000000000e+01,        A",
-    "2025-09-23 06:10:00+00:00,  60941.256944,                                -,"
-    "             -,      -,    -,            -,                -,"
+    "2025-09-23 06:10:00+00:00,  60941.256944,                                 ,"
+    "              ,       ,     ,             ,                 ,"
     "          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12,"
     " +3.0000000000000000e+00,                0,       813,         1,"
-    "         0, +0.0000000000000000e+00,             -,                       -,"
-    "             -,                       -,             -,                       -,"
+    "         0, +0.0000000000000000e+00,              ,                        ,"
+    "              ,                        ,              ,                        ,"
     " 3,"
     " +1.0000000000000000e+02, +5.0000000000000000e+01,        P",
 )
@@ -189,15 +189,15 @@ DDIFF_EXAMPLE: Final = (
     " -2.9999999981373549e-01, +3.3166247903553998e+00, 111,          6666667.291,"
     " +2.0499852230130653e-02, -8.2093687746445554e-13, +3.4650829715892466e+00,"
     "                0,      3107,         0,         0, +0.0000000000000000e+00,"
-    "             -,                       -,             -,                       -,"
-    "             -,                       -, 3, +1.0000000000000000e+02,"
+    "              ,                        ,              ,                        ,"
+    "              ,                        , 3, +1.0000000000000000e+02,"
     " +5.0000000000000000e+01,        A",
     "2025-09-23 06:00:00+00:00,  60941.250000,          1234577,"
     " +2.6200000000000001e+00, +3.0000000000000000e+00, 111,          1234574.457,"
     " +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,"
     "                0,       812,         0,         0, +0.0000000000000000e+00,"
-    "             -,                       -,             -,                       -,"
-    "             -,                       -, 3, +1.0000000000000000e+02,"
+    "              ,                        ,              ,                        ,"
+    "              ,                        , 3, +1.0000000000000000e+02,"
     " +5.0000000000000000e+01,        A",
 )
 """The two example rows of design 5.5: the remote triple, then the local one."""
@@ -252,7 +252,7 @@ def test_the_measurement_header_is_the_design_s() -> None:
         "# das_processor measurement file, format 1",
         "# WARNING: do not modify this file. Only das_processor may write it;"
         " any other change damages the archive.",
-        "# One row per 10-minute epoch; '-' marks an empty field.",
+        "# One row per 10-minute epoch; an empty field is blank.",
         "# Columns: right-justified, fixed width, separated by ', '.",
     ]
     assert header_lines[4] == "#   1  interpolated_datetime   epoch start E, UTC"
@@ -381,7 +381,7 @@ def test_the_example_rows_parse_back() -> None:
 
 
 def test_a_dormant_row_writes_its_state_as_empty_fields() -> None:
-    """Write '-' for x, y, d and the scale of a dormant row, right-justified."""
+    """Write x, y, d and the scale of a dormant row as blank fields."""
     dormant_row = worked_row(
         x_fs=None,
         y=None,
@@ -396,13 +396,26 @@ def test_a_dormant_row_writes_its_state_as_empty_fields() -> None:
     )
     row_fields = row_line.split(", ")
     assert row_fields[8:12] == [
-        "-".rjust(20),
-        "-".rjust(23),
-        "-".rjust(23),
-        "-".rjust(23),
+        " " * 20,
+        " " * 23,
+        " " * 23,
+        " " * 23,
     ]
     assert row_fields[17:19] == [" 60941.243056", "+1.2345700000000000e+06"]
     assert files.parse_meas_row(row_line).row == dormant_row
+
+
+def test_a_dash_is_not_an_empty_field() -> None:
+    """Refuse '-' where a field is empty: an empty field is only blank."""
+    row_fields = MEAS_EXAMPLE[0].split(", ")
+    blank_fields = [field_text for field_text in row_fields if not field_text.strip()]
+    assert len(blank_fields) == 6
+    dashed_line = ", ".join(
+        "-".rjust(len(field_text)) if not field_text.strip() else field_text
+        for field_text in row_fields
+    )
+    with pytest.raises(DataFileError, match="does not parse"):
+        files.parse_meas_row(dashed_line)
 
 
 @pytest.mark.parametrize(
@@ -480,9 +493,9 @@ def test_a_cycle_count_too_wide_is_refused() -> None:
         ("2025-09-23 06:00:00+00:00", "2025-09-23 06:00:00-05:00"),
         (",       812,", ",       81x,"),
         ("  34579,", " 234579,"),
-        (",                0,       812,", ",                -,       812,"),
+        (",                0,       812,", ",                 ,       812,"),
         ("+0.0000000000000000e+00,", "+1.5000000000000000e+00,"),
-        ("+0.0000000000000000e+00,", "                      -,"),
+        ("+0.0000000000000000e+00,", "                       ,"),
     ],
 )
 def test_a_line_not_exactly_as_written_is_refused(
@@ -568,11 +581,11 @@ DISABLED_READING: Final = DisabledReading(
 """Appendix A's reading, taken while its pair is disabled, carrying z."""
 
 
-@pytest.mark.parametrize(("carried_z", "z_text"), [(1_234_577, "1234577"), (None, "-")])
+@pytest.mark.parametrize(("carried_z", "z_text"), [(1_234_577, "1234577"), (None, "")])
 def test_a_disabled_row_writes_the_reading_no_cycle_count_and_the_carried_z(
     carried_z: int | None, z_text: str
 ) -> None:
-    """Write the reading, '-' for the cycle count, z or '-', no state, O (5.4)."""
+    """Write the reading, no cycle count, z or none, no state, O (5.4)."""
     file_record = files.MeasRecord(
         measurement=dataclasses.replace(DISABLED_READING, z=carried_z),
         row=disabled_row(E, 3),
@@ -584,12 +597,12 @@ def test_a_disabled_row_writes_the_reading_no_cycle_count_and_the_carried_z(
         "60941.251588",
         "34579",
         "3",
-        "-",
+        "",
         z_text,
-        "-",
-        "-",
-        "-",
-        "-",
+        "",
+        "",
+        "",
+        "",
     ]
     assert field_texts[-1] == "O"
     assert files.parse_meas_row(row_line) == file_record
@@ -619,14 +632,14 @@ def test_a_cycle_count_is_written_exactly_when_the_row_is_not_disabled() -> None
         files.MeasRecord(measurement=DISABLED_READING, row=disabled_row(E, 3))
     )
     with_cycle_count = disabled_line.replace(
-        ",            -,          1234577,", ",            6,          1234577,"
+        ",             ,          1234577,", ",            6,          1234577,"
     )
     assert with_cycle_count != disabled_line
     with pytest.raises(DataFileError, match="does not parse"):
         files.parse_meas_row(with_cycle_count)
     tracked_line = MEAS_EXAMPLE[0]
     without_cycle_count = tracked_line.replace(
-        ",            6,          1234577,", ",            -,          1234577,"
+        ",            6,          1234577,", ",             ,          1234577,"
     )
     assert without_cycle_count != tracked_line
     with pytest.raises(DataFileError, match="does not parse"):
@@ -2307,20 +2320,20 @@ def with_field_replaced(row_line: str, field_index: int, field_text: str) -> str
         ),
         (
             "meas",
-            lambda row_line: with_field_replaced(row_line, 0, "-"),
+            lambda row_line: with_field_replaced(row_line, 0, ""),
             "never empty is empty",
         ),
         (
             "ddiff",
             lambda row_line: with_field_replaced(
-                with_field_replaced(row_line, 2, "-"), 5, "-"
+                with_field_replaced(row_line, 2, ""), 5, ""
             ),
             "never empty is empty",
         ),
         (
             "ddiff",
             lambda row_line: with_field_replaced(
-                with_field_replaced(row_line, 4, "-"), 5, "-"
+                with_field_replaced(row_line, 4, ""), 5, ""
             ),
             "never empty is empty",
         ),
@@ -2362,7 +2375,7 @@ def test_a_line_not_written_so_names_its_row() -> None:
 
 def test_a_field_never_empty_is_refused_in_those_words() -> None:
     """End the refusal of an empty field that is never empty with its reason."""
-    row_line = with_field_replaced(MEAS_EXAMPLE[0], 0, "-")
+    row_line = with_field_replaced(MEAS_EXAMPLE[0], 0, "")
     with pytest.raises(DataFileError) as refusal:
         files.parse_meas_row(row_line)
     assert str(refusal.value).endswith(

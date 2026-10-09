@@ -10,8 +10,8 @@ Every row is the same width W, worked out from the file's column table.
 Every line ends with a newline. The program never reads the header back.
 
 A row is the values of one epoch, each right-justified in a column exactly
-as wide as its values need and separated by ``", "``; ``-`` marks an empty
-field. Floats are written as ``{:+.16e}``, seventeen significant digits,
+as wide as its values need and separated by ``", "``; an empty field is
+blank, all spaces. Floats are written as ``{:+.16e}``, seventeen significant digits,
 which give every float back exactly; the estimator's phase, held in whole
 femtoseconds, is written in ps with three decimals. A value too wide for its
 column is refused before anything is written.
@@ -163,7 +163,7 @@ MEAS_COLUMNS: Final[tuple[Column, ...]] = (
     Column("measurement_mjd", 13, "measurement time, MJD"),
     Column("measured_phase", 6, "raw phase from the DAS, ps"),
     Column("rms", RMS_WIDTH, "RMS from the DAS, ps"),
-    Column("cycle_count", 12, "whole periods added in decycling; - when disabled"),
+    Column("cycle_count", 12, "whole periods added in decycling; empty when disabled"),
     Column("z", 16, "decycled phase interpolated to E, ps"),
     *_STATE_COLUMNS,
 )
@@ -182,8 +182,8 @@ DDIFF_COLUMNS: Final[tuple[Column, ...]] = (
 SEPARATOR: Final[str] = ", "
 """What stands between two columns."""
 
-EMPTY: Final[str] = "-"
-"""What an empty field holds."""
+EMPTY: Final[str] = ""
+"""What an empty field holds before padding: nothing, so it reads as blank."""
 
 _PREAMBLE: Final[int] = 4
 """How many header lines come before the column lines."""
@@ -417,7 +417,7 @@ def header(file_kind: FileKind) -> str:
     header_lines_text = [
         f"# das_processor {_TITLES[file_kind]} file, format 1",
         _WARNING,
-        f"# One row per 10-minute epoch; '{EMPTY}' marks an empty field.",
+        "# One row per 10-minute epoch; an empty field is blank.",
         f"# Columns: right-justified, fixed width, separated by '{SEPARATOR}'.",
         *(
             f"#  {number:>2}  {column.name:<24}{column.meaning}"

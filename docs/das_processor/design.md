@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-09 01:42:15 UTC
+**Date:** 2026-10-09 12:52:45 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -516,8 +516,8 @@ Every file of a kind has the same header, of H bytes, and every row has the same
 
 | File | Row width W (characters, newline not counted) | Header lines | Header size H (bytes) |
 | --- | --- | --- | --- |
-| Measurement file | 491 | 31 | 2283 |
-| Double-difference file | 469 | 29 | 2180 |
+| Measurement file | 491 | 31 | 2286 |
+| Double-difference file | 469 | 29 | 2179 |
 
 <!-- end generated -->
 
@@ -531,7 +531,7 @@ A fixed header size and fixed-width rows make a file's soundness a matter of ari
   The header is for people; the program never reads it.
 - Columns: each column is exactly as wide as its values need (§5.4, §5.5).
   Values are right-justified, and columns are separated by a comma and one space.
-- Empty field: `-`, right-justified.
+- Empty field: blank, as many spaces as the column is wide.
 - Overflow: a value too wide for its column raises `DataFileError` while the row is formatted, before anything is written (§5.8).
 - Reading back: a row read from a file is formatted again and refused unless it gives back exactly the same line, so a row is accepted only in the one form das_processor writes.
   The measurement file holds no innovation, so a measurement row reads back without one; a triple's cold-start mark is not written either.
@@ -601,7 +601,7 @@ One row per epoch holds the pair's measurement, decycled and referred to E (§7)
 | 4 | `measurement_mjd` | 13 | measurement time, MJD |
 | 5 | `measured_phase` | 6 | raw phase from the DAS, ps |
 | 6 | `rms` | 4 | RMS from the DAS, ps |
-| 7 | `cycle_count` | 12 | whole periods added in decycling; - when disabled |
+| 7 | `cycle_count` | 12 | whole periods added in decycling; empty when disabled |
 | 8 | `z` | 16 | decycled phase interpolated to E, ps |
 | 9 | `x` | 20 | estimated phase at E, ps, to the femtosecond |
 | 10 | `y` | 23 | estimated rate, ps/s |
@@ -671,7 +671,7 @@ The header of a measurement file:
 ```text
 # das_processor measurement file, format 1
 # WARNING: do not modify this file. Only das_processor may write it; any other change damages the archive.
-# One row per 10-minute epoch; '-' marks an empty field.
+# One row per 10-minute epoch; an empty field is blank.
 # Columns: right-justified, fixed width, separated by ', '.
 #   1  interpolated_datetime   epoch start E, UTC
 #   2  interpolated_mjd        epoch start E, MJD
@@ -679,7 +679,7 @@ The header of a measurement file:
 #   4  measurement_mjd         measurement time, MJD
 #   5  measured_phase          raw phase from the DAS, ps
 #   6  rms                     RMS from the DAS, ps
-#   7  cycle_count             whole periods added in decycling; - when disabled
+#   7  cycle_count             whole periods added in decycling; empty when disabled
 #   8  z                       decycled phase interpolated to E, ps
 #   9  x                       estimated phase at E, ps, to the femtosecond
 #  10  y                       estimated rate, ps/s
@@ -753,7 +753,7 @@ The header of a double-difference file:
 ```text
 # das_processor double-difference file, format 1
 # WARNING: do not modify this file. Only das_processor may write it; any other change damages the archive.
-# One row per 10-minute epoch; '-' marks an empty field.
+# One row per 10-minute epoch; an empty field is blank.
 # Columns: right-justified, fixed width, separated by ', '.
 #   1  interpolated_datetime   epoch start E, UTC
 #   2  interpolated_mjd        epoch start E, MJD
@@ -3106,8 +3106,8 @@ The rows of the pair's measurement file for this epoch and for the next, which h
 <!-- generated: worked-meas-rows -->
 
 ```text
-2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,  60941.251588,  34579,    3,            6,          1234577,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
-2025-09-23 06:10:00+00:00,  60941.256944,                                -,             -,      -,    -,            -,                -,          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       813,         1,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        P
+2025-09-23 06:00:00+00:00,  60941.250000, 2025-09-23 06:02:17.203200+00:00,  60941.251588,  34579,    3,            6,          1234577,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0, +0.0000000000000000e+00,              ,                        ,              ,                        ,              ,                        , 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:10:00+00:00,  60941.256944,                                 ,              ,       ,     ,             ,                 ,          1234581.838, +1.2301294825235671e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       813,         1,         0, +0.0000000000000000e+00,              ,                        ,              ,                        ,              ,                        , 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        P
 ```
 
 <!-- end generated -->
@@ -3132,8 +3132,8 @@ Their rows, the remote triple's first; the local triple's estimate is its pair's
 <!-- generated: worked-ddiff-rows -->
 
 ```text
-2025-09-23 06:00:00+00:00,  60941.250000,          6666667, -5.3000000000000007e+00, +3.3166247903553998e+00, 111,          6666672.143, +2.0497389398973252e-02, -1.4503218177543500e-11, +3.5449682650201537e+00,                0,      3107,         0,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
-2025-09-23 06:00:00+00:00,  60941.250000,          1234577, +2.6200000000000001e+00, +3.0000000000000000e+00, 111,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0, +0.0000000000000000e+00,             -,                       -,             -,                       -,             -,                       -, 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:00:00+00:00,  60941.250000,          6666667, -5.3000000000000007e+00, +3.3166247903553998e+00, 111,          6666672.143, +2.0497389398973252e-02, -1.4503218177543500e-11, +3.5449682650201537e+00,                0,      3107,         0,         0, +0.0000000000000000e+00,              ,                        ,              ,                        ,              ,                        , 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
+2025-09-23 06:00:00+00:00,  60941.250000,          1234577, +2.6200000000000001e+00, +3.0000000000000000e+00, 111,          1234574.457, +1.2301290523526430e-02, +7.1695154009743332e-12, +3.0000000000000000e+00,                0,       812,         0,         0, +0.0000000000000000e+00,              ,                        ,              ,                        ,              ,                        , 3, +1.0000000000000000e+02, +5.0000000000000000e+01,        A
 ```
 
 <!-- end generated -->

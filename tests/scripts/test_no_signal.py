@@ -41,7 +41,12 @@ import pytest
 
 import no_signal
 from characterize import FAR_OFF_FREQUENCY_PS
-from masterclock.das_processor.files import MEAS_COLUMNS, MEAS_HEADER_LINES, SEPARATOR
+from masterclock.das_processor.files import (
+    EMPTY,
+    MEAS_COLUMNS,
+    MEAS_HEADER_LINES,
+    SEPARATOR,
+)
 
 PERIOD: Final = 200_000
 """The phase period, ps."""
@@ -153,7 +158,7 @@ def meas_row(epoch: int, phase: int | None) -> str:
         elif column.name == "measured_phase" and phase is not None:
             text = str(phase)
         else:
-            text = "-"
+            text = EMPTY
         fields.append(text.rjust(column.width))
     return SEPARATOR.join(fields) + "\n"
 

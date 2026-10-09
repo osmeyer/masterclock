@@ -1,6 +1,6 @@
 # masterclock
 
-**Date:** 2026-10-05 21:52:09 UTC
+**Date:** 2026-10-09 19:07:02 UTC
 
 masterclock is software for a timekeeping laboratory that runs many atomic clocks.
 It turns the laboratory's raw, continuous record of clock comparisons into clean data that a timescale can be built from.
@@ -35,9 +35,9 @@ One period of a 5 MHz wave lasts <!-- figure: PHASE_PERIOD -->200 000<!-- end fi
 A measurement can only say where in that period the difference falls, so a reading near the end of one period looks the same as a reading near the start of the next.
 Putting back the whole periods a reading cannot show is called *decycling*.
 
-```latex
+$$
 \varphi = (x_a - x_b) \bmod P, \qquad P = 200\,000\ \mathrm{ps}
-```
+$$
 
 Here x_a and x_b are the times kept by clocks a and b, φ is what the instrument reads, and P is one period.
 

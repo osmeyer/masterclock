@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-09 12:52:45 UTC
+**Date:** 2026-10-09 19:07:02 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -69,9 +69,9 @@ Tables and numbers taken from the code are written from it by `scripts/documents
 
 A measurement pair (a, b) is the phase of reference a relative to clock or reference b:
 
-```latex
+$$
 z(a,b) = x_a - x_b \quad [\mathrm{ps}]
-```
+$$
 
 Every derived quantity keeps this convention.
 A triple (r, s, c) is a measurement of x_r − x_c.
@@ -207,9 +207,9 @@ It has three roles:
 A clock is measured against the references in its own building.
 To compare it with a reference elsewhere, das_processor adds the two-way comparison of the two references to the clock's local measurement.
 
-```latex
+$$
 \mathcal{T} = \left\{ (r, s, c) \;:\; r \in \mathrm{REFS},\; (s,c) \text{ is a pair},\; (r,s),\,(s,r) \text{ are pairs},\; \mathrm{loc}_E(s) = \mathrm{loc}_E(c) \neq \text{none} \right\}
-```
+$$
 
 A triple (r, s, c) adds the two-way comparison of r and s to the pair (s, c), whatever c is.
 The result is a measurement of x_r − x_c (§12).
@@ -1539,15 +1539,15 @@ A series is moved by every reference in its effective difference, with the sign 
 
 Input over the previous epoch: events at times t_m in (E − T, E] enter the prediction from E − T to E:
 
-```latex
+$$
 u_x = \sum_m s_m\left[\Delta x_m + \Delta y_m\,(E - t_m)\right], \qquad u_y = \sum_m s_m\,\Delta y_m, \qquad u_d = 0
-```
+$$
 
 Steering inside the current epoch: events at t_m in (E, t], where t is the measurement time, change the phase at t but not the state at E:
 
-```latex
+$$
 w(t) = \sum_m s_m\left[\Delta x_m + \Delta y_m\,(t - t_m)\right]
-```
+$$
 
 w is added to the prediction at t and taken off again when the measurement is referred to E.
 The same events enter u in full at the next epoch, so nothing is counted twice.
@@ -1593,15 +1593,15 @@ def steer_w(series_key, epoch_start, steering, measured_at):  # (E, t]
 
 X⁻ is the predicted state at E (§8.3), moved on to the measurement time:
 
-```latex
+$$
 \hat{x}(t) = x^- + y^-\delta + \tfrac{1}{2}\,d^-\delta^2 + w(t)
-```
+$$
 
 ### 7.3 Decycling
 
-```latex
+$$
 n = \operatorname{round\_even}\!\left(\frac{\hat{x}(t) - \varphi}{P}\right), \qquad x_u = \varphi + nP
-```
+$$
 
 Decycling is right while the true phase is within P/2 = 100 000 ps of x̂(t).
 Three things keep it there:
@@ -1612,9 +1612,9 @@ Three things keep it there:
 
 ### 7.4 Referring back to the epoch start
 
-```latex
+$$
 z_E = \operatorname{round\_even}\!\left(x_u - y^-\delta - \tfrac{1}{2}\,d^-\delta^2 - w(t)\right)
-```
+$$
 
 The error this leaves is (y − y⁻)δ: with a rate error of 10⁻¹⁵, 0.001 ps/s, it is at most 0.6 ps.
 
@@ -1623,9 +1623,9 @@ The error this leaves is (y − y⁻)δ: with a rate error of 10⁻¹⁵, 0.001 
 A new or dormant pair has no prediction.
 Its measurement is decycled against the last measurement z_b in its acquisition buffer (§13.3), or with n = 0 when the buffer is empty:
 
-```latex
+$$
 n = \operatorname{round\_even}\!\left(\frac{z_b - \varphi + w(t)}{P}\right), \qquad z_E = \operatorname{round\_even}\left(\varphi + nP - w(t)\right)
-```
+$$
 
 The measurement then goes to the acquisition buffer (§13.3).
 
@@ -1685,39 +1685,39 @@ A change of M or M_σ takes effect through a warm segment start (§8.7).
 
 ### 8.2 State models
 
-```latex
+$$
 X_3 = \begin{bmatrix} x \\ y \\ d \end{bmatrix}, \quad \Phi_3 = \begin{bmatrix} 1 & T & T^2/2 \\ 0 & 1 & T \\ 0 & 0 & 1 \end{bmatrix}, \quad H_3 = \begin{bmatrix} 1 & 0 & 0 \end{bmatrix} \qquad X_2 = \begin{bmatrix} x \\ y \end{bmatrix}, \quad \Phi_2 = \begin{bmatrix} 1 & T \\ 0 & 1 \end{bmatrix}, \quad H_2 = \begin{bmatrix} 1 & 0 \end{bmatrix}
-```
+$$
 
 The 1-state model has X₁ = [x], Φ₁ = [1] and H₁ = [1].
 In a 2-state row, d is written as 0.0; in a 1-state row, y and d are both written as 0.0.
 
 ### 8.3 Prediction
 
-```latex
+$$
 X^- = \Phi X + \begin{bmatrix} u_x \\ u_y \\ 0 \end{bmatrix}
-```
+$$
 
 X is the state in the last row, and u comes from §7.1.
 A series whose last row is dormant, or that has no last row, has no prediction.
 
 ### 8.4 Update and fixed gains
 
-```latex
+$$
 \nu = z_E - x^-, \qquad X = X^- + K\,\nu, \qquad K_3 = \begin{bmatrix} g \\ h/T \\ 2k/T^2 \end{bmatrix}, \quad K_2 = \begin{bmatrix} g \\ h/T \end{bmatrix}
-```
+$$
 
 3-state gains place a triple pole at λ:
 
-```latex
+$$
 \lambda = e^{-1/M}, \qquad g = 1 - \lambda^3, \qquad h = \tfrac{3}{2}(1-\lambda)^2(1+\lambda), \qquad k = \tfrac{1}{2}(1-\lambda)^3
-```
+$$
 
 2-state gains place a double pole at λ:
 
-```latex
+$$
 g = 1 - \lambda^2, \qquad h = (1-\lambda)^2
-```
+$$
 
 The 1-state model has the one gain g = 1 and no time constant: an accepted measurement passes through exactly, x = z_E.
 The gains are worked out from the M of the row's segment: the last row's, or the new one on a row that starts a segment.
@@ -1877,9 +1877,9 @@ A pair's measurement whose RMS is over its limit is never accepted, not after a 
 σ_ν, the innovation scale, is how large an innovation is expected to be.
 It is updated on accepted rows only, from the innovation before the state update:
 
-```latex
+$$
 \sigma_\nu^2 \leftarrow \max\!\left[(1-w)\,\sigma_\nu^2 + w\,\nu^2,\; \sigma_{\mathrm{floor}}^2\right], \qquad w = 1/M_\sigma
-```
+$$
 
 σ_floor is the measurement's own rms for a pair, and σ_dd for a triple.
 Rejected, excluded and predicted rows carry σ_ν unchanged, and a cold start sets σ_ν = σ₀, or the scale a reject-fraction restart kept (§8.6).
@@ -1920,24 +1920,24 @@ xychart-beta
 
 Phase step: the innovations agree.
 
-```latex
+$$
 \bar{\nu} = \tfrac{1}{3}\textstyle\sum_i \nu_i, \qquad \max_i |\nu_i - \bar{\nu}| < k_{\mathrm{step}}\,\sigma_\nu \;\Rightarrow\; \Delta_{\mathrm{step}} = \operatorname{round\_even}(\bar{\nu})
-```
+$$
 
 Δ_step is added to x⁻ and to step_offset, and the current measurement is accepted against the corrected prediction.
 The segment goes on.
 
 Frequency step: the innovations lie on a line fitted by least squares.
 
-```latex
+$$
 s = \frac{\sum_i (t_i - \bar{t})(\nu_i - \bar{\nu})}{\sum_i (t_i - \bar{t})^2}, \qquad a = \bar{\nu} - s\,\bar{t}, \qquad \max_i \left|\nu_i - a - s\,t_i\right| < k_{\mathrm{step}}\,\sigma_\nu
-```
+$$
 
 The prediction is moved onto the line at the current epoch, a warm segment starts (§8.7), and the current measurement is accepted:
 
-```latex
+$$
 x^- \leftarrow x^- + a + s\,t_3, \qquad y^- \leftarrow y^- + s
-```
+$$
 
 Neither: the row stays rejected.
 When consecutive_rejects reaches N_break, or the reject fraction f (§9.3) is above f_max, from `reject_fraction_limit` (§15.2), the series goes dormant, and starts again only once it acquires (§13.3); after the reject fraction it keeps its σ_ν for that cold start (§8.6).
@@ -2121,9 +2121,9 @@ Excluded and held pairs are treated as §9.5 says.
 The self-measurement fails at an epoch when its innovation is outside the gate, |ν_(r,r)| > k_out σ_ν.
 A failure means r's measurement system shifted by about ν_(r,r), and only the pairs of r that show the same shift are excluded, with k_shared = <!-- figure: K_SHARED -->3<!-- end figure -->:
 
-```latex
+$$
 \text{exclude } (r,b),\ b \neq r, \quad \text{if} \quad \left|\nu_{(r,b)} - \nu_{(r,r)}\right| \le k_{\mathrm{shared}}\sqrt{\sigma_{\nu,(r,b)}^2 + \sigma_{\nu,(r,r)}^2}
-```
+$$
 
 Two cases exclude nothing:
 
@@ -2136,26 +2136,26 @@ A lasting shift in r's measurement system resolves itself: the excluded pairs wh
 
 The two directions of a link carry opposite phases, so their innovations must cancel:
 
-```latex
+$$
 \rho_{rs} = \nu_{(r,s)} + \nu_{(s,r)}, \qquad \sigma_\rho = \sqrt{\sigma_{\nu,(r,s)}^2 + \sigma_{\nu,(s,r)}^2}, \qquad \text{fail if } |\rho_{rs}| > k_{\mathrm{out}}\,\sigma_\rho
-```
+$$
 
 On a failure, the bad direction is found by comparing each direction with an estimate of the link built from the other references.
 The two-way innovation of a link and its scale are:
 
-```latex
+$$
 \bar{r}_{ab} = \tfrac{1}{2}\left[\nu_{(a,b)} - \nu_{(b,a)}\right], \qquad \sigma_{\bar{r},ab} = \tfrac{1}{2}\sqrt{\sigma_{\nu,(a,b)}^2 + \sigma_{\nu,(b,a)}^2}
-```
+$$
 
 Each third reference t with usable links s–t and t–r gives one estimate, and the closure estimate is the median over t:
 
-```latex
+$$
 \hat{r}^{(t)}_{rs} = -\left(\bar{r}_{st} + \bar{r}_{tr}\right), \qquad \sigma^{(t)} = \sqrt{\sigma_{\bar{r},st}^2 + \sigma_{\bar{r},tr}^2}, \qquad \hat{r}_{rs} = \operatorname{median}_t \hat{r}^{(t)}_{rs}, \qquad \sigma_{\hat{r}} = \operatorname{median}_t \sigma^{(t)}
-```
+$$
 
-```latex
+$$
 (r,s) \text{ is bad if } \left|\nu_{(r,s)} - \hat{r}_{rs}\right| > k_{\mathrm{out}}\sqrt{\sigma_{\nu,(r,s)}^2 + \sigma_{\hat{r}}^2}, \qquad (s,r) \text{ is bad if } \left|-\nu_{(s,r)} - \hat{r}_{rs}\right| > k_{\mathrm{out}}\sqrt{\sigma_{\nu,(s,r)}^2 + \sigma_{\hat{r}}^2}
-```
+$$
 
 Exactly one bad direction excludes that direction.
 Both bad, neither bad, or no estimate excludes both directions.
@@ -2170,9 +2170,9 @@ A link is tested only when both its directions are usable, so a link with a dire
 Going round a triangle of references and back must give zero.
 For every triangle of references (r, s, t), in sorted order, with all three links usable both ways:
 
-```latex
+$$
 C_{rst} = \bar{r}_{rs} + \bar{r}_{st} + \bar{r}_{tr}, \qquad \sigma_C = \sqrt{\sigma_{\bar{r},rs}^2 + \sigma_{\bar{r},st}^2 + \sigma_{\bar{r},tr}^2}, \qquad \text{fail if } |C_{rst}| > k_{\mathrm{out}}\,\sigma_C
-```
+$$
 
 A link is excluded, both directions, when it is in every failing triangle and in no passing one.
 With three references there is one triangle, so a failure excludes all three links.
@@ -2270,16 +2270,16 @@ Only usable pairs count: a pair with a measurement and a prediction that screeni
 
 For clock c measured at an epoch against references r and s, r before s in sorted order, both clock pairs usable and the link usable both ways:
 
-```latex
+$$
 D_{rs}^{(c)} = \nu_{(r,c)} - \nu_{(s,c)} - \bar{r}_{rs}, \qquad \sigma_D = \sqrt{\sigma_{\nu,(r,c)}^2 + \sigma_{\nu,(s,c)}^2 + \sigma_{\bar{r},rs}^2}
-```
+$$
 
 With no slip, D is near zero.
 D is flagged when:
 
-```latex
+$$
 m = \operatorname{round\_even}(D/P) \neq 0 \quad\text{and}\quad \left|D - mP\right| < k_{\mathrm{out}}\,\sigma_D
-```
+$$
 
 ### 11.2 Attribution
 
@@ -2294,9 +2294,9 @@ In a flagged D, a slipped first pair (r, c) needs a correction of −m cycles, a
 
 The slipped pair's measurement is corrected before filtering, and its row carries flag S:
 
-```latex
+$$
 n \leftarrow n + k, \qquad z_E \leftarrow z_E + kP, \qquad k = \begin{cases} -m & \text{the slipped pair is } (r,c) \\ +m & \text{the slipped pair is } (s,c) \end{cases}
-```
+$$
 
 ### 11.4 Pseudocode
 
@@ -2368,18 +2368,18 @@ The pairs' estimates never enter it, except in the one case of §12.2.
 
 ### 12.1 Value
 
-```latex
+$$
 dd = z_{(s,c)} + \tfrac{1}{2}\left[z_{(r,s)} - z_{(s,r)}\right] = x_r - x_c + \text{const}
-```
+$$
 
 ### 12.2 One link direction missing
 
 When only one direction of the link between r and s is accepted, the missing one is replaced through the predicted round trip of the two link pairs, which keeps dd continuous when the components used change.
 Both link pairs must have a valid prediction.
 
-```latex
+$$
 \hat{\rho}_{rs} = x^-_{(r,s)} + x^-_{(s,r)}, \qquad z_{(s,r)} \leftarrow \hat{\rho}_{rs} - z_{(r,s)} \quad\text{or}\quad z_{(r,s)} \leftarrow \hat{\rho}_{rs} - z_{(s,r)}
-```
+$$
 
 The triple has no measurement at the epoch when (s, c) is not accepted, when both link directions are missing, or when ρ̂ is needed and a link pair has no valid prediction.
 
@@ -2397,9 +2397,9 @@ The triple has no measurement at the epoch when (s, c) is not accepted, when bot
 
 For a clock local to r, the local triple (r, r, c) uses (r, r) as both link directions, and the link term cancels exactly:
 
-```latex
+$$
 dd_{(r,r,c)} = z_{(r,c)} + \tfrac{1}{2}\left[z_{(r,r)} - z_{(r,r)}\right] = z_{(r,c)}, \qquad \sigma_{dd} = \sigma_{rc}
-```
+$$
 
 The two link terms are the same number, so they add no uncertainty, and the local triple needs only (r, c) accepted.
 It evaluates the general formula and checks that dd = z(r,c) exactly, in whole picoseconds.
@@ -2505,9 +2505,9 @@ It stores the prediction X⁻ with x rounded, carries σ_ν, and adds one to epo
 A measurement arriving after n held rows is decycled against a prediction n + 1 epochs long.
 G_max is the largest n for which that prediction stays inside the decycling bound with a 5σ margin:
 
-```latex
+$$
 G_{\max} = \max\left\{ n : 5\,\sigma_{x,\mathrm{pred}}\big((n+1)T\big) < \tfrac{P}{2} \right\}, \qquad \sigma_{x,\mathrm{pred}}(\tau) = 10^{12}\,\tau\,\sqrt{\sigma_{y,c}^2(\tau) + \sigma_{y,c}^2(MT)} \quad [\mathrm{ps}]
-```
+$$
 
 σ_y,c(τ) is the clock's Allan deviation model (§15.3), and σ_y,c(MT) stands for the uncertainty of the settled estimator's rate.
 G_max is chosen for each clock and given as `gap_limit` (§15.2).
@@ -2535,9 +2535,9 @@ While it is dormant, its reject buffer holds its last measurements as (epoch, z)
 A pair's reading over its RMS limit is never buffered: it empties the buffer, so the three a series acquires from each passed the RMS limit.
 The series cold-starts (§8.6) from the current measurement, at the three measurements' mean rate, when the buffer holds three measurements from consecutive epochs whose second difference passes:
 
-```latex
+$$
 \left| z_3 - 2z_2 + z_1 \right| \le 5\sqrt{6}\,\sigma_0
-```
+$$
 
 The second difference cancels any constant rate, so the test needs no estimate of the clock's frequency.
 The second difference of three readings with independent noise σ₀ has a standard deviation of √6 σ₀, so the bound is five of those.
@@ -2821,15 +2821,15 @@ The input is the z column of each local triple from that run, each prepared on i
 
 The clock's noise model, white, flicker and random-walk frequency noise:
 
-```latex
+$$
 \sigma_{y,c}^2(\tau) = \frac{a_{-1}}{\tau} + a_0 + a_1\,\tau
-```
+$$
 
 The measurement noise σ_meas, in ps, is √(a₋₂ / 3) × 10¹², from the fit's white phase term, never from the rms column the DAS reports, which does not match the phase's own scatter:
 
-```latex
+$$
 \sigma_{y,\mathrm{meas}}(\tau) = \frac{\sqrt{3}\,\sigma_{\mathrm{meas}}\cdot 10^{-12}}{\tau}
-```
+$$
 
 The settings follow:
 
@@ -3123,9 +3123,9 @@ The remote triple (mc1, mc2, hm7) and the local triple (mc2, mc2, hm7) at the sa
 
 <!-- end generated -->
 
-```latex
+$$
 dd = z_{(\mathrm{mc2},\mathrm{hm7})} + \tfrac{1}{2}\left[z_{(\mathrm{mc1},\mathrm{mc2})} - z_{(\mathrm{mc2},\mathrm{mc1})}\right], \qquad \sigma_{dd} = \sqrt{\sigma_{\mathrm{mc2,hm7}}^2 + \tfrac{1}{4}\left(\sigma_{\mathrm{mc1,mc2}}^2 + \sigma_{\mathrm{mc2,mc1}}^2\right)}
-```
+$$
 
 Their rows, the remote triple's first; the local triple's estimate is its pair's, since it starts from the same row and its σ_dd is the pair's rms:
 

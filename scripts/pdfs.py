@@ -3,12 +3,12 @@
 The documents are the README at the top of the project and every Markdown
 file under ``docs/``, the reports included. Each is turned into an HTML
 page, its tables as tables, its mermaid blocks drawn by mermaid and its
-LaTeX blocks set by MathJax, both loaded at fixed versions from the jsDelivr
-CDN as the page is printed, so making the PDFs needs the network; each file
-is checked against its hash, and Chrome runs no file that does not match. Headless
-Chrome then prints each page to a PDF of the same name, in the same folders,
-under the output folder. A link from one document to another points at the
-other's PDF.
+display maths, LaTeX between two lines of ``$$``, set by MathJax, both
+loaded at fixed versions from the jsDelivr CDN as the page is printed, so
+making the PDFs needs the network; each file is checked against its hash,
+and Chrome runs no file that does not match. Headless Chrome then prints
+each page to a PDF of the same name, in the same folders, under the output
+folder. A link from one document to another points at the other's PDF.
 
 Give it the project folder, the folder for the PDFs, and Chrome::
 
@@ -61,6 +61,9 @@ DOCUMENT_LINK: Final[re.Pattern[str]] = re.compile(
     r"^(?P<path>[^:#]*)\.md(?P<anchor>#.*)?$"
 )
 """A link to another document: a relative path ending in .md, perhaps an anchor."""
+
+DISPLAY_MATH: Final[re.Pattern[str]] = re.compile(r"^\$\$\n(.*?)^\$\$$", re.M | re.S)
+"""A display-maths block: LaTeX between two lines that are each ``$$``."""
 
 STYLE: Final = """
 body { font-family: sans-serif; font-size: 10pt; line-height: 1.4; margin: 0 1.5cm; }
@@ -117,12 +120,12 @@ def _fence(
     env: EnvType,
     renderer: RendererHTML,
 ) -> str:
-    """Render a fenced block: mermaid for mermaid, display maths for LaTeX."""
+    """Render a fenced block: mermaid for mermaid, display maths for math."""
     token = tokens[idx]
     language = token.info.strip()
     if language == "mermaid":
         return f'<pre class="mermaid">{html.escape(token.content)}</pre>\n'
-    if language == "latex":
+    if language == "math":
         return f'<div class="math">$$\n{html.escape(token.content)}$$</div>\n'
     return renderer.fence(tokens, idx, options, env)
 
@@ -136,7 +139,15 @@ def _pdf_link(href: str) -> str:
 
 
 def to_html(markdown: str) -> str:
-    """Turn a document's Markdown into HTML."""
+    """Turn a document's Markdown into HTML.
+
+    Each display-maths block is first made a fenced block of language
+    ``math``, so Markdown leaves its LaTeX as it is, its underscores and
+    backslashes included.
+    """
+    markdown = DISPLAY_MATH.sub(
+        lambda display_math: f"```math\n{display_math[1]}```", markdown
+    )
     converter = MarkdownIt("commonmark", {"html": True}).enable("table")
 
     def fence(

@@ -4,8 +4,9 @@ The rules covered: the documents are the README at the top of the project
 and every Markdown file under ``docs/``, reports included, each made into a
 PDF of the same name under the output folder, in the same folders; a
 document's Markdown becomes HTML with its tables, its mermaid blocks left
-for mermaid to draw and its LaTeX blocks set as display mathematics for
-MathJax, its marker comments not shown, and its links to other documents
+for mermaid to draw and its display maths, LaTeX between two lines of $$,
+set for MathJax with its text as written, while a fenced latex block stays
+code, its marker comments not shown, and its links to other documents
 pointing at their PDFs; the page loads fixed versions of mermaid and
 MathJax, each checked against its hash, and never changes the case of its
 text; Chrome is run headless on
@@ -91,10 +92,24 @@ def test_a_mermaid_block_is_left_for_mermaid_to_draw() -> None:
     assert '<pre class="mermaid">flowchart LR\n    A --&gt; B\n</pre>' in html
 
 
-def test_a_latex_block_is_display_mathematics() -> None:
-    """Give a LaTeX block between $$ marks, for MathJax, its text escaped."""
-    html = pdfs.to_html("```latex\nx < y\n```\n")
+def test_display_maths_is_left_for_mathjax() -> None:
+    """Give a $$ block between $$ marks, for MathJax, its text escaped."""
+    html = pdfs.to_html("Before.\n\n$$\nx < y\n$$\n\nAfter.\n")
     assert '<div class="math">$$\nx &lt; y\n$$</div>' in html
+    assert "<p>Before.</p>" in html
+    assert "<p>After.</p>" in html
+
+
+def test_display_maths_keeps_its_backslashes() -> None:
+    """Keep the LaTeX as written; Markdown drops a backslash before a brace."""
+    html = pdfs.to_html("$$\nG = \\max\\left\\{ n : x_{n} \\right\\}\n$$\n")
+    assert "$$\nG = \\max\\left\\{ n : x_{n} \\right\\}\n$$" in html
+
+
+def test_a_fenced_latex_block_stays_code() -> None:
+    """Give a fenced latex block as code: display maths is written between $$."""
+    html = pdfs.to_html("```latex\nx\n```\n")
+    assert '<pre><code class="language-latex">x\n</code></pre>' in html
 
 
 def test_another_code_block_stays_code() -> None:

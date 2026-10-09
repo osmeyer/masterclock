@@ -1425,6 +1425,44 @@ def test_a_second_difference_past_the_limit_stays_dormant() -> None:
     ]
 
 
+FAR_RATE_PS: Final = 24_000
+"""How far an invented clock moves each epoch, ps: far off frequency, yet
+steady, so its three measurements agree."""
+
+
+@pytest.mark.parametrize("filter_states", [3, 2, 1])
+def test_a_cold_start_takes_the_rate_its_measurements_show(
+    filter_states: Literal[1, 2, 3],
+) -> None:
+    """Start at the three's mean rate (z3 - z1) / 2T; one state at no rate (8.6)."""
+    M = {3: 100.0, 2: 30.0, 1: None}[filter_states]
+    series_params = make_series_params(filter_states=filter_states, M=M)
+    previous_row = dormant_row(
+        1_000.0, 1_000.0 + FAR_RATE_PS, filter_states=filter_states, time_constant=M
+    )
+    row = estimator.acquire(
+        moved_on(previous_row), 1_000 + 2 * FAR_RATE_PS + 10, series_params
+    )
+    assert "A" in row.flags
+    expected_rate = 0.0 if filter_states == 1 else (2 * FAR_RATE_PS + 10) / (2 * T)
+    assert (row.y, row.d) == (expected_rate, 0.0)
+
+
+def test_a_clock_far_off_frequency_is_followed_from_its_cold_start() -> None:
+    """Accept the readings after a cold start of a clock moving far every epoch (U25).
+
+    Started at no rate, the next reading would lie FAR_RATE_PS off, far
+    outside the gate, and be rejected.
+    """
+    series_params = make_series_params(filter_states=2, M=30.0)
+    measurements = [1_000 + FAR_RATE_PS * k for k in range(6)]
+    step_rows = run_epochs(
+        measurements, series_params, dormant_row(filter_states=2, time_constant=30.0)
+    )
+    assert [row.flags for row in step_rows] == ["RD", "RD", "ANU", "AU", "AU", "AU"]
+    assert all(row.innovation == 0.0 for row in step_rows[3:])
+
+
 def test_three_measurements_from_epochs_apart_do_not_cold_start() -> None:
     """Need three measurements from consecutive epochs, not just three."""
     buffer_entries = ((EPOCH_START - 3 * EPOCH_LENGTH, 1_000.0), (EPOCH_START, 1_000.0))

@@ -20,10 +20,11 @@ state (:func:`accept`); a rejected, excluded or missing one leaves the
 prediction standing (:func:`hold`); a series with no valid state is dormant
 (:func:`dormant`): it buffers its measurements (:func:`acquire`, decycled
 against :func:`anchor_of`) until three agree, and starts again from the
-third alone (:func:`cold_start`). :func:`finish` builds the row from the
-draft once, and checks it. Every row goes into the series' file but a
-dormant one with no measurement (:func:`writes_row`). A disabled pair is not
-tracked at all: :func:`disabled_step` gives its row, of flag O alone.
+third, at the rate the three show (:func:`cold_start`). :func:`finish`
+builds the row from the draft once, and checks it. Every row goes into the
+series' file but a dormant one with no measurement (:func:`writes_row`). A
+disabled pair is not tracked at all: :func:`disabled_step` gives its row, of
+flag O alone.
 
 A measurement is accepted when it passes the gate (:func:`within_gate`,
 :func:`rms_ok`). One that fails is a counted reject (:func:`count_reject`),
@@ -695,8 +696,10 @@ def accept(
     return finish(draft, "A")
 
 
-def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
-    """Finish a draft as a cold start: a new segment from the measurement alone.
+def cold_start(
+    draft: RowDraft, z: int, series_params: SeriesParams, *, rate: float = 0.0
+) -> Row:
+    """Finish a draft as a cold start: a new segment from the measurement.
 
     Parameters
     ----------
@@ -708,14 +711,17 @@ def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
     series_params : SeriesParams
         The settings in force, whose time constants and ``sigma0`` the new
         segment takes.
+    rate : float, optional
+        The rate the measurements acquired from show, ps/s; a 1-state
+        series has none and starts at 0 whatever is given.
 
     Returns
     -------
     Row
-        A new segment at phase ``z`` with no rate or drift, the innovation
-        scale the draft kept, else ``sigma0`` (design 8.6), step offset,
-        counters, reject fraction and buffer at 0, flags A and N, and U for
-        a 2- or 3-state series.
+        A new segment at phase ``z`` with rate ``rate`` (0 for one state)
+        and no drift, the innovation scale the draft kept, else ``sigma0``
+        (design 8.6), step offset, counters, reject fraction and buffer at
+        0, flags A and N, and U for a 2- or 3-state series.
 
     Raises
     ------
@@ -724,7 +730,8 @@ def cold_start(draft: RowDraft, z: int, series_params: SeriesParams) -> Row:
         finished row breaks a rule of :class:`Row`.
     """
     start_segment(draft, series_params, keep_offset=False)
-    draft.x_fs, draft.y, draft.d = to_fs(z), 0.0, 0.0
+    draft.x_fs, draft.d = to_fs(z), 0.0
+    draft.y = 0.0 if draft.filter_states == 1 else rate
     if draft.innovation_scale is None:
         draft.innovation_scale = series_params.sigma0
     draft.reject_fraction = 0.0
@@ -1151,7 +1158,7 @@ def acquire(
         :data:`~masterclock.domain.series.MAX_REJECTS` kept, holds three
         measurements from consecutive epochs whose second difference
         z3 - 2 z2 + z1 is at most :data:`_ACQUIRE_LIMIT` sigma0 either way
-        (design 13.3).
+        (design 13.3), at their mean rate (z3 - z1) / 2T (design 8.6).
         Otherwise a dormant R row keeping that buffer, with no counted
         rejects and epochs since an accept as they were.
 
@@ -1169,7 +1176,8 @@ def acquire(
     if len(draft.rejects) == MAX_REJECTS and _consecutive(draft.rejects):
         z1, z2, z3 = (exact(buffered_z) for _, buffered_z in draft.rejects)
         if abs(z3 - 2 * z2 + z1) <= exact(_ACQUIRE_LIMIT * series_params.sigma0):
-            return cold_start(draft, z, series_params)
+            rate = float((z3 - z1) / (2 * _T))
+            return cold_start(draft, z, series_params, rate=rate)
     return dormant(draft, "R", keep_buffer=True, keep_scale=True)
 
 

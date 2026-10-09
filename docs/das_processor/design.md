@@ -1,6 +1,6 @@
 # das_processor design
 
-**Date:** 2026-10-08 17:56:45 UTC
+**Date:** 2026-10-09 01:42:15 UTC
 
 This document describes how `das_processor` turns the laboratory's raw clock comparisons into the measurement and double-difference archives: the data, the algorithms, the mathematics and the files.
 It is written for a reader new to the project; the [README](../../README.md) gives the subject in brief, and the [requirements](requirements.md) say what the program must do.
@@ -1746,10 +1746,11 @@ The gains at a range of time constants, as the estimator works them out:
 
 ### 8.6 Cold start
 
-A cold start begins a new segment from the current measurement alone.
+A cold start begins a new segment from the current measurement, at the rate shown by the three measurements it acquired from.
 It happens when a dormant series acquires (§13.3).
 
-- State: X = [z_E, 0, 0]ᵀ for 3 states, [z_E, 0]ᵀ for 2 and [z_E] for 1.
+- State: X = [z_E, ŷ, 0]ᵀ for 3 states, [z_E, ŷ]ᵀ for 2 and [z_E] for 1, where ŷ = (z₃ − z₁)/2T is the mean rate of the three measurements it acquired from, z₃ = z_E.
+  Started at no rate, a clock far off frequency would have its next readings rejected until a frequency step caught up with it.
 - Innovation scale: σ_ν = σ₀, unless the series went dormant on its reject fraction (§9.4): then the scale it had reached, kept on its dormant rows.
   A series whose readings scatter far more than σ₀ allows rejects most of them, and a rejected reading never widens σ_ν; restarting it at σ₀ each time would only repeat that, so the scale it had learned is kept.
   Every other way of going dormant, N_break, the gap limit or a pair's restart, starts again from σ₀.
@@ -2532,7 +2533,7 @@ A series with no row for the epoch before E starts at E as a new series does (§
 Acquisition: a dormant series starts again only once its measurements agree with each other again.
 While it is dormant, its reject buffer holds its last measurements as (epoch, z) instead of innovations, and a pair decycles each new measurement against the last of them (§7.5), or with no whole periods added when the buffer is empty, as it is after the gap limit or a reading over the RMS limit.
 A pair's reading over its RMS limit is never buffered: it empties the buffer, so the three a series acquires from each passed the RMS limit.
-The series cold-starts (§8.6) from the current measurement when the buffer holds three measurements from consecutive epochs whose second difference passes:
+The series cold-starts (§8.6) from the current measurement, at the three measurements' mean rate, when the buffer holds three measurements from consecutive epochs whose second difference passes:
 
 ```latex
 \left| z_3 - 2z_2 + z_1 \right| \le 5\sqrt{6}\,\sigma_0
@@ -2575,7 +2576,7 @@ A triple also goes dormant from any state when a pair it uses restarts (§12.6),
 
 | Event | Segment | State after | step_offset | Flags on the row |
 | --- | --- | --- | --- | --- |
-| Cold start: a dormant series acquires (§13.3) | new | [z_E, 0, 0], σ_ν = σ₀ or the scale kept (§8.6) | 0 | A N, and U for 2 or 3 states |
+| Cold start: a dormant series acquires (§13.3) | new | [z_E, ŷ, 0], σ_ν = σ₀ or the scale kept (§8.6) | 0 | A N, and U for 2 or 3 states |
 | Frequency step | new | X⁻ + (a + s t₃, s, 0), then updated | carried | A N U |
 | Configuration change | new | X⁻ carried; same model | carried | N and the outcome |
 | Phase step | same | X⁻ + (Δ, 0, 0), then updated | + Δ | A |
@@ -2635,7 +2636,8 @@ def acquire(draft, z, series_params, in_limit=True):
         z1, z2, z3 = (exact(buffered_z) for _, buffered_z in draft.rejects)
         limit = exact(K_OUT * math.sqrt(6) * series_params.sigma0)  # compared exactly
         if abs(z3 - 2 * z2 + z1) <= limit:
-            return cold_start(draft, z, series_params)
+            rate = float((z3 - z1) / (2 * T))  # the three's mean rate; 0 for 1 state
+            return cold_start(draft, z, series_params, rate=rate)
     return dormant(draft, "R", keep_buffer=True, keep_scale=True)
 
 
@@ -3036,7 +3038,7 @@ A test that carries one of these identifiers in its docstring is a test of that 
 | U22 | Determinism | Run twice; run with a restart after every epoch; run one epoch per process, each with another hash seed | Byte-identical data files; logs not compared |
 | U23 | Self-measurement | A shift in (r, r) shared by half of r's pairs; a shift in (r, r) alone; (r, r) missing | Only the sharing pairs excluded; then none; then none, with a warning |
 | U24 | 1-state pass-through | A 1-state series given accepted measurements, outliers and a phase step | x = z exactly on every accepted row; y and d 0.0; no U flag; outliers rejected and the step accepted as for any series |
-| U25 | Acquisition | A dormant series given scattered measurements, then a gap, then steady measurements with a large constant rate, a wrap included | Stays dormant through the scatter; cold-starts on the third steady measurement |
+| U25 | Acquisition | A dormant series given scattered measurements, then a gap, then steady measurements with a large constant rate, a wrap included; a clock moving far every epoch | Stays dormant through the scatter; cold-starts on the third steady measurement, at the rate the three show, and accepts the readings after it |
 | U26 | File length | A file cut inside its last row; cut inside its header; holding only its header; with a row of the wrong length inside it; with a first row that does not parse | Every file cut back to the damaged file's last good row, the damage logged at ERROR, and the data files then byte-identical to an uninterrupted run's; a file with no whole row, or a damaged first row, raises `DataFileError` and changes no file |
 | U27 | Exact phase | Prediction, referring back, update and double difference with phases beyond 2⁵³, and sums ending in exactly ½ | Every stored phase equals the same sum done exactly and rounded half to even |
 | U28 | Series that stop | A clock's measurements stop for longer than G_max, then come back; a data gap no series writes; run in one go and one epoch per run, with and without workers | P rows up to G_max, then no row, and one INFO line when it stops; on its return, rows again, dormant; an epoch that writes no row is not counted as a step; data files byte-identical every way |
